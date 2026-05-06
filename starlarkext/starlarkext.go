@@ -14,6 +14,17 @@ import (
 
 // SetupExtensions injects all standard library extensions into the given dict
 func SetupExtensions(env starlark.StringDict, restricted bool) {
+	// Cloud providers
+	SetupAWSAPI(env)
+	SetupOCIAPI(env)
+	SetupGCPAPI(env)
+
+	// VCS: git + GitHub
+	SetupVCSAPI(env)
+
+	// Ephemeral containers with audit trail
+	SetupContainersAPI(env)
+
 	// Security
 	SetupSecurityAPI(env, restricted)
 	// Crypto

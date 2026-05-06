@@ -29,9 +29,10 @@ var shellBuiltins = []string{
 
 var starlarkNamespaces = []string{
 	"sys", "net", "crypto", "data", "re", "sec", "i18n", "cloud", "plugins",
+	"aws", "oci", "gcp", "git", "github", "containers",
 }
 
-// starlarkNamespaceKeys maps namespace → list of method names.
+// starlarkNamespaceKeys maps namespace → list of method/sub-namespace names.
 var starlarkNamespaceKeys = map[string][]string{
 	"sys":    {"getenv", "setenv", "load_plugin", "read_file", "write_file", "exec_cmd", "exec_async", "exec_json", "register_command"},
 	"net":    {"tcp_send", "http_get"},
@@ -41,6 +42,23 @@ var starlarkNamespaceKeys = map[string][]string{
 	"sec":    {"audit", "is_restricted", "file_hash"},
 	"i18n":   {"load", "set_lang", "T"},
 	"cloud":  {"gen"},
+	// Cloud providers
+	"aws":        {"ec2", "s3", "ecs", "lambda"},
+	"aws.ec2":    {"list_instances", "start_instance", "stop_instance", "terminate_instance"},
+	"aws.s3":     {"list_buckets", "get_object", "put_object", "delete_object"},
+	"aws.ecs":    {"list_clusters", "list_services"},
+	"aws.lambda": {"list_functions", "invoke"},
+	"oci":             {"compute", "storage"},
+	"oci.compute":     {"list_instances", "start_instance", "stop_instance"},
+	"oci.storage":     {"list_buckets", "get_object", "put_object", "delete_object"},
+	"gcp":             {"compute", "storage"},
+	"gcp.compute":     {"list_instances", "start_instance", "stop_instance"},
+	"gcp.storage":     {"list_buckets", "get_object", "put_object", "delete_object"},
+	// VCS
+	"git":    {"clone", "open", "status", "add", "commit", "push", "pull", "log"},
+	"github": {"list_repos", "list_prs", "create_pr", "merge_pr", "list_issues", "create_issue", "close_issue", "create_release", "list_workflows", "trigger_workflow"},
+	// Containers
+	"containers": {"exec", "list", "audit", "replay", "clean"},
 }
 
 var mirrorSubcmds = []string{"list", "view", "console"}
