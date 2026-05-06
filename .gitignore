@@ -1,0 +1,18 @@
+# Binary
+adssh
+
+# Plugin shared objects (built locally)
+*.so
+
+# Test artifacts
+test_env
+
+# Audit and history logs
+~/.adssh_audit.log
+~/.adssh_history
+
+# macOS
+.DS_Store
+
+# VSCode
+.vscode/

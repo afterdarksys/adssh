@@ -1,0 +1,6 @@
+# Test script for the CGO Go Plugin
+sys["load_plugin"]("./example_plugin/plugin.so")
+
+print("Calculating 40th Fibonacci natively via CGO Plugin...")
+result = plugins["math_accel"]["fibonacci"](40)
+print("Result:", result)
