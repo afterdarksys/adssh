@@ -29,7 +29,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. YAML entitlements are no longer the auth backend; Rego is the sole authorization source
   4. An existing YAML entitlement can be expressed as an equivalent Rego policy with the same allow/deny outcome
   5. Policy evaluation result (allow/deny/reason) appears in the audit log, and `sec.*` Starlark namespace exposes policy evaluation to scripts
-**Plans**: TBD
+**Plans:** 3 plans
+Plans:
+- [ ] 01-01-PLAN.md — OPA engine core + config wiring + startup loading
+- [ ] 01-02-PLAN.md — Interceptor integration + audit logging
+- [ ] 01-03-PLAN.md — sec.check_policy builtin + example/migration policies
 
 ### Phase 2: MCP Server
 **Goal**: Claude (or any MCP client) can connect to adssh-mcp and execute shell, Starlark, cloud, and container operations through a policy-enforced interface
@@ -65,11 +69,11 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Policy Engine | 0/TBD | Not started | - |
+| 1. Policy Engine | 0/3 | Not started | - |
 | 2. MCP Server | 0/TBD | Not started | - |
 | 3. Claude Code Skill | 0/TBD | Not started | - |
 | 4. ADSSHA Agent | 0/TBD | Not started | - |
