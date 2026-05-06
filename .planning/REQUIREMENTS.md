@@ -11,7 +11,7 @@
 - [x] **POL-02**: Policy context includes: user, groups, command, args, time, session ID
 - [x] **POL-03**: Rego engine replaces YAML entitlements as the authorization backend
 - [ ] **POL-04**: Existing YAML entitlements can be migrated to equivalent Rego policies
-- [ ] **POL-05**: Policy evaluation result (allow/deny/reason) is recorded in the audit log
+- [x] **POL-05**: Policy evaluation result (allow/deny/reason) is recorded in the audit log
 - [ ] **POL-06**: sec.* Starlark namespace exposes policy evaluation to scripts
 
 ### MCP Server
@@ -66,7 +66,7 @@
 | POL-02 | Phase 1 | Complete |
 | POL-03 | Phase 1 | Complete |
 | POL-04 | Phase 1 | Pending |
-| POL-05 | Phase 1 | Pending |
+| POL-05 | Phase 1 | Complete |
 | POL-06 | Phase 1 | Pending |
 | MCP-01 | Phase 2 | Pending |
 | MCP-02 | Phase 2 | Pending |
