@@ -36,3 +36,11 @@ func LogEvent(event string) {
 		auditLogger.Println(event)
 	}
 }
+
+// LogPolicyDecision records a Rego policy evaluation result in the audit log.
+func LogPolicyDecision(user, command string, allowed bool, denyReason string) {
+	if auditLogger != nil {
+		auditLogger.Printf("[POLICY] user=%s command=%s allowed=%v reason=%q\n",
+			user, command, allowed, denyReason)
+	}
+}
