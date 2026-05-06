@@ -12,7 +12,7 @@ v1.0 delivers the AI-ready layer on top of adssh's existing programmable shell f
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Policy Engine** - Replace YAML entitlements with Rego/OPA as the authorization backend
+- [x] **Phase 1: Policy Engine** - Replace YAML entitlements with Rego/OPA as the authorization backend (completed 2026-05-06)
 - [ ] **Phase 2: MCP Server** - Build the adssh-mcp binary exposing shell and cloud capabilities to AI clients
 - [ ] **Phase 3: Claude Code Skill** - Write the skill file that teaches Claude how to operate adssh
 - [ ] **Phase 4: ADSSHA Agent** - Define the DevOps AI agent that lives inside the shell
@@ -29,11 +29,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. YAML entitlements are no longer the auth backend; Rego is the sole authorization source
   4. An existing YAML entitlement can be expressed as an equivalent Rego policy with the same allow/deny outcome
   5. Policy evaluation result (allow/deny/reason) appears in the audit log, and `sec.*` Starlark namespace exposes policy evaluation to scripts
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 Plans:
 - [x] 01-01-PLAN.md — OPA engine core + config wiring + startup loading
 - [x] 01-02-PLAN.md — Interceptor integration + audit logging
-- [ ] 01-03-PLAN.md — sec.check_policy builtin + example/migration policies
+- [x] 01-03-PLAN.md — sec.check_policy builtin + example/migration policies
 
 ### Phase 2: MCP Server
 **Goal**: Claude (or any MCP client) can connect to adssh-mcp and execute shell, Starlark, cloud, and container operations through a policy-enforced interface
@@ -73,7 +73,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Policy Engine | 2/3 | In Progress|  |
+| 1. Policy Engine | 3/3 | Complete   | 2026-05-06 |
 | 2. MCP Server | 0/TBD | Not started | - |
 | 3. Claude Code Skill | 0/TBD | Not started | - |
 | 4. ADSSHA Agent | 0/TBD | Not started | - |
