@@ -29,9 +29,9 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. YAML entitlements are no longer the auth backend; Rego is the sole authorization source
   4. An existing YAML entitlement can be expressed as an equivalent Rego policy with the same allow/deny outcome
   5. Policy evaluation result (allow/deny/reason) appears in the audit log, and `sec.*` Starlark namespace exposes policy evaluation to scripts
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 Plans:
-- [ ] 01-01-PLAN.md — OPA engine core + config wiring + startup loading
+- [x] 01-01-PLAN.md — OPA engine core + config wiring + startup loading
 - [ ] 01-02-PLAN.md — Interceptor integration + audit logging
 - [ ] 01-03-PLAN.md — sec.check_policy builtin + example/migration policies
 
@@ -73,7 +73,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Policy Engine | 0/3 | Not started | - |
+| 1. Policy Engine | 1/3 | In Progress|  |
 | 2. MCP Server | 0/TBD | Not started | - |
 | 3. Claude Code Skill | 0/TBD | Not started | - |
 | 4. ADSSHA Agent | 0/TBD | Not started | - |
