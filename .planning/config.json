@@ -1,0 +1,12 @@
+{
+  "project_code": "ADSSH",
+  "project_title": "adssh",
+  "workflow": {
+    "skip_discuss": true,
+    "research": false,
+    "code_review": true,
+    "ui_phase": false,
+    "ui_review": false
+  },
+  "commit_docs": true
+}
