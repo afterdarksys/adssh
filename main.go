@@ -42,6 +42,9 @@ func main() {
 		case (arg == "--entitlements") && i+1 < len(os.Args):
 			cfg.EntitlementsPath = os.Args[i+1]
 			i++
+		case (arg == "--policy") && i+1 < len(os.Args):
+			cfg.PolicyPath = os.Args[i+1]
+			i++
 		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "":
 			cfg.ScriptPath = arg
 		}
@@ -57,6 +60,13 @@ func main() {
 		} else {
 			security.LogEvent(fmt.Sprintf("Entitlements loaded from %s", cfg.EntitlementsPath))
 		}
+	}
+
+	// 4b. Load Rego policy engine
+	if err := security.LoadPolicy(cfg.PolicyPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load policy from %s: %v\n", cfg.PolicyPath, err)
+	} else {
+		security.LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath))
 	}
 
 	// 5. Setup signal handling and terminal

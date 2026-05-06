@@ -21,12 +21,14 @@ import (
 //	ADSSH_AUTHORIZED_KEYS=/p   Path to SSH authorized_keys  (default: ~/.adssh/authorized_keys)
 //	ADSSH_PROFILE=/path        Path to login profile script (default: ~/.adsshprofile)
 //	ADSSH_RC=/path             Path to interactive RC script (default: ~/.adsshrc)
+//	ADSSH_POLICY=/path         Path to Rego policy file     (default: ~/.adssh/policy.rego)
 type AppConfig struct {
 	Restricted         bool
 	ServeAddr          string
 	ScriptPath         string
 	IsLoginShell       bool
 	EntitlementsPath   string
+	PolicyPath         string
 	AuditLogPath       string
 	HistoryFile        string
 	HostKeyPath        string
@@ -45,6 +47,7 @@ func LoadFromEnv() AppConfig {
 		Restricted:         isTruthy(os.Getenv("ADSSH_RESTRICTED")),
 		ServeAddr:          os.Getenv("ADSSH_SERVE"),
 		EntitlementsPath:   os.Getenv("ADSSH_ENTITLEMENTS"),
+		PolicyPath:         envOr("ADSSH_POLICY", filepath.Join(adsshDir, "policy.rego")),
 		AuditLogPath:       envOr("ADSSH_AUDIT_LOG", filepath.Join(adsshDir, "audit.log")),
 		HistoryFile:        envOr("ADSSH_HISTORY", filepath.Join(adsshDir, "history")),
 		HostKeyPath:        envOr("ADSSH_HOST_KEY", filepath.Join(adsshDir, "host_key")),
