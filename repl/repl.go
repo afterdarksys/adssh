@@ -72,21 +72,19 @@ func (h hybridEnv) Each(fn func(name string, vr expand.Variable) bool) {
 	}
 }
 
-func Start(globals starlark.StringDict, restricted bool, in io.ReadCloser, out io.Writer, errOut io.Writer) {
+func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
 	// Inject standard library extensions into Starlark environment
 	starlarkext.SetupExtensions(globals, restricted)
 
 	thread := &starlark.Thread{Name: "repl"}
 
-	// Load History file path
-	homeDir, _ := os.UserHomeDir()
-	historyFile := filepath.Join(homeDir, ".adssh_history")
-
-	// Pre-create history file with strict permissions
-	if _, err := os.Stat(historyFile); os.IsNotExist(err) {
-		os.WriteFile(historyFile, []byte(""), 0600)
-	} else {
-		os.Chmod(historyFile, 0600) // Enforce on existing
+	// Ensure the history file exists with strict permissions
+	if err := os.MkdirAll(filepath.Dir(historyFile), 0700); err == nil {
+		if _, err := os.Stat(historyFile); os.IsNotExist(err) {
+			os.WriteFile(historyFile, []byte(""), 0600)
+		} else {
+			os.Chmod(historyFile, 0600)
+		}
 	}
 
 	// Initialize readline

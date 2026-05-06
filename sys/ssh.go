@@ -18,26 +18,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func adsshDir() (string, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(homeDir, ".adssh")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create %s: %v", dir, err)
-	}
-	return dir, nil
-}
-
-// loadOrGenerateHostKey loads the persistent SSH host key from ~/.adssh/host_key,
+// loadOrGenerateHostKey loads the persistent SSH host key from keyPath,
 // generating and saving a new RSA 4096 key if one does not exist.
-func loadOrGenerateHostKey() (ssh.Signer, error) {
-	dir, err := adsshDir()
-	if err != nil {
-		return nil, err
+func loadOrGenerateHostKey(keyPath string) (ssh.Signer, error) {
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
+		return nil, fmt.Errorf("failed to create key directory: %v", err)
 	}
-	keyPath := filepath.Join(dir, "host_key")
 
 	if data, err := os.ReadFile(keyPath); err == nil {
 		if signer, err := ssh.ParsePrivateKey(data); err == nil {
@@ -64,14 +50,9 @@ func loadOrGenerateHostKey() (ssh.Signer, error) {
 	return ssh.ParsePrivateKey(privateKeyPEM)
 }
 
-// loadAuthorizedKeys reads public keys from ~/.adssh/authorized_keys.
+// loadAuthorizedKeys reads public keys from authKeysPath.
 // Returns nil, nil if the file does not exist.
-func loadAuthorizedKeys() (map[string]bool, error) {
-	dir, err := adsshDir()
-	if err != nil {
-		return nil, err
-	}
-	authKeysPath := filepath.Join(dir, "authorized_keys")
+func loadAuthorizedKeys(authKeysPath string) (map[string]bool, error) {
 
 	data, err := os.ReadFile(authKeysPath)
 	if err != nil {
@@ -93,17 +74,17 @@ func loadAuthorizedKeys() (map[string]bool, error) {
 	return authorizedKeys, nil
 }
 
-func StartSSHServer(address string, globals starlark.StringDict, restricted bool, replStartFn func(starlark.StringDict, bool, io.ReadCloser, io.Writer, io.Writer)) {
-	authorizedKeys, err := loadAuthorizedKeys()
+func StartSSHServer(address, hostKeyPath, authorizedKeysPath string, globals starlark.StringDict, restricted bool, replStartFn func(starlark.StringDict, bool, string, io.ReadCloser, io.Writer, io.Writer)) {
+	authorizedKeys, err := loadAuthorizedKeys(authorizedKeysPath)
 	if err != nil {
 		log.Fatalf("Failed to load authorized keys: %v", err)
 	}
 	if len(authorizedKeys) == 0 {
 		log.Fatalf(
-			"No authorized keys found.\n"+
+			"No authorized keys found in %s\n"+
 				"Add your public key to allow SSH access:\n"+
-				"  mkdir -p ~/.adssh\n"+
-				"  cat ~/.ssh/id_ed25519.pub >> ~/.adssh/authorized_keys",
+				"  cat ~/.ssh/id_ed25519.pub >> %s",
+			authorizedKeysPath, authorizedKeysPath,
 		)
 	}
 
@@ -120,7 +101,7 @@ func StartSSHServer(address string, globals starlark.StringDict, restricted bool
 		},
 	}
 
-	signer, err := loadOrGenerateHostKey()
+	signer, err := loadOrGenerateHostKey(hostKeyPath)
 	if err != nil {
 		log.Fatalf("Failed to load/generate host key: %v", err)
 	}
@@ -139,7 +120,7 @@ func StartSSHServer(address string, globals starlark.StringDict, restricted bool
 			log.Printf("Failed to accept incoming connection: %v", err)
 			continue
 		}
-		go handleSSHConnection(nConn, config, globals, restricted, replStartFn)
+		go handleSSHConnection(nConn, config, globals, restricted, hostKeyPath, replStartFn)
 	}
 }
 
@@ -147,7 +128,7 @@ type sshReadCloser struct {
 	ssh.Channel
 }
 
-func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starlark.StringDict, restricted bool, replStartFn func(starlark.StringDict, bool, io.ReadCloser, io.Writer, io.Writer)) {
+func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starlark.StringDict, restricted bool, historyFile string, replStartFn func(starlark.StringDict, bool, string, io.ReadCloser, io.Writer, io.Writer)) {
 	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
 	if err != nil {
 		log.Printf("Failed to handshake: %v", err)
@@ -219,7 +200,7 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starl
 			go io.Copy(outCast, ptyMaster)
 			go io.Copy(ptyMaster, channel)
 
-			replStartFn(env, restricted, ptySlave, ptySlave, ptySlave)
+			replStartFn(env, restricted, historyFile, ptySlave, ptySlave, ptySlave)
 		}(sessionGlobals)
 	}
 }

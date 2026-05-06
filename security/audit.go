@@ -9,11 +9,17 @@ import (
 
 var auditLogger *log.Logger
 
-func init() {
-	homeDir, _ := os.UserHomeDir()
-	logFile, err := os.OpenFile(filepath.Join(homeDir, ".adssh_audit.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+// InitAuditLog initialises the audit logger at the given path.
+// The directory is created if it does not exist.
+// Called once at startup with the path from AppConfig.
+func InitAuditLog(path string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to create audit log directory: %v\n", err)
+		return
+	}
+	logFile, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize audit logger: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to initialize audit logger at %s: %v\n", path, err)
 		return
 	}
 	auditLogger = log.New(logFile, "AUDIT: ", log.Ldate|log.Ltime)

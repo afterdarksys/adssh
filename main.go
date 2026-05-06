@@ -10,6 +10,7 @@ import (
 
 	"adssh/config"
 	"adssh/repl"
+	"adssh/security"
 	"adssh/starlarkext"
 	"adssh/sys"
 )
@@ -22,58 +23,68 @@ func init() {
 }
 
 func main() {
-	var restricted bool
-	var serveAddr string
-	var scriptPath string
+	// 1. Load configuration from ADSSH_* environment variables (provides defaults)
+	cfg := config.LoadFromEnv()
 
-	// Check if invoked as a login shell
-	isLoginShell := strings.HasPrefix(os.Args[0], "-")
+	// 2. Parse CLI flags — flags override env vars
+	cfg.IsLoginShell = strings.HasPrefix(os.Args[0], "-")
 
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
-		if arg == "-r" || arg == "--restricted" {
-			restricted = true
-		} else if arg == "-l" || arg == "--login" {
-			// explicitly set as login shell via flag
-			isLoginShell = true
-		} else if arg == "--serve" && i+1 < len(os.Args) {
-			serveAddr = os.Args[i+1]
+		switch {
+		case arg == "-r" || arg == "--restricted":
+			cfg.Restricted = true
+		case arg == "-l" || arg == "--login":
+			cfg.IsLoginShell = true
+		case (arg == "--serve") && i+1 < len(os.Args):
+			cfg.ServeAddr = os.Args[i+1]
 			i++
-		} else if !strings.HasPrefix(arg, "-") && scriptPath == "" {
-			scriptPath = arg
+		case (arg == "--entitlements") && i+1 < len(os.Args):
+			cfg.EntitlementsPath = os.Args[i+1]
+			i++
+		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "":
+			cfg.ScriptPath = arg
 		}
 	}
 
-	// 1. Setup Signal Handling
-	sys.SetupSignals()
+	// 3. Initialize audit logging
+	security.InitAuditLog(cfg.AuditLogPath)
 
-	// 2. Setup Terminal and Ioctl
-	err := sys.InitTerminal()
-	if err != nil {
+	// 4. Load RBAC entitlements (if a path was configured)
+	if cfg.EntitlementsPath != "" {
+		if err := security.LoadEntitlements(cfg.EntitlementsPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load entitlements from %s: %v\n", cfg.EntitlementsPath, err)
+		} else {
+			security.LogEvent(fmt.Sprintf("Entitlements loaded from %s", cfg.EntitlementsPath))
+		}
+	}
+
+	// 5. Setup signal handling and terminal
+	sys.SetupSignals()
+	if err := sys.InitTerminal(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize terminal: %v\n", err)
 	}
 
-	// 3. Load configuration (~/.adshprofile and ~/.adshrc)
+	// 6. Build Starlark environment and load profiles
 	thread := &starlark.Thread{Name: "main"}
 	globals := starlark.StringDict{}
-	// Inject standard library extensions
-	starlarkext.SetupExtensions(globals, restricted)
+	starlarkext.SetupExtensions(globals, cfg.Restricted)
 
-	env, err := config.LoadProfiles(thread, globals, isLoginShell)
+	env, err := config.LoadProfiles(thread, globals, cfg.IsLoginShell, cfg.ProfilePath, cfg.RCPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading profiles: %v\n", err)
 	}
 
-	// 4. Handle Execution Mode
-	if serveAddr != "" {
-		sys.StartSSHServer(serveAddr, env, restricted, repl.Start)
-	} else if scriptPath != "" {
-		_, err := starlark.ExecFile(thread, scriptPath, nil, env)
-		if err != nil {
+	// 7. Dispatch to the appropriate execution mode
+	switch {
+	case cfg.ServeAddr != "":
+		sys.StartSSHServer(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, env, cfg.Restricted, repl.Start)
+	case cfg.ScriptPath != "":
+		if _, err := starlark.ExecFile(thread, cfg.ScriptPath, nil, env); err != nil {
 			fmt.Fprintf(os.Stderr, "Execution error: %v\n", err)
 			os.Exit(1)
 		}
-	} else {
-		repl.Start(env, restricted, os.Stdin, os.Stdout, os.Stderr)
+	default:
+		repl.Start(env, cfg.Restricted, cfg.HistoryFile, os.Stdin, os.Stdout, os.Stderr)
 	}
 }
