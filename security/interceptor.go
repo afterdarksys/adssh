@@ -17,16 +17,28 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 			cmd := strings.Join(args, " ")
 			LogCommand("BASH", cmd)
 
+			// 0. Rego policy evaluation (primary authorization)
+			pctx := BuildPolicyContext(args[0], args[1:], "")
+			allowed, reason, policyErr := EvaluatePolicy(pctx)
+			if policyErr != nil {
+				return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
+			}
+			if !allowed {
+				LogPolicyDecision(pctx.User, cmd, false, reason)
+				if reason != "" {
+					return fmt.Errorf("adssh: access denied: %s", reason)
+				}
+				return fmt.Errorf("adssh: access denied for '%s' by policy", args[0])
+			}
+			LogPolicyDecision(pctx.User, cmd, true, "")
+
 			// 1. Check for custom Starlark Commands
 			if globals != nil {
 				if dictVal, ok := globals["__custom_commands__"]; ok {
 					if dict, ok := dictVal.(*starlark.Dict); ok {
 						if cmdVal, found, _ := dict.Get(starlark.String(args[0])); found {
 							if callable, ok := cmdVal.(starlark.Callable); ok {
-								if !IsAuthorized(args[0]) {
-									return fmt.Errorf("adssh: access denied for custom command '%s' by RBAC policy", args[0])
-								}
-								// Found a custom Starlark command!
+								// Found a custom Starlark command — already authorized by Rego above
 								// Run it in a new Thread to ensure thread-safety for background Bash jobs
 								newThread := &starlark.Thread{Name: "bash-interceptor"}
 
@@ -45,12 +57,9 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 				}
 			}
 
-			// 2. Virtual DevOps Binaries
+			// 2. Virtual DevOps Binaries — already authorized by Rego above
 			isVirtual := args[0] == "jq" || args[0] == "yq" || args[0] == "http" || args[0] == "mirror" || args[0] == "cmdgen"
 			if isVirtual {
-				if !IsAuthorized(args[0]) {
-					return fmt.Errorf("adssh: access denied for virtual binary '%s' by RBAC policy", args[0])
-				}
 				if args[0] == "jq" {
 					return runVirtualJQ(ctx, args)
 				}
