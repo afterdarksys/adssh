@@ -70,7 +70,10 @@ Plans:
   1. ADSSHA agent definition (system prompt + MCP tool bindings) is written and reviewable
   2. Agent acts as a DevOps AI assistant with full shell and cloud access via MCP tools
   3. `sys.load_agent("adssha")` in a Starlark session loads and activates the agent definition
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 04-01-PLAN.md — ADSSHA agent definition file (system prompt + TOML frontmatter + MCP tool bindings)
+- [ ] 04-02-PLAN.md — sys.load_agent Go builtin (createLoadAgent + parseAgentFile + tests + sysDict injection)
 
 ## Progress
 
@@ -82,4 +85,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | 1. Policy Engine | 3/3 | Complete    | 2026-05-06 |
 | 2. MCP Server | 0/2 | Planning complete | - |
 | 3. Claude Code Skill | 0/2 | Planning complete | - |
-| 4. ADSSHA Agent | 0/TBD | Not started | - |
+| 4. ADSSHA Agent | 0/2 | Planning complete | - |
