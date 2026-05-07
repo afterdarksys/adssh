@@ -41,6 +41,8 @@ func parseAgentFile(content string) (agentFrontmatter, string, error) {
 // Anthropic API client, and returns a stateful callable that maintains
 // conversation history for the lifetime of the Starlark session.
 func createLoadAgent(env starlark.StringDict) *starlark.Builtin {
+	// env is reserved for future injection of Starlark globals into agent tool calls.
+	_ = env
 	return starlark.NewBuiltin("load_agent", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var name string
 		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "name", &name); err != nil {
