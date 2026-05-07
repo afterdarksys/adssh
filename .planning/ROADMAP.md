@@ -72,8 +72,8 @@ Plans:
   3. `sys.load_agent("adssha")` in a Starlark session loads and activates the agent definition
 **Plans:** 2 plans
 Plans:
-- [ ] 04-01-PLAN.md — ADSSHA agent definition file (system prompt + TOML frontmatter + MCP tool bindings)
-- [ ] 04-02-PLAN.md — sys.load_agent Go builtin (createLoadAgent + parseAgentFile + tests + sysDict injection)
+- [x] 04-01-PLAN.md — ADSSHA agent definition file (system prompt + TOML frontmatter + MCP tool bindings)
+- [x] 04-02-PLAN.md — sys.load_agent Go builtin (createLoadAgent + parseAgentFile + tests + sysDict injection)
 
 ## Progress
 
