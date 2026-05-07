@@ -57,7 +57,10 @@ Plans:
   1. `.claude/skills/adssh.md` exists and gives Claude actionable instructions for operating an adssh session
   2. Skill covers all four operational domains: session management, Starlark scripting, cloud queries, and container ops
   3. Skill documents how to connect to the MCP server and includes a complete tool reference with usage examples
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 03-01-PLAN.md — Companion reference document (.claude/adssh-reference.md)
+- [ ] 03-02-PLAN.md — SKILL.md trigger file + .mcp.json registration
 
 ### Phase 4: ADSSHA Agent
 **Goal**: A DevOps AI agent definition exists that binds the ADSSHA system prompt to MCP tools and is loadable from Starlark
@@ -78,5 +81,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. Policy Engine | 3/3 | Complete    | 2026-05-06 |
 | 2. MCP Server | 0/2 | Planning complete | - |
-| 3. Claude Code Skill | 0/TBD | Not started | - |
+| 3. Claude Code Skill | 0/2 | Planning complete | - |
 | 4. ADSSHA Agent | 0/TBD | Not started | - |
