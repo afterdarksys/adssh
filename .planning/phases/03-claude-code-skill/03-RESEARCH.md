@@ -498,7 +498,7 @@ Step 2.6: SKIPPED — this phase is documentation/file authoring only. No extern
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **How to register the companion reference as always-loaded**
    - What we know: `gsd-execute-phase/SKILL.md` uses `@$HOME/.claude/...` references in the skill body to load context files when the trigger fires
