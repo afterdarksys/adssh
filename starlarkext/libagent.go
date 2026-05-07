@@ -52,7 +52,10 @@ func createLoadAgent(env starlark.StringDict) *starlark.Builtin {
 			return starlark.None, fmt.Errorf("invalid agent name: must not contain path separators")
 		}
 
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return starlark.None, fmt.Errorf("cannot determine home directory: %v", err)
+		}
 		path := filepath.Join(home, ".adssh", "agents", name+".md")
 		data, err := os.ReadFile(path)
 		if err != nil {
