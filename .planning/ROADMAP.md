@@ -59,8 +59,8 @@ Plans:
   3. Skill documents how to connect to the MCP server and includes a complete tool reference with usage examples
 **Plans:** 2 plans
 Plans:
-- [ ] 03-01-PLAN.md — Companion reference document (.claude/adssh-reference.md)
-- [ ] 03-02-PLAN.md — SKILL.md trigger file + .mcp.json registration
+- [x] 03-01-PLAN.md — Companion reference document (.claude/adssh-reference.md)
+- [x] 03-02-PLAN.md — SKILL.md trigger file + .mcp.json registration
 
 ### Phase 4: ADSSHA Agent
 **Goal**: A DevOps AI agent definition exists that binds the ADSSHA system prompt to MCP tools and is loadable from Starlark
