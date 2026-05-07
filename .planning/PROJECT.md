@@ -22,8 +22,8 @@ Every shell command is auditable, policy-controlled, and scriptable from a singl
 
 ### Active
 
-- [ ] Rego/OPA policy engine replacing YAML entitlements
-- [ ] MCP server (cmd/adssh-mcp/) exposing Starlark env to Claude
+- ✓ Rego/OPA policy engine replacing YAML entitlements — Validated in Phase 01: policy-engine
+- ✓ MCP server (cmd/adssh-mcp/) exposing Starlark env to Claude — Validated in Phase 02: mcp-server
 - [ ] Claude Code skill for operating adssh sessions
 - [ ] ADSSHA agent — DevOps AI assistant living inside the shell
 
@@ -77,4 +77,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-06 after milestone v1.0 AI-ready layer start*
+*Last updated: 2026-05-07 — Phase 02 complete (MCP server with 6 policy-gated tools)*
