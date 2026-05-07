@@ -44,7 +44,10 @@ Plans:
   2. Claude can execute Starlark expressions and POSIX shell commands through the MCP tools, both with audit logging
   3. Claude can query active SSH sessions, cloud namespaces (aws/gcp/oci), ephemeral container commands, and recent audit log entries through dedicated MCP tools
   4. Every MCP tool invocation is evaluated by the Rego policy engine before execution — unauthorized calls are rejected
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Binary scaffold + MCP server core + eval_starlark + run_shell tools
+- [ ] 02-02-PLAN.md — list_sessions + cloud_query + container_exec + audit_log tools
 
 ### Phase 3: Claude Code Skill
 **Goal**: Claude has a complete, accurate skill file for operating adssh — session management, scripting, cloud queries, containers, and MCP connection
@@ -74,6 +77,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Policy Engine | 3/3 | Complete    | 2026-05-06 |
-| 2. MCP Server | 0/TBD | Not started | - |
+| 2. MCP Server | 0/2 | Planning complete | - |
 | 3. Claude Code Skill | 0/TBD | Not started | - |
 | 4. ADSSHA Agent | 0/TBD | Not started | - |
