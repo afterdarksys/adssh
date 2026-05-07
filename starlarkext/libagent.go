@@ -104,7 +104,17 @@ func createLoadAgent(env starlark.StringDict) *starlark.Builtin {
 			if len(resp.Content) == 0 {
 				return nil, fmt.Errorf("agent returned empty response (stop_reason: %s)", resp.StopReason)
 			}
-			text := resp.Content[0].Text
+			// Guard: extract text from the first TextBlock only.
+			var text string
+			for _, block := range resp.Content {
+				if block.Type == "text" {
+					text = block.Text
+					break
+				}
+			}
+			if text == "" {
+				return nil, fmt.Errorf("agent response contained no text block (stop_reason: %s, first block type: %s)", resp.StopReason, resp.Content[0].Type)
+			}
 			history = append(history, resp.ToParam())
 			return starlark.String(text), nil
 		}), nil
