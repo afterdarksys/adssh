@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "adssh": {
+      "command": "/Users/ryan/development/adssh/adssh-mcp",
+      "env": {
+        "ADSSH_MCP_API_KEY": "${ADSSH_MCP_API_KEY}",
+        "ADSSH_POLICY": "${HOME}/.adssh/policy.rego"
+      }
+    }
+  }
+}
