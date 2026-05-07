@@ -77,4 +77,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-07 — Phase 02 complete (MCP server with 6 policy-gated tools)*
+*Last updated: 2026-05-07 — Phase 04 complete (ADSSHA agent definition + sys.load_agent Starlark builtin)*
