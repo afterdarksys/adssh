@@ -143,7 +143,10 @@ func builtinPcreMatch(thread *starlark.Thread, b *starlark.Builtin, args starlar
 	if err != nil {
 		return nil, err
 	}
-	matched, _ := re.MatchString(text)
+	matched, err := re.MatchString(text)
+	if err != nil {
+		return nil, fmt.Errorf("pcre_match error: %v", err)
+	}
 	return starlark.Bool(matched), nil
 }
 
