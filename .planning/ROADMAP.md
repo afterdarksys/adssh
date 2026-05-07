@@ -46,7 +46,7 @@ Plans:
   4. Every MCP tool invocation is evaluated by the Rego policy engine before execution — unauthorized calls are rejected
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — Binary scaffold + MCP server core + eval_starlark + run_shell tools
+- [x] 02-01-PLAN.md — Binary scaffold + MCP server core + eval_starlark + run_shell tools
 - [ ] 02-02-PLAN.md — list_sessions + cloud_query + container_exec + audit_log tools
 
 ### Phase 3: Claude Code Skill
