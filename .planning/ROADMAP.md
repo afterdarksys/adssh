@@ -47,7 +47,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 02-01-PLAN.md — Binary scaffold + MCP server core + eval_starlark + run_shell tools
-- [ ] 02-02-PLAN.md — list_sessions + cloud_query + container_exec + audit_log tools
+- [x] 02-02-PLAN.md — list_sessions + cloud_query + container_exec + audit_log tools
 
 ### Phase 3: Claude Code Skill
 **Goal**: Claude has a complete, accurate skill file for operating adssh — session management, scripting, cloud queries, containers, and MCP connection
