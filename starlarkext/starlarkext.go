@@ -60,6 +60,7 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 	sysDict.SetKey(starlark.String("getenv"), starlark.NewBuiltin("getenv", builtinGetEnv))
 	sysDict.SetKey(starlark.String("setenv"), starlark.NewBuiltin("setenv", builtinSetEnv))
 	sysDict.SetKey(starlark.String("load_plugin"), createLoadPlugin(env))
+	sysDict.SetKey(starlark.String("load_agent"), createLoadAgent(env))
 	if !restricted {
 		sysDict.SetKey(starlark.String("read_file"), starlark.NewBuiltin("read_file", builtinReadFile))
 		sysDict.SetKey(starlark.String("write_file"), starlark.NewBuiltin("write_file", builtinWriteFile))
