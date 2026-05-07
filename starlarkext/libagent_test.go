@@ -119,9 +119,12 @@ func TestLoadAgentFileNotFound(t *testing.T) {
 
 // TestLoadAgentNoAPIKey verifies that a missing ANTHROPIC_API_KEY produces a clear error.
 func TestLoadAgentNoAPIKey(t *testing.T) {
-	// Create a temp agent file in ~/.adssh/agents/ so the file-not-found check passes.
-	home, _ := os.UserHomeDir()
-	agentDir := filepath.Join(home, ".adssh", "agents")
+	// Use a temp home directory so the test never writes to the real ~/.adssh directory.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Create the agent file inside the temp home.
+	agentDir := filepath.Join(tmpHome, ".adssh", "agents")
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		t.Fatalf("failed to create agent dir: %v", err)
 	}
@@ -130,14 +133,9 @@ func TestLoadAgentNoAPIKey(t *testing.T) {
 	if err := os.WriteFile(agentFile, []byte(content), 0644); err != nil {
 		t.Fatalf("failed to write agent file: %v", err)
 	}
-	defer os.Remove(agentFile)
 
-	// Ensure ANTHROPIC_API_KEY is unset for this test.
-	prev := os.Getenv("ANTHROPIC_API_KEY")
-	os.Unsetenv("ANTHROPIC_API_KEY")
-	if prev != "" {
-		defer os.Setenv("ANTHROPIC_API_KEY", prev)
-	}
+	// Ensure ANTHROPIC_API_KEY is unset for this test (t.Setenv restores on cleanup).
+	t.Setenv("ANTHROPIC_API_KEY", "")
 
 	env := starlark.StringDict{}
 	loadAgent := createLoadAgent(env)
