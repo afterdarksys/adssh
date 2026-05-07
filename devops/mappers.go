@@ -3,20 +3,39 @@ package devops
 import (
 	"fmt"
 	"strings"
+	"sync"
 )
+
+type MapperFunc func(resource, action string, args map[string]string) (string, error)
+
+var (
+	registry = make(map[string]MapperFunc)
+	regMu    sync.RWMutex
+)
+
+func init() {
+	// Register defaults
+	RegisterMapper("docker", generateDocker)
+	RegisterMapper("kubectl", generateKubectl)
+	RegisterMapper("aws", generateAWS)
+}
+
+func RegisterMapper(provider string, fn MapperFunc) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	registry[provider] = fn
+}
 
 // GenerateCommand generates a raw CLI command from structured intents.
 func GenerateCommand(provider, resource, action string, args map[string]string) (string, error) {
-	switch provider {
-	case "docker":
-		return generateDocker(resource, action, args)
-	case "kubectl":
-		return generateKubectl(resource, action, args)
-	case "aws":
-		return generateAWS(resource, action, args)
-	default:
+	regMu.RLock()
+	fn, ok := registry[provider]
+	regMu.RUnlock()
+
+	if !ok {
 		return "", fmt.Errorf("unknown cloud provider: %s", provider)
 	}
+	return fn(resource, action, args)
 }
 
 func generateDocker(resource, action string, args map[string]string) (string, error) {

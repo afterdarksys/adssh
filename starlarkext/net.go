@@ -63,3 +63,32 @@ func builtinTCPSend(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 	resp, _ := io.ReadAll(conn)
 	return starlark.String(string(resp)), nil
 }
+
+func builtinDial(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var network, addr string
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "network", &network, "address", &addr); err != nil {
+		return nil, err
+	}
+
+	conn, err := net.DialTimeout(network, addr, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial error: %v", err)
+	}
+
+	return &StarlarkConn{Conn: conn}, nil
+}
+
+func builtinDialTLS(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var addr string
+	var skipVerify bool = false
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr, "skip_verify?", &skipVerify); err != nil {
+		return nil, err
+	}
+
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{InsecureSkipVerify: skipVerify})
+	if err != nil {
+		return nil, fmt.Errorf("dial_tls error: %v", err)
+	}
+
+	return &StarlarkConn{Conn: conn}, nil
+}

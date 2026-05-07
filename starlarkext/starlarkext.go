@@ -10,6 +10,12 @@ import (
 
 	"github.com/dlclark/regexp2"
 	"go.starlark.net/starlark"
+	"sync"
+)
+
+var (
+	CustomCompleters = make(map[string]starlark.Callable)
+	CompletersMu     sync.RWMutex
 )
 
 // SetupExtensions injects all standard library extensions into the given dict
@@ -34,10 +40,12 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 	env["crypto"] = cryptoDict
 
 	// Networking
-	netDict := starlark.NewDict(2)
+	netDict := starlark.NewDict(4)
 	if !restricted {
 		netDict.SetKey(starlark.String("tcp_send"), starlark.NewBuiltin("tcp_send", builtinTCPSend))
 		netDict.SetKey(starlark.String("http_get"), starlark.NewBuiltin("http_get", builtinHTTPGet))
+		netDict.SetKey(starlark.String("dial"), starlark.NewBuiltin("dial", builtinDial))
+		netDict.SetKey(starlark.String("dial_tls"), starlark.NewBuiltin("dial_tls", builtinDialTLS))
 	}
 	env["net"] = netDict
 
@@ -55,10 +63,11 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 	if !restricted {
 		sysDict.SetKey(starlark.String("read_file"), starlark.NewBuiltin("read_file", builtinReadFile))
 		sysDict.SetKey(starlark.String("write_file"), starlark.NewBuiltin("write_file", builtinWriteFile))
-		sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", builtinExecCmd))
-		sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", builtinExecAsync))
-		sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", builtinExecJSON))
+		sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", createExecCmd(env, restricted)))
+		sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", createExecAsync(env, restricted)))
+		sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", createExecJSON(env, restricted)))
 		sysDict.SetKey(starlark.String("register_command"), createRegisterCommand(env))
+		sysDict.SetKey(starlark.String("register_completer"), starlark.NewBuiltin("register_completer", builtinRegisterCompleter))
 	}
 	env["sys"] = sysDict
 
@@ -88,8 +97,9 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 	env["i18n"] = i18nDict
 
 	// DevOps / Cloud Engine
-	cloudDict := starlark.NewDict(1)
+	cloudDict := starlark.NewDict(2)
 	cloudDict.SetKey(starlark.String("gen"), starlark.NewBuiltin("gen", builtinCloudGen))
+	cloudDict.SetKey(starlark.String("register_mapper"), starlark.NewBuiltin("register_mapper", builtinRegisterMapper))
 	env["cloud"] = cloudDict
 }
 
@@ -180,4 +190,16 @@ func createRegisterCommand(env starlark.StringDict) *starlark.Builtin {
 		err := dict.SetKey(starlark.String(name), callable)
 		return starlark.None, err
 	})
+}
+
+func builtinRegisterCompleter(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var cmd string
+	var callable starlark.Callable
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "cmd", &cmd, "callable", &callable); err != nil {
+		return nil, err
+	}
+	CompletersMu.Lock()
+	defer CompletersMu.Unlock()
+	CustomCompleters[cmd] = callable
+	return starlark.None, nil
 }

@@ -1,22 +1,26 @@
 package starlarkext
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
-	"syscall"
+	"strings"
+
+	"adssh/security"
 
 	"go.starlark.net/starlark"
+	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // JobValue represents an asynchronous job in Starlark
 type JobValue struct {
-	cmd *exec.Cmd
+	cancel   context.CancelFunc
+	waitChan <-chan error
+	err      error
+	done     bool
 }
 
 func (j *JobValue) String() string {
-	if j.cmd != nil && j.cmd.Process != nil {
-		return fmt.Sprintf("<job pid=%d>", j.cmd.Process.Pid)
-	}
 	return "<job>"
 }
 
@@ -27,14 +31,11 @@ func (j *JobValue) Type() string {
 func (j *JobValue) Freeze() {}
 
 func (j *JobValue) Truth() starlark.Bool {
-	return j.cmd != nil && j.cmd.Process != nil
+	return starlark.Bool(!j.done)
 }
 
 func (j *JobValue) Hash() (uint32, error) {
-	if j.cmd != nil && j.cmd.Process != nil {
-		return uint32(j.cmd.Process.Pid), nil
-	}
-	return 0, nil
+	return 0, fmt.Errorf("unhashable type: job")
 }
 
 // Attr allows accessing methods on the job object
@@ -58,65 +59,65 @@ func (j *JobValue) AttrNames() []string {
 }
 
 func (j *JobValue) stop(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if j.cmd.Process == nil {
-		return starlark.None, fmt.Errorf("job not started")
-	}
-	// Send SIGSTOP to process group
-	err := syscall.Kill(-j.cmd.Process.Pid, syscall.SIGSTOP)
-	if err != nil {
-		return starlark.None, fmt.Errorf("failed to stop job: %v", err)
-	}
-	return starlark.True, nil
+	return starlark.None, fmt.Errorf("stop not supported for adssh async jobs")
 }
 
 func (j *JobValue) resume(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if j.cmd.Process == nil {
-		return starlark.None, fmt.Errorf("job not started")
-	}
-	// Send SIGCONT to process group
-	err := syscall.Kill(-j.cmd.Process.Pid, syscall.SIGCONT)
-	if err != nil {
-		return starlark.None, fmt.Errorf("failed to resume job: %v", err)
-	}
-	return starlark.True, nil
+	return starlark.None, fmt.Errorf("resume not supported for adssh async jobs")
 }
 
 func (j *JobValue) kill(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if j.cmd.Process == nil {
-		return starlark.None, fmt.Errorf("job not started")
-	}
-	// Send SIGKILL to process group
-	err := syscall.Kill(-j.cmd.Process.Pid, syscall.SIGKILL)
-	if err != nil {
-		return starlark.None, fmt.Errorf("failed to kill job: %v", err)
+	if j.cancel != nil {
+		j.cancel()
+		j.done = true
 	}
 	return starlark.True, nil
 }
 
 func (j *JobValue) wait(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	if j.cmd.Process == nil {
-		return starlark.None, fmt.Errorf("job not started")
+	if j.done {
+		if j.err != nil {
+			return starlark.String(j.err.Error()), nil
+		}
+		return starlark.True, nil
 	}
-	err := j.cmd.Wait()
-	if err != nil {
-		return starlark.String(err.Error()), nil
+	
+	j.err = <-j.waitChan
+	j.done = true
+	if j.err != nil {
+		return starlark.String(j.err.Error()), nil
 	}
 	return starlark.True, nil
 }
 
-// builtinExecAsync implements sys.exec_async
-func builtinExecAsync(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var command string
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "command", &command); err != nil {
-		return nil, err
+// createExecAsync implements sys.exec_async
+func createExecAsync(globals starlark.StringDict, restricted bool) func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var command string
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "command", &command); err != nil {
+			return nil, err
+		}
+
+		parserFile, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+		if err != nil {
+			return nil, fmt.Errorf("parse error: %v", err)
+		}
+
+		runner, _ := interp.New(
+			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
+			interp.OpenHandler(security.VirtualOpenHandler()),
+		)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		waitChan := make(chan error, 1)
+
+		go func() {
+			waitChan <- runner.Run(ctx, parserFile)
+		}()
+
+		return &JobValue{
+			cancel:   cancel,
+			waitChan: waitChan,
+		}, nil
 	}
-
-	cmd := exec.Command("sh", "-c", command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start async job: %v", err)
-	}
-
-	return &JobValue{cmd: cmd}, nil
 }
