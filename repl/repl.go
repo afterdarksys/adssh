@@ -10,6 +10,7 @@ import (
 	"adssh/parser"
 	"adssh/security"
 	"adssh/starlarkext"
+	"adssh/sys"
 
 	"github.com/chzyer/readline"
 	"go.starlark.net/starlark"
@@ -71,6 +72,7 @@ func (h hybridEnv) Each(fn func(name string, vr expand.Variable) bool) {
 		}
 	}
 }
+
 
 func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
 	// Inject standard library extensions into Starlark environment
@@ -181,9 +183,33 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Parse error: %v\n", err)
 			} else {
-				err = runner.Run(context.Background(), parserFile)
+				// Try to get session-specific context
+				ctx := context.Background()
+				if val, ok := globals["SESSION_ID"]; ok {
+					if sessionIDStr, ok := val.(starlark.String); ok {
+						if session := sys.GetSession(string(sessionIDStr)); session != nil {
+							var cancel context.CancelFunc
+							ctx, cancel = context.WithCancel(context.Background())
+							session.SetContext(ctx, cancel)
+						}
+					}
+				}
+
+				err = runner.Run(ctx, parserFile)
+				
+				// Clean up context after execution
+				if val, ok := globals["SESSION_ID"]; ok {
+					if sessionIDStr, ok := val.(starlark.String); ok {
+						if session := sys.GetSession(string(sessionIDStr)); session != nil {
+							session.SetContext(context.Background(), nil)
+						}
+					}
+				}
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Command error: %v\n", err)
+					// Ignore context canceled errors (which just mean the user pressed Ctrl+C)
+					if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
+						fmt.Fprintf(os.Stderr, "Command error: %v\n", err)
+					}
 				}
 			}
 		}

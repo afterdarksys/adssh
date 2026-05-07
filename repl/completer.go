@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"adssh/starlarkext"
 
 	"go.starlark.net/starlark"
 )
@@ -113,6 +114,33 @@ func (c *adsshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int)
 	completingArg := !endsWithSpace && len(words) >= 2
 	if completingArg {
 		argPrefix = words[len(words)-1]
+	}
+
+	// ── Check Custom Completers ─────────────────────────────────────────────
+	starlarkext.CompletersMu.RLock()
+	callable, ok := starlarkext.CustomCompleters[cmd]
+	starlarkext.CompletersMu.RUnlock()
+
+	if ok {
+		thread := &starlark.Thread{Name: "completer-" + cmd}
+		res, err := starlark.Call(thread, callable, starlark.Tuple{starlark.String(argPrefix), starlark.String(lineStr)}, nil)
+		if err == nil {
+			if list, ok := res.(*starlark.List); ok {
+				var completions [][]rune
+				iter := list.Iterate()
+				defer iter.Done()
+				var val starlark.Value
+				for iter.Next(&val) {
+					if s, ok := val.(starlark.String); ok {
+						strVal := string(s)
+						if strings.HasPrefix(strVal, argPrefix) {
+							completions = append(completions, []rune(strVal[len(argPrefix):]))
+						}
+					}
+				}
+				return completions, len(argPrefix)
+			}
+		}
 	}
 
 	// ── mirror subcommands ───────────────────────────────────────────────────
