@@ -37,15 +37,15 @@ func builtinHTTPGet(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 
 func builtinTCPSend(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var addr, data string
-	var useTLS bool
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "addr", &addr, "data", &data, "use_tls?", &useTLS); err != nil {
+	var useTLS, skipVerify bool
+	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "addr", &addr, "data", &data, "use_tls?", &useTLS, "skip_verify?", &skipVerify); err != nil {
 		return nil, err
 	}
 
 	var conn net.Conn
 	var err error
 	if useTLS {
-		conn, err = tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
+		conn, err = tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: skipVerify})
 	} else {
 		conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
 	}
