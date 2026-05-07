@@ -1,6 +1,7 @@
 package sys
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
@@ -48,9 +49,29 @@ func (b *OutputBroadcaster) RemoveListener(w io.Writer) {
 }
 
 type Session struct {
-	ID        string
-	PTYMaster *os.File
-	Out       *OutputBroadcaster
+	ID         string
+	User       string
+	Principals []string
+	PTYMaster  *os.File
+	Out        *OutputBroadcaster
+
+	ctx        context.Context
+	cancel     context.CancelFunc
+}
+
+func (s *Session) CancelCommand() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+}
+
+func (s *Session) Context() context.Context {
+	return s.ctx
+}
+
+func (s *Session) SetContext(ctx context.Context, cancel context.CancelFunc) {
+	s.ctx = ctx
+	s.cancel = cancel
 }
 
 var (

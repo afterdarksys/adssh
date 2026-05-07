@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/creack/pty"
 	"go.starlark.net/starlark"
@@ -74,15 +76,32 @@ func loadAuthorizedKeys(authKeysPath string) (map[string]bool, error) {
 	return authorizedKeys, nil
 }
 
-func StartSSHServer(address, hostKeyPath, authorizedKeysPath string, globals starlark.StringDict, restricted bool, replStartFn func(starlark.StringDict, bool, string, io.ReadCloser, io.Writer, io.Writer)) {
+var (
+	sshListener net.Listener
+	sshMu       sync.Mutex
+)
+
+// EnableSSH starts the SSH daemon in the background. It returns an error if already running or if not root.
+func EnableSSH(address, hostKeyPath, authorizedKeysPath string, globals starlark.StringDict, restricted bool, replStartFn func(starlark.StringDict, bool, string, io.ReadCloser, io.Writer, io.Writer)) error {
+	sshMu.Lock()
+	defer sshMu.Unlock()
+
+	if sshListener != nil {
+		return fmt.Errorf("ssh server is already running")
+	}
+
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("permission denied: only root can enable the SSH server")
+	}
+
 	authorizedKeys, err := loadAuthorizedKeys(authorizedKeysPath)
 	if err != nil {
-		log.Fatalf("Failed to load authorized keys: %v", err)
+		return fmt.Errorf("failed to load authorized keys: %v", err)
 	}
 	if len(authorizedKeys) == 0 {
-		log.Fatalf(
-			"No authorized keys found in %s\n"+
-				"Add your public key to allow SSH access:\n"+
+		return fmt.Errorf(
+			"no authorized keys found in %s\n"+
+				"add your public key to allow SSH access:\n"+
 				"  cat ~/.ssh/id_ed25519.pub >> %s",
 			authorizedKeysPath, authorizedKeysPath,
 		)
@@ -90,12 +109,21 @@ func StartSSHServer(address, hostKeyPath, authorizedKeysPath string, globals sta
 
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			perms := &ssh.Permissions{
+				Extensions: map[string]string{
+					"pubkey-fp": ssh.FingerprintSHA256(key),
+				},
+			}
+
+			if cert, ok := key.(*ssh.Certificate); ok {
+				perms.Extensions["principals"] = strings.Join(cert.ValidPrincipals, ",")
+				if authorizedKeys[string(cert.SignatureKey.Marshal())] {
+					return perms, nil
+				}
+			}
+
 			if authorizedKeys[string(key.Marshal())] {
-				return &ssh.Permissions{
-					Extensions: map[string]string{
-						"pubkey-fp": ssh.FingerprintSHA256(key),
-					},
-				}, nil
+				return perms, nil
 			}
 			return nil, fmt.Errorf("unauthorized key from %s", conn.RemoteAddr())
 		},
@@ -103,29 +131,80 @@ func StartSSHServer(address, hostKeyPath, authorizedKeysPath string, globals sta
 
 	signer, err := loadOrGenerateHostKey(hostKeyPath)
 	if err != nil {
-		log.Fatalf("Failed to load/generate host key: %v", err)
+		return fmt.Errorf("failed to load/generate host key: %v", err)
 	}
 	config.AddHostKey(signer)
 
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Fatalf("Failed to listen on %s: %v", address, err)
+		return fmt.Errorf("failed to listen on %s: %v", address, err)
 	}
+	sshListener = listener
 
 	fmt.Printf("adssh SSH daemon listening on %s\n", address)
 
-	for {
-		nConn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept incoming connection: %v", err)
-			continue
+	go func() {
+		for {
+			nConn, err := listener.Accept()
+			if err != nil {
+				// Stop the loop if the listener was closed
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					break
+				}
+				log.Printf("Failed to accept incoming connection: %v", err)
+				continue
+			}
+			go handleSSHConnection(nConn, config, globals, restricted, hostKeyPath, replStartFn)
 		}
-		go handleSSHConnection(nConn, config, globals, restricted, hostKeyPath, replStartFn)
+	}()
+
+	return nil
+}
+
+// DisableSSH stops the background SSH daemon.
+func DisableSSH() error {
+	sshMu.Lock()
+	defer sshMu.Unlock()
+
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("permission denied: only root can disable the SSH server")
 	}
+
+	if sshListener == nil {
+		return fmt.Errorf("ssh server is not running")
+	}
+
+	err := sshListener.Close()
+	sshListener = nil
+	return err
 }
 
 type sshReadCloser struct {
 	ssh.Channel
+}
+
+type CtrlCInterceptor struct {
+	r       io.Reader
+	session *Session
+}
+
+func (c *CtrlCInterceptor) Read(p []byte) (n int, err error) {
+	n, err = c.r.Read(p)
+	if n > 0 {
+		for i := 0; i < n; i++ {
+			if p[i] == 3 { // ETX / Ctrl+C
+				// Check if PTY is in cooked mode
+				if IsCookedMode(c.session.PTYMaster.Fd()) {
+					c.session.CancelCommand()
+					// Drop the byte so it doesn't echo or pass to the child
+					copy(p[i:], p[i+1:])
+					n--
+					i--
+				}
+			}
+		}
+	}
+	return n, err
 }
 
 func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starlark.StringDict, restricted bool, historyFile string, replStartFn func(starlark.StringDict, bool, string, io.ReadCloser, io.Writer, io.Writer)) {
@@ -157,6 +236,10 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starl
 			continue
 		}
 
+		if err := DisableISIG(ptyMaster.Fd()); err != nil {
+			log.Printf("Warning: failed to disable ISIG on pty: %v", err)
+		}
+
 		go func(in <-chan *ssh.Request) {
 			for req := range in {
 				switch req.Type {
@@ -178,10 +261,17 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starl
 		sessionID := GenerateSessionID()
 		outCast := NewOutputBroadcaster(channel)
 
+		var principals []string
+		if pExt, ok := conn.Permissions.Extensions["principals"]; ok && pExt != "" {
+			principals = strings.Split(pExt, ",")
+		}
+
 		session := &Session{
-			ID:        sessionID,
-			PTYMaster: ptyMaster,
-			Out:       outCast,
+			ID:         sessionID,
+			User:       conn.User(),
+			Principals: principals,
+			PTYMaster:  ptyMaster,
+			Out:        outCast,
 		}
 		RegisterSession(session)
 
@@ -197,8 +287,10 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starl
 			defer ptySlave.Close()
 			defer UnregisterSession(sessionID)
 
+			interceptedChannel := &CtrlCInterceptor{r: channel, session: session}
+
 			go io.Copy(outCast, ptyMaster)
-			go io.Copy(ptyMaster, channel)
+			go io.Copy(ptyMaster, interceptedChannel)
 
 			replStartFn(env, restricted, historyFile, ptySlave, ptySlave, ptySlave)
 		}(sessionGlobals)
