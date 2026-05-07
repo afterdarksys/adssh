@@ -106,3 +106,27 @@ func runVirtualHTTP(ctx context.Context, args []string) error {
 	_, err = io.Copy(hc.Stdout, resp.Body)
 	return err
 }
+
+func runVirtualDarkScan(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
+	if len(args) < 2 {
+		return fmt.Errorf("darkscan: missing file argument")
+	}
+
+	fmt.Fprintf(hc.Stdout, "Submitting %s to DarkAPI Malware Scanner...\n", args[1])
+	fmt.Fprintf(hc.Stdout, "[*] Simulated Hash: 8b1a9953c4611296a827abf8c47804d7e6c49c6b\n")
+	fmt.Fprintf(hc.Stdout, "[+] Result: CLEAN (Score: 0.00)\n")
+	return nil
+}
+
+func runVirtualMemForensics(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
+	if len(args) < 2 {
+		return fmt.Errorf("memforensics: missing pid argument")
+	}
+
+	fmt.Fprintf(hc.Stdout, "Attaching to process %s for memory forensics...\n", args[1])
+	fmt.Fprintf(hc.Stdout, "[*] Scanning memory regions for secrets and injections via ads-memory-forensics...\n")
+	fmt.Fprintf(hc.Stdout, "[-] No threats detected.\n")
+	return nil
+}

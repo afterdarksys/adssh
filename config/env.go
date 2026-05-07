@@ -22,6 +22,8 @@ import (
 //	ADSSH_PROFILE=/path        Path to login profile script (default: ~/.adsshprofile)
 //	ADSSH_RC=/path             Path to interactive RC script (default: ~/.adsshrc)
 //	ADSSH_POLICY=/path         Path to Rego policy file     (default: ~/.adssh/policy.rego)
+//	ADSSH_AUDIT_URL=url        Webhook URL for remote SIEM logging
+//	ADSSH_AUDIT_TOKEN=token    Bearer token for the webhook URL
 type AppConfig struct {
 	Restricted         bool
 	ServeAddr          string
@@ -35,6 +37,8 @@ type AppConfig struct {
 	AuthorizedKeysPath string
 	ProfilePath        string
 	RCPath             string
+	AuditURL           string
+	AuditToken         string
 }
 
 // LoadFromEnv populates an AppConfig from ADSSH_* environment variables,
@@ -54,6 +58,8 @@ func LoadFromEnv() AppConfig {
 		AuthorizedKeysPath: envOr("ADSSH_AUTHORIZED_KEYS", filepath.Join(adsshDir, "authorized_keys")),
 		ProfilePath:        envOr("ADSSH_PROFILE", filepath.Join(home, ".adsshprofile")),
 		RCPath:             envOr("ADSSH_RC", filepath.Join(home, ".adsshrc")),
+		AuditURL:           os.Getenv("ADSSH_AUDIT_URL"),
+		AuditToken:         os.Getenv("ADSSH_AUDIT_TOKEN"),
 	}
 	return cfg
 }

@@ -6,6 +6,8 @@ import (
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
 	"strings"
+
+	"adssh/sysmgmt"
 )
 
 func BashInterceptor(restricted bool, globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
@@ -58,7 +60,7 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 			}
 
 			// 2. Virtual DevOps Binaries — already authorized by Rego above
-			isVirtual := args[0] == "jq" || args[0] == "yq" || args[0] == "http" || args[0] == "mirror" || args[0] == "cmdgen"
+			isVirtual := args[0] == "jq" || args[0] == "yq" || args[0] == "http" || args[0] == "mirror" || args[0] == "cmdgen" || args[0] == "darkscan" || args[0] == "memforensics" || args[0] == "package" || args[0] == "proc" || args[0] == "grant"
 			if isVirtual {
 				if args[0] == "jq" {
 					return runVirtualJQ(ctx, args)
@@ -74,6 +76,27 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 				}
 				if args[0] == "cmdgen" {
 					return runCmdGen(ctx, args)
+				}
+				if args[0] == "darkscan" {
+					return runVirtualDarkScan(ctx, args)
+				}
+				if args[0] == "memforensics" {
+					return runVirtualMemForensics(ctx, args)
+				}
+				if args[0] == "package" {
+					return sysmgmt.RunPackage(ctx, args)
+				}
+				if args[0] == "proc" {
+					return sysmgmt.RunProc(ctx, args)
+				}
+				if args[0] == "grant" {
+					var sessionID string
+					if val, ok := globals["SESSION_ID"]; ok {
+						if strVal, ok := val.(starlark.String); ok {
+							sessionID = string(strVal)
+						}
+					}
+					return RunGrant(ctx, args, sessionID)
 				}
 			}
 

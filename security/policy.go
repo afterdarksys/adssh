@@ -3,10 +3,12 @@ package security
 import (
 	"context"
 	"fmt"
-	osuser "os/user"
 	"os"
+	osuser "os/user"
 	"sync"
 	"time"
+
+	"adssh/sys"
 
 	"github.com/open-policy-agent/opa/rego"
 )
@@ -108,6 +110,14 @@ func BuildPolicyContext(command string, args []string, sessionID string) PolicyC
 		Args:      args,
 		Time:      time.Now().UTC().Format(time.RFC3339),
 		SessionID: sessionID,
+	}
+
+	if sessionID != "" {
+		if session := sys.GetSession(sessionID); session != nil {
+			pctx.User = session.User
+			pctx.Groups = session.Principals
+			return pctx
+		}
 	}
 
 	if u, err := osuser.Current(); err == nil {
