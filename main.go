@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
-	"io"
 
 	"adssh/config"
 	"adssh/repl"
@@ -33,6 +34,15 @@ func main() {
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		switch {
+		case arg == "-h" || arg == "--help":
+			printHelp()
+			return
+		case arg == "--init":
+			if err := runInit(); err != nil {
+				fmt.Fprintf(os.Stderr, "init error: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case arg == "-r" || arg == "--restricted":
 			cfg.Restricted = true
 		case arg == "-l" || arg == "--login":
@@ -126,6 +136,131 @@ func main() {
 	} else {
 		smartReplWrapper(env, cfg.Restricted, cfg.HistoryFile, os.Stdin, os.Stdout, os.Stderr)
 	}
+}
+
+func printHelp() {
+	fmt.Print(`adssh — programmable DevOps shell
+
+USAGE
+  adssh [options] [script.star]
+
+OPTIONS
+  -h, --help                  Show this help
+      --init                  Create ~/.adssh/ with starter config and exit
+  -r, --restricted            Restricted mode (no path traversal, no cd/export)
+  -l, --login                 Login shell (load ~/.adsshprofile)
+      --serve <addr>          Start built-in SSH server (e.g. --serve :2222)
+      --policy <path>         Load OPA/Rego policy file
+      --entitlements <path>   Load RBAC entitlements YAML
+
+REPL MODES
+  Starlark   aws.ec2.list_instances(region="us-east-1")
+             def greet(name): return "hello " + name
+             x = data.json_parse('{"k":"v"}')
+  Shell      ls -la | jq '.name'
+             git status && git diff
+  Force      !<cmd>   or   $ <cmd>   to force shell mode
+
+VIRTUAL BINARIES (type 'vbins' for full list)
+  jq          JSON processor             jq '.name' < file.json
+  yq          YAML processor             cat k8s.yaml | yq '.spec'
+  http        HTTP client                http https://api.example.com/v1/status
+  mirror      Session viewer             mirror list
+  cmdgen      Cloud CLI generator        cmdgen aws ec2 create instance_type=t3.micro
+  package     Package manager            package install ripgrep
+  darkscan    Malware scanner            darkscan /tmp/suspect
+  grant       Role escalation            grant request admin
+
+ENVIRONMENT VARIABLES
+  ADSSH_RESTRICTED        Enable restricted mode (true/false)
+  ADSSH_SERVE             SSH server address (:2222)
+  ADSSH_POLICY            Path to Rego policy file
+  ADSSH_ENTITLEMENTS      Path to entitlements YAML
+  ADSSH_AUDIT_LOG         Audit log path (default: ~/.adssh/audit.log)
+  ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
+  ADSSH_RC                RC script (default: ~/.adsshrc)
+
+Run 'adssh --init' to create a starter config in ~/.adssh/
+`)
+}
+
+func runInit() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("cannot determine home directory: %v", err)
+	}
+
+	dir := filepath.Join(home, ".adssh")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("cannot create %s: %v", dir, err)
+	}
+
+	files := map[string]string{
+		"authorized_keys": "# Add SSH public keys here (one per line) to allow remote access via adssh --serve\n",
+
+		"default.rego": `package adssh
+
+# Default policy: allow everything.
+# Replace with your own rules to restrict what users can run.
+# See policy/examples/ for more patterns.
+
+default allow = true
+`,
+
+		".adsshrc": `# ~/.adssh/.adsshrc — loaded on every interactive session
+# This is Starlark (https://bazel.build/rules/language), a safe Python dialect.
+
+# Custom prompt
+PROMPT = "adssh> "
+
+# Example: define a Starlark helper available in the REPL
+def k8s_pods(namespace="default"):
+    result = sys.exec_cmd("kubectl get pods -n " + namespace + " -o json")
+    pods = data.json_parse(result)
+    for item in pods["items"]:
+        print(item["metadata"]["name"])
+
+# Example: register a shell alias as a custom command
+# sys.register_command("ll", lambda args: None)  # see docs for full pattern
+
+# Example: load a plugin
+# sys.load_plugin("/path/to/myplugin.so")
+`,
+	}
+
+	created := []string{}
+	skipped := []string{}
+
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			skipped = append(skipped, path)
+			continue
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			return fmt.Errorf("cannot write %s: %v", path, err)
+		}
+		created = append(created, path)
+	}
+
+	fmt.Printf("adssh init — %s\n\n", dir)
+	for _, f := range created {
+		fmt.Printf("  created  %s\n", f)
+	}
+	for _, f := range skipped {
+		fmt.Printf("  exists   %s (not overwritten)\n", f)
+	}
+
+	fmt.Printf(`
+Next steps:
+  1. Edit ~/.adssh/.adsshrc to customize your session
+  2. Set ADSSH_RC=~/.adssh/.adsshrc  (or it auto-loads ~/.adsshrc)
+  3. Run: adssh
+  4. Try: aws.ec2.list_instances(region="us-east-1")
+     Or:  ls -la | jq '.'
+     Or:  vbins
+`)
+	return nil
 }
 
 func smartReplWrapper(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {

@@ -4,15 +4,24 @@ import (
 	"adssh/devops"
 	"context"
 	"fmt"
-	"mvdan.cc/sh/v3/interp"
 	"strings"
+
+	"mvdan.cc/sh/v3/interp"
 )
 
-func runCmdGen(ctx context.Context, args []string) error {
+// cmdgen — DevOps command generator
+
+type cmdgenBinary struct{}
+
+func (cmdgenBinary) Name() string        { return "cmdgen" }
+func (cmdgenBinary) Description() string { return "DevOps command generator — generate CLI commands for cloud providers" }
+func (cmdgenBinary) Usage() string       { return "cmdgen <provider> <resource> <action> [key=value ...]" }
+
+func (cmdgenBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 
 	if len(args) < 4 {
-		return fmt.Errorf("usage: cmdgen <provider> <resource> <action> [key=value...]")
+		return fmt.Errorf("cmdgen: %s", cmdgenBinary{}.Usage())
 	}
 
 	provider := args[1]
@@ -33,12 +42,8 @@ func runCmdGen(ctx context.Context, args []string) error {
 	}
 
 	fmt.Fprintf(hc.Stdout, "Generated Command: %s\n", cmdStr)
-
-	// Wait, we should probably actually execute it!
-	// But `interp.HandlerCtx` doesn't have an easy way to inject it back into the parser from here easily
-	// since we are mid-execution.
-	// For this prototype, printing the exact command is the safest way to act as an abstraction engine,
-	// or the user can `eval $(cmdgen aws ec2 create...)`
 	fmt.Fprintf(hc.Stdout, "To execute, run: eval $(cmdgen %s)\n", strings.Join(args[1:], " "))
 	return nil
 }
+
+func init() { Register(cmdgenBinary{}) }

@@ -29,12 +29,11 @@ func (h hybridEnv) Get(name string) expand.Variable {
 	// 1. Check OS
 	if val, ok := os.LookupEnv(name); ok {
 		if strings.HasPrefix(val, "vault://") {
-			// Simulate transparent secret resolution
 			val = "RESOLVED_SECRET_" + strings.TrimPrefix(val, "vault://")
 		}
 		return expand.Variable{Set: true, Kind: expand.String, Str: val}
 	}
-	// 2. Check Starlark Globals
+	// 2. Check Starlark globals
 	if val, ok := h.globals[name]; ok {
 		switch v := val.(type) {
 		case starlark.String:
@@ -73,14 +72,80 @@ func (h hybridEnv) Each(fn func(name string, vr expand.Variable) bool) {
 	}
 }
 
+// needsContinuation reports whether buf is an incomplete Starlark expression:
+// unclosed brackets/parens/braces, or last non-blank line ends with ':' or '\'.
+func needsContinuation(buf string) bool {
+	depth := 0
+	inStr := rune(0) // current string delimiter; 0 = not in string
+	prev := rune(0)
+
+	for _, r := range buf {
+		if inStr != 0 {
+			if r == inStr && prev != '\\' {
+				inStr = 0
+			}
+			prev = r
+			continue
+		}
+		switch r {
+		case '"', '\'':
+			inStr = r
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		}
+		prev = r
+	}
+
+	if depth > 0 {
+		return true
+	}
+
+	// Check last non-blank line for block opener or explicit continuation
+	lines := strings.Split(buf, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		last := strings.TrimRight(lines[i], " \t")
+		if last == "" {
+			continue
+		}
+		return strings.HasSuffix(last, ":") || strings.HasSuffix(last, "\\")
+	}
+	return false
+}
+
+// evalStarlark executes src in the REPL context.
+// It tries expression evaluation first (so results are printed), then falls
+// back to statement execution (def, for, if, assignments, etc.) and merges
+// any new bindings back into globals.
+func evalStarlark(thread *starlark.Thread, src string, globals starlark.StringDict, errOut io.Writer) {
+	// Try as expression — prints the result value
+	val, err := starlark.Eval(thread, "<stdin>", src, globals)
+	if err == nil {
+		if val != nil && val != starlark.None {
+			fmt.Println(val.String())
+		}
+		return
+	}
+
+	// Fall back to statement execution (def, for, if, assignments, load, etc.)
+	newBindings, err2 := starlark.ExecFile(thread, "<stdin>", src, globals)
+	if err2 != nil {
+		fmt.Fprintf(errOut, "Starlark error: %v\n", err2)
+		return
+	}
+	// Merge new definitions (functions, variables) back into the live globals
+	for k, v := range newBindings {
+		globals[k] = v
+	}
+}
 
 func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
-	// Inject standard library extensions into Starlark environment
 	starlarkext.SetupExtensions(globals, restricted)
 
 	thread := &starlark.Thread{Name: "repl"}
 
-	// Ensure the history file exists with strict permissions
+	// Ensure history file exists with strict permissions
 	if err := os.MkdirAll(filepath.Dir(historyFile), 0700); err == nil {
 		if _, err := os.Stat(historyFile); os.IsNotExist(err) {
 			os.WriteFile(historyFile, []byte(""), 0600)
@@ -89,7 +154,6 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		}
 	}
 
-	// Initialize readline
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:            "adssh> ",
 		HistoryFile:       historyFile,
@@ -107,6 +171,9 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	}
 	defer rl.Close()
 
+	// Welcome banner — one line, shows both modes
+	fmt.Fprintf(out, "adssh  shell: ls -la | jq '.'    starlark: aws.ec2.list_instances()    vbins: list tools    exit: quit\n")
+
 	// Register set_keymap into Starlark globals
 	globals["set_keymap"] = starlark.NewBuiltin("set_keymap", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var mode string
@@ -123,7 +190,6 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		return starlark.None, nil
 	})
 
-	// Instantiate persistent runner
 	envBridge := hybridEnv{globals: globals}
 	runner, err := interp.New(
 		interp.Env(envBridge),
@@ -138,11 +204,13 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 	for {
 		// Determine dynamic prompt
+		prompt := "adssh> "
 		if val, ok := globals["PROMPT"]; ok {
 			if s, ok := val.(starlark.String); ok {
-				rl.SetPrompt(string(s))
+				prompt = string(s)
 			}
 		}
+		rl.SetPrompt(prompt)
 
 		line, err := rl.Readline()
 		if err != nil {
@@ -164,12 +232,25 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		mode := parser.DetermineMode(line)
 
 		if mode == parser.ModeStarlark {
-			val, err := starlark.Eval(thread, "<stdin>", line, globals)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Starlark error: %v\n", err)
-			} else if val != nil && val != starlark.None {
-				fmt.Println(val.String())
+			buf := line
+
+			// Collect continuation lines for multi-line constructs
+			// (def/for/if blocks, unclosed brackets, explicit '\' continuation)
+			for needsContinuation(buf) {
+				rl.SetPrompt("...   ")
+				next, nextErr := rl.Readline()
+				if nextErr != nil {
+					break
+				}
+				// Empty line signals "done" for block-style input
+				if strings.TrimSpace(next) == "" {
+					break
+				}
+				buf += "\n" + next
 			}
+			rl.SetPrompt(prompt)
+
+			evalStarlark(thread, buf, globals, errOut)
 		} else {
 			// Strip force-shell prefix if any
 			if strings.HasPrefix(line, "!") {
@@ -178,38 +259,35 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				line = strings.TrimSpace(line[2:])
 			}
 
-			// Parse and execute using a robust Bash interpreter
 			parserFile, err := syntax.NewParser().Parse(strings.NewReader(line), "")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Parse error: %v\n", err)
-			} else {
-				// Try to get session-specific context
-				ctx := context.Background()
-				if val, ok := globals["SESSION_ID"]; ok {
-					if sessionIDStr, ok := val.(starlark.String); ok {
-						if session := sys.GetSession(string(sessionIDStr)); session != nil {
-							var cancel context.CancelFunc
-							ctx, cancel = context.WithCancel(context.Background())
-							session.SetContext(ctx, cancel)
-						}
-					}
-				}
+				fmt.Fprintf(errOut, "Parse error: %v\n", err)
+				continue
+			}
 
-				err = runner.Run(ctx, parserFile)
-				
-				// Clean up context after execution
-				if val, ok := globals["SESSION_ID"]; ok {
-					if sessionIDStr, ok := val.(starlark.String); ok {
-						if session := sys.GetSession(string(sessionIDStr)); session != nil {
-							session.SetContext(context.Background(), nil)
-						}
+			ctx := context.Background()
+			if val, ok := globals["SESSION_ID"]; ok {
+				if sessionIDStr, ok := val.(starlark.String); ok {
+					if session := sys.GetSession(string(sessionIDStr)); session != nil {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithCancel(context.Background())
+						session.SetContext(ctx, cancel)
 					}
 				}
-				if err != nil {
-					// Ignore context canceled errors (which just mean the user pressed Ctrl+C)
-					if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
-						fmt.Fprintf(os.Stderr, "Command error: %v\n", err)
+			}
+
+			err = runner.Run(ctx, parserFile)
+
+			if val, ok := globals["SESSION_ID"]; ok {
+				if sessionIDStr, ok := val.(starlark.String); ok {
+					if session := sys.GetSession(string(sessionIDStr)); session != nil {
+						session.SetContext(context.Background(), nil)
 					}
+				}
+			}
+			if err != nil {
+				if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
+					fmt.Fprintf(errOut, "Command error: %v\n", err)
 				}
 			}
 		}

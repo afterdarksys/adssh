@@ -5,14 +5,23 @@ import (
 	"context"
 	"fmt"
 	"io"
+
 	"mvdan.cc/sh/v3/interp"
 )
 
-func runMirrorCommand(ctx context.Context, args []string) error {
+// mirror — live session viewer and console
+
+type mirrorBinary struct{}
+
+func (mirrorBinary) Name() string        { return "mirror" }
+func (mirrorBinary) Description() string { return "Session mirroring — view or take console of an active shell session" }
+func (mirrorBinary) Usage() string       { return "mirror <list|view|console> [session_id]" }
+
+func (mirrorBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 
 	if len(args) < 2 {
-		return fmt.Errorf("usage: mirror <list|view|console> [session_id]")
+		return fmt.Errorf("mirror: %s", mirrorBinary{}.Usage())
 	}
 
 	command := args[1]
@@ -27,45 +36,36 @@ func runMirrorCommand(ctx context.Context, args []string) error {
 	}
 
 	if len(args) < 3 {
-		return fmt.Errorf("usage: mirror %s <session_id>", command)
+		return fmt.Errorf("mirror: usage: mirror %s <session_id>", command)
 	}
 
 	targetID := args[2]
 	session := sys.GetSession(targetID)
 	if session == nil {
-		return fmt.Errorf("session not found: %s", targetID)
+		return fmt.Errorf("mirror: session not found: %s", targetID)
 	}
 
-	// We are attaching to a session.
-	// To exit, we rely on context cancellation (e.g. Ctrl+C which cancels the Runner context).
-
-	if command == "view" {
+	switch command {
+	case "view":
 		fmt.Fprintf(hc.Stdout, "Attached to session %s (View Only). Press Ctrl+C to exit.\r\n", targetID)
-
 		session.Out.AddListener(hc.Stdout)
 		defer session.Out.RemoveListener(hc.Stdout)
-
 		<-ctx.Done()
 		fmt.Fprintf(hc.Stdout, "\r\nDetached from session %s\r\n", targetID)
 		return nil
-	}
 
-	if command == "console" {
+	case "console":
 		fmt.Fprintf(hc.Stdout, "Attached to session %s (Console). Press Ctrl+C to exit.\r\n", targetID)
-
 		session.Out.AddListener(hc.Stdout)
 		defer session.Out.RemoveListener(hc.Stdout)
-
-		// Forward Stdin to the target PTY Master
-		// Run this in a goroutine
-		go func() {
-			io.Copy(session.PTYMaster, hc.Stdin)
-		}()
-
+		go io.Copy(session.PTYMaster, hc.Stdin)
 		<-ctx.Done()
 		fmt.Fprintf(hc.Stdout, "\r\nDetached from session %s\r\n", targetID)
 		return nil
-	}
 
-	return fmt.Errorf("unknown mirror command: %s", command)
+	default:
+		return fmt.Errorf("mirror: unknown command: %s", command)
+	}
 }
+
+func init() { Register(mirrorBinary{}) }

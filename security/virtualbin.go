@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 
 	"github.com/itchyny/gojq"
@@ -13,7 +12,15 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
-func runVirtualJQ(ctx context.Context, args []string) error {
+// jq — JSON processor
+
+type jqBinary struct{}
+
+func (jqBinary) Name() string        { return "jq" }
+func (jqBinary) Description() string { return "JSON processor — filter and transform JSON input" }
+func (jqBinary) Usage() string       { return "jq <filter>" }
+
+func (jqBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	if len(args) < 2 {
 		return fmt.Errorf("jq: missing filter argument")
@@ -24,7 +31,7 @@ func runVirtualJQ(ctx context.Context, args []string) error {
 		return fmt.Errorf("jq: invalid filter: %v", err)
 	}
 
-	inputBytes, err := ioutil.ReadAll(hc.Stdin)
+	inputBytes, err := io.ReadAll(hc.Stdin)
 	if err != nil {
 		return fmt.Errorf("jq: read error: %v", err)
 	}
@@ -44,12 +51,20 @@ func runVirtualJQ(ctx context.Context, args []string) error {
 			return fmt.Errorf("jq: execution error: %v", err)
 		}
 		outBytes, _ := json.MarshalIndent(v, "", "  ")
-		fmt.Fprintf(hc.Stdout, "%s\n", string(outBytes))
+		fmt.Fprintf(hc.Stdout, "%s\n", outBytes)
 	}
 	return nil
 }
 
-func runVirtualYQ(ctx context.Context, args []string) error {
+// yq — YAML processor
+
+type yqBinary struct{}
+
+func (yqBinary) Name() string        { return "yq" }
+func (yqBinary) Description() string { return "YAML processor — filter and transform YAML input" }
+func (yqBinary) Usage() string       { return "yq <filter>" }
+
+func (yqBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	if len(args) < 2 {
 		return fmt.Errorf("yq: missing filter argument")
@@ -60,23 +75,23 @@ func runVirtualYQ(ctx context.Context, args []string) error {
 		return fmt.Errorf("yq: invalid filter: %v", err)
 	}
 
-	inputBytes, err := ioutil.ReadAll(hc.Stdin)
+	inputBytes, err := io.ReadAll(hc.Stdin)
 	if err != nil {
 		return fmt.Errorf("yq: read error: %v", err)
 	}
 
-	var input interface{}
-	if err := yaml.Unmarshal(inputBytes, &input); err != nil {
+	var raw interface{}
+	if err := yaml.Unmarshal(inputBytes, &raw); err != nil {
 		return fmt.Errorf("yq: invalid yaml input: %v", err)
 	}
 
-	// yaml.v3 unmarshals into map[interface{}]interface{} which gojq doesn't like.
-	// Convert it to map[string]interface{} by marshaling to JSON and back.
-	jsonBytes, _ := json.Marshal(input)
-	var cleanInput interface{}
-	json.Unmarshal(jsonBytes, &cleanInput)
+	// yaml.v3 can produce map[string]interface{} or map[interface{}]interface{};
+	// round-trip through JSON to normalize for gojq.
+	jsonBytes, _ := json.Marshal(raw)
+	var input interface{}
+	json.Unmarshal(jsonBytes, &input)
 
-	iter := filter.Run(cleanInput)
+	iter := filter.Run(input)
 	for {
 		v, ok := iter.Next()
 		if !ok {
@@ -86,12 +101,20 @@ func runVirtualYQ(ctx context.Context, args []string) error {
 			return fmt.Errorf("yq: execution error: %v", err)
 		}
 		outBytes, _ := yaml.Marshal(v)
-		fmt.Fprintf(hc.Stdout, "%s---\n", string(outBytes))
+		fmt.Fprintf(hc.Stdout, "%s---\n", outBytes)
 	}
 	return nil
 }
 
-func runVirtualHTTP(ctx context.Context, args []string) error {
+// http — simple HTTP client
+
+type httpBinary struct{}
+
+func (httpBinary) Name() string        { return "http" }
+func (httpBinary) Description() string { return "Simple HTTP client — GET a URL and print the response" }
+func (httpBinary) Usage() string       { return "http <url>" }
+
+func (httpBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	if len(args) < 2 {
 		return fmt.Errorf("http: missing url argument")
@@ -107,7 +130,15 @@ func runVirtualHTTP(ctx context.Context, args []string) error {
 	return err
 }
 
-func runVirtualDarkScan(ctx context.Context, args []string) error {
+// darkscan — malware scanner (simulated)
+
+type darkscanBinary struct{}
+
+func (darkscanBinary) Name() string        { return "darkscan" }
+func (darkscanBinary) Description() string { return "Malware scanner — submit a file to the DarkAPI scanner" }
+func (darkscanBinary) Usage() string       { return "darkscan <file>" }
+
+func (darkscanBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	if len(args) < 2 {
 		return fmt.Errorf("darkscan: missing file argument")
@@ -119,7 +150,15 @@ func runVirtualDarkScan(ctx context.Context, args []string) error {
 	return nil
 }
 
-func runVirtualMemForensics(ctx context.Context, args []string) error {
+// memforensics — memory forensics (simulated)
+
+type memforensicsBinary struct{}
+
+func (memforensicsBinary) Name() string        { return "memforensics" }
+func (memforensicsBinary) Description() string { return "Memory forensics — scan a process for secrets and injections" }
+func (memforensicsBinary) Usage() string       { return "memforensics <pid>" }
+
+func (memforensicsBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	if len(args) < 2 {
 		return fmt.Errorf("memforensics: missing pid argument")
@@ -129,4 +168,12 @@ func runVirtualMemForensics(ctx context.Context, args []string) error {
 	fmt.Fprintf(hc.Stdout, "[*] Scanning memory regions for secrets and injections via ads-memory-forensics...\n")
 	fmt.Fprintf(hc.Stdout, "[-] No threats detected.\n")
 	return nil
+}
+
+func init() {
+	Register(jqBinary{})
+	Register(yqBinary{})
+	Register(httpBinary{})
+	Register(darkscanBinary{})
+	Register(memforensicsBinary{})
 }

@@ -3,11 +3,10 @@ package security
 import (
 	"context"
 	"fmt"
-	"go.starlark.net/starlark"
-	"mvdan.cc/sh/v3/interp"
 	"strings"
 
-	"adssh/sysmgmt"
+	"go.starlark.net/starlark"
+	"mvdan.cc/sh/v3/interp"
 )
 
 func BashInterceptor(restricted bool, globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
@@ -34,24 +33,18 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 			}
 			LogPolicyDecision(pctx.User, cmd, true, "")
 
-			// 1. Check for custom Starlark Commands
+			// 1. Custom Starlark commands registered via register_command()
 			if globals != nil {
 				if dictVal, ok := globals["__custom_commands__"]; ok {
 					if dict, ok := dictVal.(*starlark.Dict); ok {
 						if cmdVal, found, _ := dict.Get(starlark.String(args[0])); found {
 							if callable, ok := cmdVal.(starlark.Callable); ok {
-								// Found a custom Starlark command — already authorized by Rego above
-								// Run it in a new Thread to ensure thread-safety for background Bash jobs
 								newThread := &starlark.Thread{Name: "bash-interceptor"}
-
-								// Convert args to starlark list
 								var starlarkArgs []starlark.Value
 								for _, arg := range args {
 									starlarkArgs = append(starlarkArgs, starlark.String(arg))
 								}
-								listArg := starlark.NewList(starlarkArgs)
-
-								_, err := starlark.Call(newThread, callable, starlark.Tuple{listArg}, nil)
+								_, err := starlark.Call(newThread, callable, starlark.Tuple{starlark.NewList(starlarkArgs)}, nil)
 								return err
 							}
 						}
@@ -59,47 +52,20 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 				}
 			}
 
-			// 2. Virtual DevOps Binaries — already authorized by Rego above
-			isVirtual := args[0] == "jq" || args[0] == "yq" || args[0] == "http" || args[0] == "mirror" || args[0] == "cmdgen" || args[0] == "darkscan" || args[0] == "memforensics" || args[0] == "package" || args[0] == "proc" || args[0] == "grant"
-			if isVirtual {
-				if args[0] == "jq" {
-					return runVirtualJQ(ctx, args)
-				}
-				if args[0] == "yq" {
-					return runVirtualYQ(ctx, args)
-				}
-				if args[0] == "http" {
-					return runVirtualHTTP(ctx, args)
-				}
-				if args[0] == "mirror" {
-					return runMirrorCommand(ctx, args)
-				}
-				if args[0] == "cmdgen" {
-					return runCmdGen(ctx, args)
-				}
-				if args[0] == "darkscan" {
-					return runVirtualDarkScan(ctx, args)
-				}
-				if args[0] == "memforensics" {
-					return runVirtualMemForensics(ctx, args)
-				}
-				if args[0] == "package" {
-					return sysmgmt.RunPackage(ctx, args)
-				}
-				if args[0] == "proc" {
-					return sysmgmt.RunProc(ctx, args)
-				}
-				if args[0] == "grant" {
-					var sessionID string
+			// 2. Virtual binary registry — thread sessionID through context for binaries that need it
+			if vb, ok := Lookup(args[0]); ok {
+				sessionID := ""
+				if globals != nil {
 					if val, ok := globals["SESSION_ID"]; ok {
 						if strVal, ok := val.(starlark.String); ok {
 							sessionID = string(strVal)
 						}
 					}
-					return RunGrant(ctx, args, sessionID)
 				}
+				return DispatchVBin(WithSessionID(ctx, sessionID), vb, args)
 			}
 
+			// 3. Restricted mode checks before falling through to the real shell
 			if restricted {
 				if strings.Contains(args[0], "/") {
 					return fmt.Errorf("adssh: restricted: cannot specify '/' in command names")
@@ -108,6 +74,7 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 					return fmt.Errorf("adssh: restricted: %s is not allowed", args[0])
 				}
 			}
+
 			return next(ctx, args)
 		}
 	}
