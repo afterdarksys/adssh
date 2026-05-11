@@ -1,5 +1,6 @@
-# Binary
+# Binaries
 adssh
+adssh-mcp
 
 # Plugin shared objects (built locally)
 *.so
