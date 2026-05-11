@@ -24,6 +24,13 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 	SetupAWSAPI(env)
 	SetupOCIAPI(env)
 	SetupGCPAPI(env)
+	SetupAzureAPI(env)
+
+	// Interactive process automation (PTY-backed expect)
+	SetupExpectAPI(env)
+
+	// Docker Engine API (images, networks, volumes, container management)
+	SetupDockerAPI(env)
 
 	// VCS: git + GitHub
 	SetupVCSAPI(env)
