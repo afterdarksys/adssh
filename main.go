@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
@@ -77,6 +78,15 @@ func main() {
 
 	// 3. Initialize audit logging
 	security.InitAuditLog(cfg.AuditLogPath, cfg.AuditURL, cfg.AuditToken)
+
+	// 3b. Initialize HMAC chain ledger (next to the flat audit log)
+	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
+	xdgDataHome := config.XDGDataHome()
+	security.InitChain(
+		cfg.AuditLogPath+".chain",
+		filepath.Join(xdgDataHome, "audit.key"),
+		sessionID,
+	)
 
 	// 4. Load RBAC entitlements (if a path was configured)
 	if cfg.EntitlementsPath != "" {

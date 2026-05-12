@@ -50,6 +50,16 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 			}
 			LogPolicyDecision(pctx.User, cmd, true, "")
 
+			// 0a. Change management ticket check
+			if err := CMSessionCheck(args[0], args[1:]); err != nil {
+				return err
+			}
+
+			// 0b. 4-eyes dual-approval gate
+			if err := CheckFourEyes(cmd, args, nil); err != nil {
+				return err
+			}
+
 			// 1. Custom Starlark commands registered via register_command()
 			if globals != nil {
 				if dictVal, ok := globals["__custom_commands__"]; ok {

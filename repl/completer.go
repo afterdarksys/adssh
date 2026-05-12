@@ -26,7 +26,7 @@ type adsshCompleter struct {
 var virtualBinaries = []string{
 	"jq", "yq", "http", "mirror", "cmdgen",
 	"stty", "vbins", "darkscan", "memforensics",
-	"proc", "package", "history", "fc",
+	"proc", "package", "history", "fc", "help",
 }
 
 var shellBuiltins = []string{
@@ -107,6 +107,7 @@ var vbinSubcommands = map[string][]string{
 	"mirror":  {"list", "view", "console"},
 	"cmdgen":  {"docker", "kubectl", "aws"},
 	"set":     {"-e", "+e", "-u", "+u", "-x", "+x", "-o", "+o"},
+	"help":    {"list", "search", "categories", "examples"},
 }
 
 // Do implements readline.AutoCompleter.

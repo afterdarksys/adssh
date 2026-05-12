@@ -18,6 +18,9 @@ var (
 	remoteAuditURL   string
 	remoteAuditToken string
 	syslogWriter     *syslog.Writer
+
+	// auditChangeID is the current session's CM ticket ID, embedded in every chain entry.
+	auditChangeID string
 )
 
 // parseSyslogFacility maps an ADSSH_SYSLOG env var value to a syslog priority facility.
@@ -76,6 +79,28 @@ func InitAuditLog(path, url, token string) {
 	auditLogger = log.New(logFile, "AUDIT: ", log.Ldate|log.Ltime)
 }
 
+// SetAuditSession sets the chain session ID. Call this after InitChain if the session
+// ID is known separately (e.g. for SSH sessions generated after startup).
+func SetAuditSession(id string) {
+	chainMu.Lock()
+	chainSession = id
+	chainMu.Unlock()
+}
+
+// SetAuditChangeID stores a CM ticket ID that is embedded in every subsequent chain entry.
+func SetAuditChangeID(id string) {
+	chainMu.Lock()
+	auditChangeID = id
+	chainMu.Unlock()
+}
+
+// GetAuditChangeID returns the current CM ticket ID.
+func GetAuditChangeID() string {
+	chainMu.Lock()
+	defer chainMu.Unlock()
+	return auditChangeID
+}
+
 // isSyslogWarning returns true if the event string contains keywords that indicate
 // a warning or error severity.
 func isSyslogWarning(event string) bool {
@@ -119,6 +144,12 @@ func LogCommand(source string, cmd string) {
 		"source":  source,
 		"command": cmd,
 	})
+	AppendChain(ChainEntry{
+		Type:     "cmd",
+		Source:   source,
+		Command:  cmd,
+		ChangeID: GetAuditChangeID(),
+	})
 }
 
 func LogEvent(event string) {
@@ -132,6 +163,11 @@ func LogEvent(event string) {
 			syslogWriter.Info(event)
 		}
 	}
+	AppendChain(ChainEntry{
+		Type:     "event",
+		Command:  event,
+		ChangeID: GetAuditChangeID(),
+	})
 }
 
 // LogPolicyDecision records a Rego policy evaluation result in the audit log.
@@ -146,5 +182,25 @@ func LogPolicyDecision(user, command string, allowed bool, denyReason string) {
 		"command":     command,
 		"allowed":     allowed,
 		"deny_reason": denyReason,
+	})
+	AppendChain(ChainEntry{
+		Type:     "policy",
+		User:     user,
+		Command:  command,
+		Allowed:  &allowed,
+		Reason:   denyReason,
+		ChangeID: GetAuditChangeID(),
+	})
+}
+
+// LogCMTicket records a change management ticket entry in the chain.
+func LogCMTicket(ticketID string) {
+	if auditLogger != nil {
+		auditLogger.Printf("[CM] ticket=%s\n", ticketID)
+	}
+	AppendChain(ChainEntry{
+		Type:     "cm",
+		Reason:   ticketID,
+		ChangeID: ticketID,
 	})
 }
