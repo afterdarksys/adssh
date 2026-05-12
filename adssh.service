@@ -1,0 +1,16 @@
+[Unit]
+Description=ADSSH — Programmable DevOps Shell SSH Server
+After=network.target
+
+[Service]
+Type=simple
+User=adssh
+ExecStart=/usr/local/bin/adssh --serve :2222
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=adssh
+
+[Install]
+WantedBy=multi-user.target

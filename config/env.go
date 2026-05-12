@@ -43,19 +43,21 @@ type AppConfig struct {
 
 // LoadFromEnv populates an AppConfig from ADSSH_* environment variables,
 // filling in well-known defaults for any value not set.
+// Path defaults follow XDG Base Directory spec when XDG_* vars are set;
+// otherwise ~/.adssh/ is used for backward compatibility.
 func LoadFromEnv() AppConfig {
 	home, _ := os.UserHomeDir()
-	adsshDir := filepath.Join(home, ".adssh")
+	cfgDir := XDGConfigHome() // ~/.adssh or $XDG_CONFIG_HOME/adssh
 
 	cfg := AppConfig{
 		Restricted:         isTruthy(os.Getenv("ADSSH_RESTRICTED")),
 		ServeAddr:          os.Getenv("ADSSH_SERVE"),
 		EntitlementsPath:   os.Getenv("ADSSH_ENTITLEMENTS"),
-		PolicyPath:         envOr("ADSSH_POLICY", filepath.Join(adsshDir, "policy.rego")),
-		AuditLogPath:       envOr("ADSSH_AUDIT_LOG", filepath.Join(adsshDir, "audit.log")),
-		HistoryFile:        envOr("ADSSH_HISTORY", filepath.Join(adsshDir, "history")),
-		HostKeyPath:        envOr("ADSSH_HOST_KEY", filepath.Join(adsshDir, "host_key")),
-		AuthorizedKeysPath: envOr("ADSSH_AUTHORIZED_KEYS", filepath.Join(adsshDir, "authorized_keys")),
+		PolicyPath:         envOr("ADSSH_POLICY", filepath.Join(cfgDir, "policy.rego")),
+		AuditLogPath:       envOr("ADSSH_AUDIT_LOG", filepath.Join(cfgDir, "audit.log")),
+		HistoryFile:        envOr("ADSSH_HISTORY", filepath.Join(cfgDir, "history")),
+		HostKeyPath:        envOr("ADSSH_HOST_KEY", filepath.Join(cfgDir, "host_key")),
+		AuthorizedKeysPath: envOr("ADSSH_AUTHORIZED_KEYS", filepath.Join(cfgDir, "authorized_keys")),
 		ProfilePath:        envOr("ADSSH_PROFILE", filepath.Join(home, ".adsshprofile")),
 		RCPath:             envOr("ADSSH_RC", filepath.Join(home, ".adsshrc")),
 		AuditURL:           os.Getenv("ADSSH_AUDIT_URL"),

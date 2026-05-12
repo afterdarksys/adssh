@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,8 +10,11 @@ import (
 
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
+	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
 
 	"adssh/config"
+	"adssh/parser"
 	"adssh/repl"
 	"adssh/security"
 	"adssh/starlarkext"
@@ -25,11 +29,18 @@ func init() {
 }
 
 func main() {
+	// 0. Set SHELL env var for POSIX compliance — child processes need this
+	if binaryPath, err := os.Executable(); err == nil {
+		os.Setenv("SHELL", binaryPath)
+	}
+
 	// 1. Load configuration from ADSSH_* environment variables (provides defaults)
 	cfg := config.LoadFromEnv()
 
 	// 2. Parse CLI flags — flags override env vars
 	cfg.IsLoginShell = strings.HasPrefix(os.Args[0], "-")
+
+	var cmdFlag string // -c "expression"
 
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -55,6 +66,9 @@ func main() {
 			i++
 		case (arg == "--policy") && i+1 < len(os.Args):
 			cfg.PolicyPath = os.Args[i+1]
+			i++
+		case (arg == "-c") && i+1 < len(os.Args):
+			cmdFlag = os.Args[i+1]
 			i++
 		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "":
 			cfg.ScriptPath = arg
@@ -121,6 +135,16 @@ func main() {
 	}
 
 	// 7. Dispatch to the appropriate execution mode
+
+	// 7a. -c flag: evaluate a single expression/command and exit
+	if cmdFlag != "" {
+		if err := evalOnce(thread, cmdFlag, env, cfg.Restricted); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if cfg.ServeAddr != "" {
 		if err := sys.EnableSSH(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, env, cfg.Restricted, smartReplWrapper); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start SSH server: %v\n", err)
@@ -129,13 +153,70 @@ func main() {
 	}
 
 	if cfg.ScriptPath != "" {
-		if _, err := starlark.ExecFile(thread, cfg.ScriptPath, nil, env); err != nil {
+		// Shebang / script file support: read content and evaluate
+		src, err := os.ReadFile(cfg.ScriptPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Cannot read script %s: %v\n", cfg.ScriptPath, err)
+			os.Exit(1)
+		}
+		// Strip shebang line if present
+		content := string(src)
+		if strings.HasPrefix(content, "#!") {
+			if idx := strings.IndexByte(content, '\n'); idx >= 0 {
+				content = content[idx+1:]
+			} else {
+				content = ""
+			}
+		}
+		if _, err := starlark.ExecFile(thread, cfg.ScriptPath, []byte(content), env); err != nil {
 			fmt.Fprintf(os.Stderr, "Execution error: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
 		smartReplWrapper(env, cfg.Restricted, cfg.HistoryFile, os.Stdin, os.Stdout, os.Stderr)
 	}
+}
+
+// evalOnce evaluates a single expression or command (for -c flag).
+// It goes through the same security/audit machinery as the REPL.
+func evalOnce(thread *starlark.Thread, src string, globals starlark.StringDict, restricted bool) error {
+	security.LogCommand(src, "")
+
+	mode := parser.DetermineMode(src)
+
+	if mode == parser.ModeStarlark {
+		// Try expression first
+		val, err := starlark.Eval(thread, "<-c>", src, globals)
+		if err == nil {
+			if val != nil && val != starlark.None {
+				fmt.Println(val.String())
+			}
+			return nil
+		}
+		// Fall back to statement (def, assignment, etc.)
+		if _, err2 := starlark.ExecFile(thread, "<-c>", src, globals); err2 != nil {
+			return fmt.Errorf("starlark error: %v", err2)
+		}
+		return nil
+	}
+
+	// Shell mode
+	f, parseErr := syntax.NewParser().Parse(strings.NewReader(src), "")
+	if parseErr != nil {
+		return fmt.Errorf("parse error: %v", parseErr)
+	}
+	runner, runErr := interp.New(
+		interp.StdIO(os.Stdin, os.Stdout, os.Stderr),
+		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
+		interp.OpenHandler(security.VirtualOpenHandler()),
+	)
+	if runErr != nil {
+		return fmt.Errorf("runner error: %v", runErr)
+	}
+	if err := runner.Run(context.Background(), f); err != nil {
+		return fmt.Errorf("command error: %v", err)
+	}
+	return nil
 }
 
 func printHelp() {

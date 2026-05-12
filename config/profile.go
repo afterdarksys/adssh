@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"go.starlark.net/starlark"
@@ -12,9 +14,11 @@ import (
 func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell bool, profilePath, rcPath string) (starlark.StringDict, error) {
 	var paths []string
 
-	// Login shell: load system-wide profiles first
+	// Login shell: source POSIX /etc/profile and ~/.profile first,
+	// then adssh-specific system profile.
 	if isLoginShell {
-		paths = append(paths, "/etc/profile", "/etc/adssh_profile")
+		sourceShellProfiles()
+		paths = append(paths, "/etc/adssh_profile")
 	}
 
 	paths = append(paths, profilePath, rcPath)
@@ -37,6 +41,43 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 		}
 	}
 	return env, nil
+}
+
+// sourceShellProfiles sources /etc/profile and ~/.profile by running them
+// through the system sh and exporting resulting env vars into the current
+// process. This is the standard POSIX login-shell behaviour.
+func sourceShellProfiles() {
+	home, _ := os.UserHomeDir()
+
+	candidates := []string{
+		"/etc/profile",
+		filepath.Join(home, ".profile"),
+	}
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			continue
+		}
+		// Source the file in a subshell and print the resulting environment.
+		// We use 'env' after sourcing so we can parse the exported variables.
+		cmd := exec.Command("sh", "-c", ". "+p+" && env")
+		out, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		// Parse the output and apply new/changed variables to the current process.
+		for _, line := range strings.Split(string(out), "\n") {
+			if idx := strings.IndexByte(line, '='); idx > 0 {
+				key := line[:idx]
+				val := line[idx+1:]
+				// Only propagate if not already set (profiles shouldn't override
+				// explicit ADSSH_* vars or existing user settings).
+				if os.Getenv(key) == "" {
+					os.Setenv(key, val)
+				}
+			}
+		}
+	}
 }
 
 const defaultRC = `# Welcome to Adssh!

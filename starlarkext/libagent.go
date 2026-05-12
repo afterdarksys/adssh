@@ -58,8 +58,21 @@ func createLoadAgent(env starlark.StringDict) *starlark.Builtin {
 		if err != nil {
 			return starlark.None, fmt.Errorf("cannot determine home directory: %v", err)
 		}
+		// Look in ~/.adssh/agents/ first; fall back to ./agents/ for development workflows.
 		path := filepath.Join(home, ".adssh", "agents", name+".md")
 		data, err := os.ReadFile(path)
+		if err != nil {
+			// Development fallback: check ./agents/<name>.md relative to cwd.
+			cwd, cwdErr := os.Getwd()
+			if cwdErr == nil {
+				devPath := filepath.Join(cwd, "agents", name+".md")
+				if devData, devErr := os.ReadFile(devPath); devErr == nil {
+					data = devData
+					path = devPath
+					err = nil
+				}
+			}
+		}
 		if err != nil {
 			return starlark.None, fmt.Errorf("agent %q not found — copy agents/%s.md to %s", name, name, path)
 		}

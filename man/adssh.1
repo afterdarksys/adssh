@@ -1,0 +1,243 @@
+.TH ADSSH 1 "2026" "adssh" "User Commands"
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH NAME
+adssh \- programmable DevOps shell (Starlark + POSIX shell hybrid)
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH SYNOPSIS
+.B adssh
+[\fIOPTIONS\fR]
+[\fIscript.star\fR]
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH DESCRIPTION
+.B adssh
+is a security-first programmable shell that blends a Starlark (safe Python
+dialect) REPL with a full POSIX shell interpreter.
+It provides RBAC entitlements, OPA/Rego policy enforcement, structured
+audit logging, a built-in SSH server, and a suite of virtual binaries
+(\fBjq\fR, \fByq\fR, \fBhttp\fR, \fBcmdgen\fR, and more) — all without
+installing external tools.
+.PP
+When invoked interactively,
+.B adssh
+presents a dual-mode REPL.
+Lines that look like Starlark are evaluated as Starlark; lines that look
+like shell commands are routed to the embedded POSIX shell interpreter.
+Use
+.B !
+or
+.B $
+as a prefix to force shell mode.
+.PP
+When a
+.I script.star
+argument is supplied, the file is evaluated non-interactively and adssh
+exits.
+Shebang lines (\fB#!\fR) are stripped automatically.
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.TP
+.BR \-l ", " \-\-login
+Treat this session as a login shell.
+Causes
+.B ~/.adsshprofile
+(or the path in \fBADSSH_PROFILE\fR) to be sourced before the RC file.
+This flag is also set automatically when
+.B argv[0]
+starts with
+.BR \- .
+.TP
+.BR \-r ", " \-\-restricted
+Enable restricted (sandboxed) mode.
+In restricted mode path traversal, \fBcd\fR, \fBexport\fR, and other
+privileged shell operations are blocked by the security layer.
+.TP
+.BI \-c " cmd"
+Evaluate
+.I cmd
+as a single expression or command and exit.
+The string is parsed with the same mode-detection heuristic used in the
+REPL (Starlark first, then POSIX shell).
+.TP
+.BI \-\-serve " :PORT"
+Start the built-in SSH server listening on
+.I :PORT
+(e.g.
+.BR \-\-serve\ :2222 ).
+The server reads host keys from
+.B ~/.adssh/host_key
+and authorised keys from
+.B ~/.adssh/authorized_keys
+(overridable via environment variables).
+The process remains in the foreground; combine with
+.BR \-\-login / \-\-restricted
+to control the session policy for remote users.
+.TP
+.BI \-\-entitlements " PATH"
+Load RBAC entitlements from the YAML file at
+.IR PATH .
+Entitlements control which roles and capabilities are available to
+authenticated users.
+.TP
+.BI \-\-policy " PATH"
+Load an OPA/Rego policy file from
+.IR PATH .
+The policy is evaluated for every command before execution; a deny decision
+terminates the command with an error.
+.TP
+.B \-\-init
+Create
+.B ~/.adssh/
+with a starter
+.BR authorized_keys ,
+.BR default.rego ,
+and
+.B .adsshrc
+file, then exit.
+Existing files are not overwritten.
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH ENVIRONMENT
+.TP
+.B ADSSH_AUDIT_LOG
+Path to the append-only audit log file.
+Default:
+.BR ~/.adssh/audit.log .
+.TP
+.B ADSSH_AUDIT_URL
+Webhook URL for streaming audit events to a remote SIEM.
+When set, every audit event is also POSTed to this endpoint.
+.TP
+.B ADSSH_AUDIT_TOKEN
+Bearer token sent in the
+.B Authorization
+header when
+.B ADSSH_AUDIT_URL
+is configured.
+.TP
+.B ADSSH_POLICY
+Path to the OPA/Rego policy file.
+Default:
+.BR ~/.adssh/policy.rego .
+Equivalent to
+.BR \-\-policy .
+.TP
+.B ADSSH_ENTITLEMENTS
+Path to the RBAC entitlements YAML file.
+Equivalent to
+.BR \-\-entitlements .
+.TP
+.B ADSSH_RESTRICTED
+Set to
+.BR 1 ,
+.BR true ,
+or
+.B yes
+to enable restricted mode at startup.
+Equivalent to
+.BR \-r .
+.TP
+.B ADSSH_SERVE
+SSH server listen address (e.g.
+.BR :2222 ).
+Equivalent to
+.BR \-\-serve .
+.TP
+.B ADSSH_MODEL
+Name of the AI model used by Starlark AI builtins (e.g.
+.BR claude-3-5-sonnet-20241022 ).
+.TP
+.B ANTHROPIC_API_KEY
+API key for the Anthropic Claude API, used by AI-powered virtual binaries
+and Starlark extensions.
+.TP
+.B ADSSH_PROFILE
+Path to the login profile script (Starlark).
+Default:
+.BR ~/.adsshprofile .
+Loaded only in login shells.
+.TP
+.B ADSSH_RC
+Path to the interactive RC script (Starlark).
+Default:
+.BR ~/.adsshrc .
+Loaded for every interactive session.
+.TP
+.B ADSSH_HISTORY
+Path to the readline history file.
+Default:
+.BR ~/.adssh/history .
+.TP
+.B XDG_CONFIG_HOME
+Base directory for user configuration files.
+.B adssh
+respects the XDG Base Directory Specification; configuration is stored
+under
+.BR $XDG_CONFIG_HOME/adssh/
+when this variable is set.
+.TP
+.B XDG_DATA_HOME
+Base directory for user data files
+(default:
+.BR ~/.local/share ).
+.TP
+.B XDG_CACHE_HOME
+Base directory for user cache files
+(default:
+.BR ~/.cache ).
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH FILES
+.TP
+.B ~/.config/adssh/profile
+XDG-preferred path for the login profile script (Starlark).
+Loaded before the RC file when running as a login shell.
+.TP
+.B ~/.config/adssh/rc
+XDG-preferred path for the interactive RC script (Starlark).
+Evaluated at the start of every interactive session.
+.TP
+.B ~/.adssh/
+Legacy configuration directory.
+.B ~/.adsshprofile
+and
+.B ~/.adsshrc
+are the default RC paths when the XDG equivalents are absent.
+The directory also holds
+.BR audit.log ,
+.BR history ,
+.BR host_key ,
+.BR authorized_keys ,
+and
+.BR policy.rego .
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH EXAMPLES
+.TP
+.B Run an interactive shell session:
+.nf
+exec adssh
+.fi
+.TP
+.B Start the built-in SSH server on port 2222:
+.nf
+adssh --serve :2222
+.fi
+.TP
+.B Run a one-off command and exit (Starlark or shell auto-detected):
+.nf
+adssh -c 'ls -la | jq .'
+adssh -c 'aws.ec2.list_instances(region="us-east-1")'
+.fi
+.TP
+.B Launch a restricted, login shell with a custom policy:
+.nf
+adssh --login --restricted --policy /etc/adssh/policy.rego
+.fi
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH SEE ALSO
+.BR sh (1),
+.BR bash (1),
+.BR ssh (1)
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH AUTHORS
+The adssh contributors.

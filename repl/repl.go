@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 
 	"adssh/parser"
@@ -140,6 +143,98 @@ func evalStarlark(thread *starlark.Thread, src string, globals starlark.StringDi
 	}
 }
 
+// isBackgroundLine returns true and the stripped command if line ends with '&'.
+func isBackgroundLine(line string) (string, bool) {
+	trimmed := strings.TrimRight(line, " \t")
+	if strings.HasSuffix(trimmed, "&") {
+		return strings.TrimRight(trimmed[:len(trimmed)-1], " \t"), true
+	}
+	return "", false
+}
+
+// runBackground launches line as a background job and prints [N] PID XXXX.
+func runBackground(line string, out io.Writer) {
+	// Build a shell command via /bin/sh so that pipes and redirects work.
+	cmd := exec.Command("/bin/sh", "-c", line)
+	cmd.Stdout = out
+	cmd.Stderr = out
+
+	id, err := sys.NewJob(cmd)
+	if err != nil {
+		fmt.Fprintf(out, "bg: failed to start: %v\n", err)
+		return
+	}
+	fmt.Fprintf(out, "[%d] %d\n", id, cmd.Process.Pid)
+}
+
+// jobControlHandler returns an ExecHandler that intercepts jobs/fg/bg/wait.
+func jobControlHandler(out io.Writer) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+		return func(ctx context.Context, args []string) error {
+			if len(args) == 0 {
+				return next(ctx, args)
+			}
+
+			hc := interp.HandlerCtx(ctx)
+			stdout := hc.Stdout
+			if stdout == nil {
+				stdout = out
+			}
+
+			switch args[0] {
+			case "jobs":
+				jobs := sys.Jobs()
+				// Sort by ID for stable output.
+				sort.Slice(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID })
+				for _, j := range jobs {
+					cmdStr := strings.Join(j.Args, " ")
+					fmt.Fprintf(stdout, "[%d] %-8s PID %-6d %s\n", j.ID, string(j.Status), j.PID, cmdStr)
+				}
+				return nil
+
+			case "fg":
+				id, err := jobIDArg(args)
+				if err != nil {
+					return err
+				}
+				return sys.FgJob(id)
+
+			case "bg":
+				id, err := jobIDArg(args)
+				if err != nil {
+					return err
+				}
+				return sys.BgJob(id)
+
+			case "wait":
+				id := 0 // 0 means wait for all
+				if len(args) >= 2 {
+					n, err := strconv.Atoi(args[1])
+					if err != nil {
+						return fmt.Errorf("wait: invalid job id: %s", args[1])
+					}
+					id = n
+				}
+				return sys.WaitJob(id)
+			}
+
+			return next(ctx, args)
+		}
+	}
+}
+
+// jobIDArg extracts and validates a numeric job ID from args[1].
+func jobIDArg(args []string) (int, error) {
+	if len(args) < 2 {
+		return 0, fmt.Errorf("%s: missing job id", args[0])
+	}
+	id, err := strconv.Atoi(args[1])
+	if err != nil || id < 1 {
+		return 0, fmt.Errorf("%s: invalid job id: %s", args[0], args[1])
+	}
+	return id, nil
+}
+
 func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
 	starlarkext.SetupExtensions(globals, restricted)
 
@@ -194,7 +289,8 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	runner, err := interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
-		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
+		// Job control handler runs first, then security interceptor.
+		interp.ExecHandlers(jobControlHandler(out), security.BashInterceptor(restricted, globals)),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 	if err != nil {
@@ -257,6 +353,12 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				line = strings.TrimSpace(line[1:])
 			} else if strings.HasPrefix(line, "$ ") {
 				line = strings.TrimSpace(line[2:])
+			}
+
+			// Background execution: command ending with '&'
+			if bgCmd, isBg := isBackgroundLine(line); isBg {
+				runBackground(bgCmd, out)
+				continue
 			}
 
 			parserFile, err := syntax.NewParser().Parse(strings.NewReader(line), "")

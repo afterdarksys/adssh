@@ -122,6 +122,12 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 	cloudDict.SetKey(starlark.String("gen"), starlark.NewBuiltin("gen", builtinCloudGen))
 	cloudDict.SetKey(starlark.String("register_mapper"), starlark.NewBuiltin("register_mapper", builtinRegisterMapper))
 	env["cloud"] = cloudDict
+
+	// Expand cloud namespaces with additional APIs
+	ExpandGCPAPI(env)
+	SetupTemplateAPI(env)
+	ExpandAWSAPIExtra(env)
+	ExpandNotifyAPI(env)
 }
 
 func builtinMD5(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

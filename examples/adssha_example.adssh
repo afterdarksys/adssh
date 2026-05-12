@@ -1,0 +1,65 @@
+# Example: Multi-turn DevOps workflow with ADSSHA
+# Usage: adssh examples/adssha_example.adssh
+#
+# Prerequisites:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   cp agents/adssha.md ~/.adssh/agents/adssha.md  (or run from repo root — ./agents/ is a fallback)
+
+# ---------------------------------------------------------------------------
+# 1. Load the ADSSHA agent
+#    Reads ~/.adssh/agents/adssha.md (falls back to ./agents/adssha.md)
+#    Returns a stateful callable that maintains multi-turn conversation history.
+# ---------------------------------------------------------------------------
+agent = sys.load_agent("adssha")
+
+# ---------------------------------------------------------------------------
+# 2. EC2 health check — first turn
+#    Ask ADSSHA to describe the current EC2 state and flag unhealthy instances.
+# ---------------------------------------------------------------------------
+print("=== EC2 Health Check ===")
+response = agent("List all EC2 instances in us-east-1 and tell me which ones look unhealthy")
+print(response)
+
+# ---------------------------------------------------------------------------
+# 3. Remediation advice — second turn (agent remembers the EC2 context)
+# ---------------------------------------------------------------------------
+print("\n=== Remediation Advice ===")
+response = agent("For any unhealthy instances, what would be the safest remediation steps?")
+print(response)
+
+# ---------------------------------------------------------------------------
+# 4. Generate a diagnostic Starlark snippet — third turn
+# ---------------------------------------------------------------------------
+print("\n=== CloudWatch Diagnostic Script ===")
+response = agent("Write a Starlark script to check CPU utilization via CloudWatch for those instances")
+print(response)
+
+# ---------------------------------------------------------------------------
+# 5. Kubernetes pod debugging workflow — new topic, same agent session
+# ---------------------------------------------------------------------------
+print("\n=== Kubernetes Pod Debug ===")
+response = agent(
+    "My production Kubernetes namespace has pods stuck in CrashLoopBackOff. " +
+    "Write a Starlark script using k8s.list_pods and k8s.list_events to diagnose the root cause"
+)
+print(response)
+
+# ---------------------------------------------------------------------------
+# 6. Secret rotation guidance
+# ---------------------------------------------------------------------------
+print("\n=== Secret Rotation Workflow ===")
+response = agent(
+    "Walk me through the safest way to rotate the prod/db-password secret in AWS Secrets Manager " +
+    "using adssh Starlark. Include verification and a Slack notification on completion."
+)
+print(response)
+
+# ---------------------------------------------------------------------------
+# 7. Deployment notification pattern
+# ---------------------------------------------------------------------------
+print("\n=== Deployment Notification ===")
+response = agent(
+    "Write a Starlark snippet that checks whether a Kubernetes deployment rollout is healthy " +
+    "and sends a Slack message to #deployments with the result (ready/degraded)"
+)
+print(response)

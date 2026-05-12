@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/syslog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -15,10 +17,50 @@ var (
 	auditLogger      *log.Logger
 	remoteAuditURL   string
 	remoteAuditToken string
+	syslogWriter     *syslog.Writer
 )
+
+// parseSyslogFacility maps an ADSSH_SYSLOG env var value to a syslog priority facility.
+func parseSyslogFacility(s string) syslog.Priority {
+	switch strings.ToLower(s) {
+	case "1", "auth":
+		return syslog.LOG_AUTH
+	case "daemon":
+		return syslog.LOG_DAEMON
+	case "local0":
+		return syslog.LOG_LOCAL0
+	case "local1":
+		return syslog.LOG_LOCAL1
+	case "local2":
+		return syslog.LOG_LOCAL2
+	case "local3":
+		return syslog.LOG_LOCAL3
+	case "local4":
+		return syslog.LOG_LOCAL4
+	case "local5":
+		return syslog.LOG_LOCAL5
+	case "local6":
+		return syslog.LOG_LOCAL6
+	case "local7":
+		return syslog.LOG_LOCAL7
+	default:
+		return syslog.LOG_AUTH
+	}
+}
 
 // InitAuditLog initialises the audit logger at the given path and sets up remote SIEM.
 func InitAuditLog(path, url, token string) {
+	// Initialise syslog writer if ADSSH_SYSLOG is set.
+	if syslogEnv := os.Getenv("ADSSH_SYSLOG"); syslogEnv != "" {
+		facility := parseSyslogFacility(syslogEnv)
+		w, err := syslog.New(facility|syslog.LOG_INFO, "adssh")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open syslog writer: %v\n", err)
+		} else {
+			syslogWriter = w
+		}
+	}
+
 	remoteAuditURL = url
 	remoteAuditToken = token
 
@@ -32,6 +74,16 @@ func InitAuditLog(path, url, token string) {
 		return
 	}
 	auditLogger = log.New(logFile, "AUDIT: ", log.Ldate|log.Ltime)
+}
+
+// isSyslogWarning returns true if the event string contains keywords that indicate
+// a warning or error severity.
+func isSyslogWarning(event string) bool {
+	lower := strings.ToLower(event)
+	return strings.Contains(lower, "error") ||
+		strings.Contains(lower, "fail") ||
+		strings.Contains(lower, "deny") ||
+		strings.Contains(lower, "restrict")
 }
 
 func dispatchAuditEvent(payload map[string]interface{}) {
@@ -72,6 +124,13 @@ func LogCommand(source string, cmd string) {
 func LogEvent(event string) {
 	if auditLogger != nil {
 		auditLogger.Println(event)
+	}
+	if syslogWriter != nil {
+		if isSyslogWarning(event) {
+			syslogWriter.Warning(event)
+		} else {
+			syslogWriter.Info(event)
+		}
 	}
 }
 
