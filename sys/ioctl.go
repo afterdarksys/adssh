@@ -1,6 +1,7 @@
 package sys
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 
@@ -23,4 +24,20 @@ func InitTerminal() error {
 	}
 
 	return nil
+}
+
+// SetWinsize applies rows and/or cols to the terminal window size.
+// Pass 0 for a dimension to leave it unchanged.
+func SetWinsize(fd, rows, cols int) error {
+	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
+	if err != nil {
+		return fmt.Errorf("SetWinsize: %w", err)
+	}
+	if rows > 0 {
+		ws.Row = uint16(rows)
+	}
+	if cols > 0 {
+		ws.Col = uint16(cols)
+	}
+	return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, ws)
 }

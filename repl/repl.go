@@ -6,9 +6,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 
 	"adssh/parser"
 	"adssh/security"
@@ -269,6 +272,45 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// Welcome banner — one line, shows both modes
 	fmt.Fprintf(out, "adssh  shell: ls -la | jq '.'    starlark: aws.ec2.list_instances()    vbins: list tools    exit: quit\n")
 
+	// commandRunning is true while runner.Run() is executing a foreground command.
+	// The SIGTSTP handler uses this to decide whether to suspend adssh itself.
+	var commandRunning atomic.Bool
+
+	// SIGTSTP handler: when at the prompt (no foreground command), suspend adssh
+	// by restoring the terminal to a sane state, raising SIGSTOP on ourselves,
+	// then re-entering raw mode when SIGCONT wakes us.
+	tstpCh := make(chan os.Signal, 1)
+	signal.Notify(tstpCh, syscall.SIGTSTP)
+	go func() {
+		for range tstpCh {
+			if commandRunning.Load() {
+				// A foreground command owns the terminal; let the signal reach it
+				// by temporarily defaulting and re-raising.
+				signal.Reset(syscall.SIGTSTP)
+				_ = syscall.Kill(os.Getpid(), syscall.SIGTSTP)
+				signal.Notify(tstpCh, syscall.SIGTSTP)
+				continue
+			}
+			// At the prompt: save terminal state, restore cooked mode, stop self.
+			saved, saveErr := sys.SaveTermios(int(os.Stdin.Fd()))
+			if saveErr == nil {
+				_ = sys.MakeSane(int(os.Stdin.Fd()))
+			}
+			rl.Clean() // erase the partial prompt line before stopping
+			fmt.Fprintln(out)
+			// Reset disposition so the SIGSTOP below actually suspends us.
+			signal.Reset(syscall.SIGTSTP)
+			_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+			// Execution resumes here on SIGCONT.
+			signal.Notify(tstpCh, syscall.SIGTSTP)
+			if saveErr == nil {
+				_ = sys.RestoreTermios(int(os.Stdin.Fd()), saved)
+			}
+			// Redraw the prompt so the user sees where they are.
+			rl.SetPrompt("adssh> ")
+		}
+	}()
+
 	// Register set_keymap into Starlark globals
 	globals["set_keymap"] = starlark.NewBuiltin("set_keymap", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var mode string
@@ -310,7 +352,15 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 		line, err := rl.Readline()
 		if err != nil {
-			if err == readline.ErrInterrupt || err == io.EOF {
+			if err == readline.ErrInterrupt {
+				// Ctrl+C at the prompt: clear the line and re-prompt.
+				// (If a command was running, readline would not have been
+				// reading — the SIGINT goes to the child process group.)
+				fmt.Fprintln(out)
+				continue
+			}
+			if err == io.EOF {
+				// Ctrl+D on an empty line: exit the shell.
 				break
 			}
 			continue
@@ -378,7 +428,9 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				}
 			}
 
+			commandRunning.Store(true)
 			err = runner.Run(ctx, parserFile)
+			commandRunning.Store(false)
 
 			if val, ok := globals["SESSION_ID"]; ok {
 				if sessionIDStr, ok := val.(starlark.String); ok {

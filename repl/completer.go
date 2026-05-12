@@ -20,7 +20,7 @@ type adsshCompleter struct {
 	globals starlark.StringDict
 }
 
-var virtualBinaries = []string{"jq", "yq", "http", "mirror", "cmdgen"}
+var virtualBinaries = []string{"jq", "yq", "http", "mirror", "cmdgen", "stty", "vbins", "darkscan", "memforensics", "proc", "package"}
 
 var shellBuiltins = []string{
 	"cd", "export", "exit", "quit", "echo", "ls", "cat", "grep",
