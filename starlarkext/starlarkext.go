@@ -22,9 +22,22 @@ var (
 func SetupExtensions(env starlark.StringDict, restricted bool) {
 	// Cloud providers
 	SetupAWSAPI(env)
+	ExpandAWSAPI(env) // adds rds, eks, iam, sqs, ecr
 	SetupOCIAPI(env)
 	SetupGCPAPI(env)
 	SetupAzureAPI(env)
+
+	// Kubernetes
+	SetupK8sAPI(env)
+
+	// Secrets management (Vault, AWS SM, Azure KV, GCP SM)
+	SetupSecretsAPI(env)
+
+	// Databases (postgres, mysql, redis)
+	SetupDatabaseAPI(env)
+
+	// Notifications (Slack, webhook, PagerDuty)
+	SetupNotifyAPI(env)
 
 	// Interactive process automation (PTY-backed expect)
 	SetupExpectAPI(env)
