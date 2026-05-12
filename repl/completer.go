@@ -15,22 +15,34 @@ import (
 //     and dynamically registered custom commands / plugin names.
 //   - Starlark namespace.method (e.g. "sys.ge" → "sys.getenv")
 //   - mirror / cmdgen subcommands
+//   - vbin subcommands (stty, history, fc, ...)
+//   - History-prefix suggestions
 //   - File paths for all other arguments
 type adsshCompleter struct {
 	globals starlark.StringDict
+	history *[]string
 }
 
-var virtualBinaries = []string{"jq", "yq", "http", "mirror", "cmdgen", "stty", "vbins", "darkscan", "memforensics", "proc", "package"}
+var virtualBinaries = []string{
+	"jq", "yq", "http", "mirror", "cmdgen",
+	"stty", "vbins", "darkscan", "memforensics",
+	"proc", "package", "history", "fc",
+}
 
 var shellBuiltins = []string{
 	"cd", "export", "exit", "quit", "echo", "ls", "cat", "grep",
 	"find", "which", "env", "pwd", "mkdir", "rm", "cp", "mv",
 	"chmod", "chown", "ps", "kill", "jobs", "bg", "fg",
+	// extended builtins
+	"alias", "unalias", "source", ".", "set", "read", "trap",
+	"pushd", "popd", "dirs", "type", "command", "time", "disown",
+	"fc", "history",
 }
 
 var starlarkNamespaces = []string{
 	"sys", "net", "crypto", "data", "re", "sec", "i18n", "cloud", "plugins",
 	"aws", "oci", "gcp", "git", "github", "containers",
+	"az", "k8s", "docker", "secrets", "db", "notify", "expect", "template",
 }
 
 // starlarkNamespaceKeys maps namespace → list of method/sub-namespace names.
@@ -60,10 +72,42 @@ var starlarkNamespaceKeys = map[string][]string{
 	"github": {"list_repos", "list_prs", "create_pr", "merge_pr", "list_issues", "create_issue", "close_issue", "create_release", "list_workflows", "trigger_workflow"},
 	// Containers
 	"containers": {"exec", "list", "audit", "replay", "clean"},
+	// Azure
+	"az": {"rg", "vm", "storage", "aks"},
+	// Kubernetes
+	"k8s": {"pods", "deployments", "services", "namespaces", "configmaps", "nodes", "events"},
+	// Docker
+	"docker": {"ps", "inspect", "logs", "images", "networks", "volumes"},
+	// Secrets
+	"secrets": {"vault", "aws", "az", "gcp"},
+	// Database
+	"db": {"postgres", "mysql", "redis"},
+	// Notifications
+	"notify": {"slack", "webhook", "pagerduty", "teams"},
+	// Expect / template
+	"expect":   {"spawn"},
+	"template": {"render", "render_file"},
+	// AWS sub-namespaces
+	"aws.cloudwatch": {"get_metric", "list_alarms", "get_alarm_state"},
+	"aws.route53":    {"list_zones", "list_records", "upsert_record", "delete_record"},
+	// GCP sub-namespaces
+	"gcp.gke":    {"list_clusters", "get_cluster"},
+	"gcp.pubsub": {"list_topics", "publish", "list_subscriptions"},
+	"gcp.run":    {"list_services", "get_service"},
 }
 
 var mirrorSubcmds = []string{"list", "view", "console"}
 var cmdgenProviders = []string{"docker", "kubectl", "aws"}
+
+// vbinSubcommands maps a vbin name to its recognised first-argument completions.
+var vbinSubcommands = map[string][]string{
+	"stty":    {"sane", "size", "echo", "-echo", "raw", "-raw", "rows", "cols"},
+	"history": {"-c", "-d"},
+	"fc":      {"-l", "-e"},
+	"mirror":  {"list", "view", "console"},
+	"cmdgen":  {"docker", "kubectl", "aws"},
+	"set":     {"-e", "+e", "-u", "+u", "-x", "+x", "-o", "+o"},
+}
 
 // Do implements readline.AutoCompleter.
 // length is the number of runes before pos that form the current token.
@@ -165,6 +209,17 @@ func (c *adsshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int)
 		return completions, len(argPrefix)
 	}
 
+	// ── Generic vbin subcommand completion ───────────────────────────────────
+	if subs, ok := vbinSubcommands[cmd]; ok && len(words) <= 2 {
+		var completions [][]rune
+		for _, s := range subs {
+			if strings.HasPrefix(s, argPrefix) {
+				completions = append(completions, []rune(s[len(argPrefix):]))
+			}
+		}
+		return completions, len(argPrefix)
+	}
+
 	// ── Default: file path completion ────────────────────────────────────────
 	return c.completeFile(argPrefix)
 }
@@ -220,6 +275,25 @@ func (c *adsshCompleter) completeCommand(prefix string) ([][]rune, int) {
 						}
 					}
 				}
+			}
+		}
+	}
+
+	// History-prefix suggestions (deduplicated, most recent first)
+	if c.history != nil && len(prefix) > 2 {
+		histSeen := make(map[string]bool)
+		hist := *c.history
+		for i := len(hist) - 1; i >= 0; i-- {
+			entry := hist[i]
+			// Use only the first word of each history entry for command completion
+			firstWord := strings.Fields(entry)
+			if len(firstWord) == 0 {
+				continue
+			}
+			w := firstWord[0]
+			if strings.HasPrefix(w, prefix) && !seen[w] && !histSeen[w] {
+				histSeen[w] = true
+				candidates = append(candidates, w)
 			}
 		}
 	}

@@ -213,6 +213,22 @@ func WaitJob(id int) error {
 	return nil
 }
 
+// Disown removes job id from the job table so it is no longer tracked.
+func (t *JobTable) Disown(id int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.jobs, id)
+}
+
+// DisownAll removes all jobs from the job table.
+func (t *JobTable) DisownAll() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id := range t.jobs {
+		delete(t.jobs, id)
+	}
+}
+
 // SetForegroundProcessGroup sets the terminal's foreground process group to pgid.
 // This is critical for true POSIX job control on FreeBSD/Solaris/Linux.
 func SetForegroundProcessGroup(pgid int) error {
