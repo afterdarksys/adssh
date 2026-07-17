@@ -10,13 +10,13 @@ import (
 	"os"
 )
 
-var isRestricted bool
-
 func SetupSecurityAPI(env starlark.StringDict, restricted bool) {
-	isRestricted = restricted
 	secDict := starlark.NewDict(4)
 	secDict.SetKey(starlark.String("audit"), starlark.NewBuiltin("audit", builtinSecAudit))
-	secDict.SetKey(starlark.String("is_restricted"), starlark.NewBuiltin("is_restricted", builtinSecIsRestricted))
+	// is_restricted closes over this session's restricted flag rather than a
+	// package-level global, so a restricted session and an unrestricted session
+	// can coexist in the same process without last-writer-wins clobbering.
+	secDict.SetKey(starlark.String("is_restricted"), makeSecIsRestricted(restricted))
 	secDict.SetKey(starlark.String("file_hash"), starlark.NewBuiltin("file_hash", builtinSecFileHash))
 	secDict.SetKey(starlark.String("check_policy"), starlark.NewBuiltin("check_policy", builtinSecCheckPolicy))
 	env["sec"] = secDict
@@ -31,8 +31,12 @@ func builtinSecAudit(thread *starlark.Thread, b *starlark.Builtin, args starlark
 	return starlark.None, nil
 }
 
-func builtinSecIsRestricted(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	return starlark.Bool(isRestricted), nil
+// makeSecIsRestricted returns a sec.is_restricted builtin bound to this
+// session's restricted flag.
+func makeSecIsRestricted(restricted bool) *starlark.Builtin {
+	return starlark.NewBuiltin("is_restricted", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		return starlark.Bool(restricted), nil
+	})
 }
 
 func builtinSecFileHash(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {

@@ -16,25 +16,70 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
-// BashInterceptor returns the shell exec middleware for the process-global
-// default engine, honoring the caller-supplied restricted flag.
+// SessionState carries the per-session context the interceptor needs so that
+// many isolated sessions can run concurrently in one process, each using its
+// own restricted flag, its own Starlark globals dict, and its own directory
+// stack instead of the process-global singletons.
 //
-// Deprecated: use (*Engine).BashInterceptor; retained for the binary until the engine facade lands.
+// It lives in the security package (not engine) so that security/ never has to
+// import engine/ — engine.Session builds a SessionState and hands it to
+// BashInterceptorSession.
+type SessionState struct {
+	// Restricted enables restricted-mode command checks for this session.
+	Restricted bool
+	// Globals is this session's own Starlark globals dict (aliases, custom
+	// commands, shopts, session id, ...). Must not be shared between sessions.
+	Globals starlark.StringDict
+	// Dirs is this session's own directory stack for pushd/popd/dirs. When nil
+	// the interceptor falls back to the process-global sys.DirStack().
+	Dirs *sys.DirStackState
+}
+
+// BashInterceptor returns the shell exec middleware for the process-global
+// default engine, honoring the caller-supplied restricted flag. It uses the
+// process-global directory stack.
+//
+// Deprecated: use (*Engine).BashInterceptorSession with a per-session
+// SessionState so concurrent sessions do not share a directory stack.
 func BashInterceptor(restricted bool, globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	return defaultEngine.execHandler(restricted, globals)
+	return defaultEngine.execHandler(restricted, globals, nil)
+}
+
+// BashInterceptorSession returns the shell exec middleware for the process-global
+// default engine bound to a specific session's state (restricted flag, globals,
+// and directory stack).
+func BashInterceptorSession(sess *SessionState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return defaultEngine.execHandler(sess.Restricted, sess.Globals, sess.Dirs)
 }
 
 // BashInterceptor returns the shell exec middleware for this engine, using the
-// engine's own restricted flag and its own security gates.
+// engine's own restricted flag and its own security gates. It uses the
+// process-global directory stack.
+//
+// Deprecated: use (*Engine).BashInterceptorSession for per-session isolation.
 func (e *Engine) BashInterceptor(globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	return e.execHandler(e.restricted, globals)
+	return e.execHandler(e.restricted, globals, nil)
 }
 
-// execHandler is the shared implementation behind BashInterceptor and
-// (*Engine).BashInterceptor. All authorization gates and logging run against
-// engine e; restricted is parameterized so the deprecated package shim can pass
-// the caller's flag while the method form uses e.restricted.
-func (e *Engine) execHandler(restricted bool, globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+// BashInterceptorSession returns the shell exec middleware for this engine bound
+// to a specific session's state. All authorization gates run against engine e,
+// while restricted, globals and the directory stack come from sess so that many
+// sessions can share one engine without sharing per-session state.
+func (e *Engine) BashInterceptorSession(sess *SessionState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return e.execHandler(sess.Restricted, sess.Globals, sess.Dirs)
+}
+
+// execHandler is the shared implementation behind the BashInterceptor* entry
+// points. All authorization gates and logging run against engine e; restricted,
+// globals and dirs are parameterized so the deprecated package/method shims can
+// pass the caller's flag plus the process-global stack while the session form
+// passes per-session state. When dirs is nil the process-global directory stack
+// is used.
+func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs *sys.DirStackState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	ds := dirs
+	if ds == nil {
+		ds = sys.DirStack()
+	}
 	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		return func(ctx context.Context, args []string) error {
 			if len(args) == 0 {
@@ -329,49 +374,49 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict) func(
 			// pushd
 			// ------------------------------------------------------------------
 			case "pushd":
-				cwd, _ := os.Getwd()
+				cwd := hc.Dir
 				if len(args) >= 2 {
 					dir := args[1]
-					sys.DirStack().Push(cwd)
+					ds.Push(cwd)
 					if err := next(ctx, []string{"cd", dir}); err != nil {
 						return err
 					}
-					printDirStack(hc)
+					printDirStack(hc, ds)
 					return nil
 				}
 				// no arg: swap top two (push cwd, cd to previous top)
-				prev := sys.DirStack().Pop()
+				prev := ds.Pop()
 				if prev == "" {
 					return fmt.Errorf("pushd: no other directory")
 				}
-				sys.DirStack().Push(cwd)
+				ds.Push(cwd)
 				if err := next(ctx, []string{"cd", prev}); err != nil {
 					return err
 				}
-				printDirStack(hc)
+				printDirStack(hc, ds)
 				return nil
 
 			// ------------------------------------------------------------------
 			// popd
 			// ------------------------------------------------------------------
 			case "popd":
-				cwd, _ := os.Getwd()
-				prev := sys.DirStack().Pop()
+				cwd := hc.Dir
+				prev := ds.Pop()
 				if prev == "" {
 					return fmt.Errorf("popd: directory stack empty")
 				}
 				if err := next(ctx, []string{"cd", prev}); err != nil {
 					return err
 				}
-				sys.DirStack().SetOldPwd(cwd)
-				printDirStack(hc)
+				ds.SetOldPwd(cwd)
+				printDirStack(hc, ds)
 				return nil
 
 			// ------------------------------------------------------------------
 			// dirs
 			// ------------------------------------------------------------------
 			case "dirs":
-				fmt.Fprintln(hc.Stdout, strings.Join(sys.DirStack().Dirs(), " "))
+				fmt.Fprintln(hc.Stdout, strings.Join(ds.Dirs(), " "))
 				return nil
 			}
 
@@ -461,10 +506,10 @@ func (e *Engine) resolveType(ctx context.Context, name string, globals starlark.
 	return fmt.Errorf("type: %s: not found", name)
 }
 
-// printDirStack prints the current directory stack to stdout.
-func printDirStack(hc interp.HandlerContext) {
-	dirs := sys.DirStack().Dirs()
-	cwd, _ := os.Getwd()
-	all := append([]string{cwd}, dirs...)
+// printDirStack prints the current directory stack (top = current dir) to
+// stdout, using the session's directory stack and the runner's current dir.
+func printDirStack(hc interp.HandlerContext, ds *sys.DirStackState) {
+	dirs := ds.Dirs()
+	all := append([]string{hc.Dir}, dirs...)
 	fmt.Fprintln(hc.Stdout, strings.Join(all, " "))
 }

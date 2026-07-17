@@ -157,9 +157,22 @@ func (c *adsshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int)
 	}
 
 	// ── Check Custom Completers ─────────────────────────────────────────────
-	starlarkext.CompletersMu.RLock()
-	callable, ok := starlarkext.CustomCompleters[cmd]
-	starlarkext.CompletersMu.RUnlock()
+	// Prefer this session's own completers (stored in its globals dict), then
+	// fall back to the deprecated process-global registry.
+	var callable starlark.Callable
+	var ok bool
+	if c.globals != nil {
+		if dict, dok := c.globals["__completers__"].(*starlark.Dict); dok {
+			if v, found, _ := dict.Get(starlark.String(cmd)); found {
+				callable, ok = v.(starlark.Callable)
+			}
+		}
+	}
+	if !ok {
+		starlarkext.CompletersMu.RLock()
+		callable, ok = starlarkext.CustomCompleters[cmd]
+		starlarkext.CompletersMu.RUnlock()
+	}
 
 	if ok {
 		thread := &starlark.Thread{Name: "completer-" + cmd}

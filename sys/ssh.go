@@ -16,7 +16,6 @@ import (
 	"sync"
 
 	"github.com/creack/pty"
-	"go.starlark.net/starlark"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -81,8 +80,18 @@ var (
 	sshMu       sync.Mutex
 )
 
-// EnableSSH starts the SSH daemon in the background. It returns an error if already running or if not root.
-func EnableSSH(address, hostKeyPath, authorizedKeysPath string, globals starlark.StringDict, restricted bool, replStartFn func(starlark.StringDict, bool, string, io.ReadCloser, io.Writer, io.Writer)) error {
+// SessionStarter starts an interactive session for one accepted SSH channel. It
+// receives the per-connection identity and PTY-backed I/O and is responsible for
+// building the session's OWN isolated Starlark globals (never a shared or
+// shallow-copied dict) and running the REPL or menu. Defined here (in sys) so
+// that sys/ssh.go never has to import starlarkext/engine and create an import
+// cycle; the concrete starter is supplied by the binary/engine layer.
+type SessionStarter func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer)
+
+// EnableSSH starts the SSH daemon in the background. It returns an error if
+// already running or if not root. Each accepted channel is handed to start,
+// which builds that session's own isolated globals.
+func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionStarter) error {
 	sshMu.Lock()
 	defer sshMu.Unlock()
 
@@ -154,7 +163,7 @@ func EnableSSH(address, hostKeyPath, authorizedKeysPath string, globals starlark
 				log.Printf("Failed to accept incoming connection: %v", err)
 				continue
 			}
-			go handleSSHConnection(nConn, config, globals, restricted, hostKeyPath, replStartFn)
+			go handleSSHConnection(nConn, config, start)
 		}
 	}()
 
@@ -207,7 +216,7 @@ func (c *CtrlCInterceptor) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starlark.StringDict, restricted bool, historyFile string, replStartFn func(starlark.StringDict, bool, string, io.ReadCloser, io.Writer, io.Writer)) {
+func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start SessionStarter) {
 	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
 	if err != nil {
 		log.Printf("Failed to handshake: %v", err)
@@ -275,13 +284,7 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starl
 		}
 		RegisterSession(session)
 
-		sessionGlobals := make(starlark.StringDict)
-		for k, v := range globals {
-			sessionGlobals[k] = v
-		}
-		sessionGlobals["SESSION_ID"] = starlark.String(sessionID)
-
-		go func(env starlark.StringDict) {
+		go func(user string, principals []string) {
 			defer channel.Close()
 			defer ptyMaster.Close()
 			defer ptySlave.Close()
@@ -292,8 +295,10 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, globals starl
 			go io.Copy(outCast, ptyMaster)
 			go io.Copy(ptyMaster, interceptedChannel)
 
-			replStartFn(env, restricted, historyFile, ptySlave, ptySlave, ptySlave)
-		}(sessionGlobals)
+			// start builds this session's OWN fresh globals (no shared/shallow
+			// copy) and runs the REPL/menu on the PTY slave.
+			start(sessionID, user, principals, ptySlave, ptySlave, ptySlave)
+		}(session.User, principals)
 	}
 }
 

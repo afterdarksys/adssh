@@ -242,9 +242,10 @@ func jobIDArg(args []string) (int, error) {
 	return id, nil
 }
 
-// expandPrompt expands bash/zsh-style prompt escape sequences.
-func expandPrompt(template string, globals starlark.StringDict, thread *starlark.Thread) string {
-	cwd, _ := os.Getwd()
+// expandPrompt expands bash/zsh-style prompt escape sequences. cwd is the
+// session's current working directory (the runner's Dir), so per-session
+// prompts reflect each session's own cwd rather than the process cwd.
+func expandPrompt(template string, globals starlark.StringDict, thread *starlark.Thread, cwd string) string {
 	home, _ := os.UserHomeDir()
 
 	hostname, _ := os.Hostname()
@@ -397,7 +398,12 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		globals["__aliases__"] = starlark.NewDict(16)
 	}
 
-	starlarkext.SetupExtensions(globals, restricted)
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted})
+
+	// Per-invocation directory stack: each Start (one per SSH session, one per
+	// single-user REPL) gets its own stack so concurrent sessions never share
+	// pushd/popd/cd- state via the process-global sys.DirStack().
+	dirs := &sys.DirStackState{}
 
 	thread := &starlark.Thread{Name: "repl"}
 
@@ -490,11 +496,13 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	})
 
 	envBridge := hybridEnv{globals: globals}
+	sessState := &security.SessionState{Restricted: restricted, Globals: globals, Dirs: dirs}
 	runner, err := interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
-		// Job control handler runs first, then security interceptor.
-		interp.ExecHandlers(jobControlHandler(out), security.BashInterceptor(restricted, globals)),
+		// Job control handler runs first, then the session-aware security
+		// interceptor (which uses this session's own directory stack).
+		interp.ExecHandlers(jobControlHandler(out), security.BashInterceptorSession(sessState)),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 	if err != nil {
@@ -502,10 +510,9 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		return
 	}
 
-	// Initialize dirstack with current working directory.
-	if cwd, err := os.Getwd(); err == nil {
-		sys.DirStack().Init(cwd)
-	}
+	// Initialize this session's dirstack with the runner's working directory
+	// (interp.New always resolves runner.Dir to the process cwd when unset).
+	dirs.Init(runner.Dir)
 
 	// 4c. REPL start time for $SECONDS
 	replStart := time.Now()
@@ -522,14 +529,14 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		prompt := "adssh> "
 		if val, ok := globals["PROMPT"]; ok {
 			if s, ok := val.(starlark.String); ok {
-				prompt = expandPrompt(string(s), globals, thread)
+				prompt = expandPrompt(string(s), globals, thread, runner.Dir)
 			}
 		}
 
 		// 4m. RPROMPT
 		if rpVal, ok := globals["RPROMPT"]; ok {
 			if rpStr, ok := rpVal.(starlark.String); ok && string(rpStr) != "" {
-				rp := expandPrompt(string(rpStr), globals, thread)
+				rp := expandPrompt(string(rpStr), globals, thread, runner.Dir)
 				if rp != "" {
 					_, cols, err := sys.GetTerminalSize(int(os.Stdout.Fd()))
 					if err == nil {
@@ -684,7 +691,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				if len(fields) == 1 {
 					target, _ = os.UserHomeDir()
 				} else if fields[1] == "-" {
-					target = sys.DirStack().OldPwd()
+					target = dirs.OldPwd()
 					if target == "" {
 						fmt.Fprintln(errOut, "cd: OLDPWD not set")
 						continue
@@ -697,8 +704,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 						target = home + target[1:]
 					}
 				}
-				cwd, _ := os.Getwd()
-				sys.DirStack().SetOldPwd(cwd)
+				dirs.SetOldPwd(runner.Dir)
 				if target != "" {
 					line = "cd " + target
 				}

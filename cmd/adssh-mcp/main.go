@@ -48,7 +48,7 @@ func main() {
 
 	// 5. Build Starlark env (shared across all tool calls)
 	globals := starlark.StringDict{}
-	starlarkext.SetupExtensions(globals, false)
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: false})
 
 	// 6. Start MCP server
 	security.LogEvent("adssh-mcp server starting")

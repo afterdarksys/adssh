@@ -124,11 +124,38 @@ func main() {
 	// 6. Build Starlark environment and load profiles
 	thread := &starlark.Thread{Name: "main"}
 	globals := starlark.StringDict{}
-	starlarkext.SetupExtensions(globals, cfg.Restricted)
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: cfg.Restricted})
 
 	env, err := config.LoadProfiles(thread, globals, cfg.IsLoginShell, cfg.ProfilePath, cfg.RCPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading profiles: %v\n", err)
+	}
+
+	// sshStarter builds each SSH session's OWN isolated globals (fresh
+	// SetupExtensions, its own aliases/custom-commands/shopts/plugins dicts and
+	// directory stack) rather than sharing/shallow-copying the base env. The RC
+	// profile is re-loaded per session so ~/.adsshrc customisations still apply.
+	// TODO(session): SSH sessions intentionally do not receive the
+	// enable_ssh/disable_ssh builtins injected into the single-user env below.
+	sshStarter := func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) {
+		sessGlobals := starlark.StringDict{}
+		starlarkext.SetupExtensions(starlarkext.ExtensionOptions{
+			Env:        sessGlobals,
+			Restricted: cfg.Restricted,
+			SessionID:  sessionID,
+			In:         in,
+			Out:        out,
+			Err:        errOut,
+		})
+		sessThread := &starlark.Thread{Name: "ssh-" + sessionID}
+		if _, perr := config.LoadProfiles(sessThread, sessGlobals, false, cfg.ProfilePath, cfg.RCPath); perr != nil {
+			fmt.Fprintf(errOut, "Error loading profiles: %v\n", perr)
+		}
+		if menuPath := security.GetMenuForUser(user, principals); menuPath != "" {
+			repl.StartMenu(menuPath, sessGlobals, cfg.Restricted, in, out, errOut)
+			return
+		}
+		repl.Start(sessGlobals, cfg.Restricted, cfg.HistoryFile, in, out, errOut)
 	}
 
 	// 6b. Inject SSH management builtins into `sys` dict
@@ -139,7 +166,7 @@ func main() {
 				if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr); err != nil {
 					return nil, err
 				}
-				if err := sys.EnableSSH(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, env, cfg.Restricted, smartReplWrapper); err != nil {
+				if err := sys.EnableSSH(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter); err != nil {
 					return nil, err
 				}
 				return starlark.None, nil
@@ -167,7 +194,7 @@ func main() {
 	}
 
 	if cfg.ServeAddr != "" {
-		if err := sys.EnableSSH(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, env, cfg.Restricted, smartReplWrapper); err != nil {
+		if err := sys.EnableSSH(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start SSH server: %v\n", err)
 			os.Exit(1)
 		}

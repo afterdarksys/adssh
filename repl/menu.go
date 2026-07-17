@@ -12,6 +12,7 @@ import (
 
 	"github.com/afterdarksys/adssh/security"
 	"github.com/afterdarksys/adssh/starlarkext"
+	"github.com/afterdarksys/adssh/sys"
 
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
@@ -44,20 +45,23 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 	}
 
 	// Inject standard library extensions
-	starlarkext.SetupExtensions(globals, restricted)
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted})
 
-	// Instantiate persistent runner
+	// Instantiate persistent runner with this session's own directory stack.
+	dirs := &sys.DirStackState{}
+	sessState := &security.SessionState{Restricted: restricted, Globals: globals, Dirs: dirs}
 	envBridge := hybridEnv{globals: globals}
 	runner, err := interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
-		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
+		interp.ExecHandlers(security.BashInterceptorSession(sessState)),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 	if err != nil {
 		fmt.Fprintf(errOut, "Error creating runner: %v\n", err)
 		return
 	}
+	dirs.Init(runner.Dir)
 
 	scanner := bufio.NewScanner(in)
 

@@ -5,8 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
+
+	"github.com/afterdarksys/adssh/security"
 
 	"github.com/dlclark/regexp2"
 	"go.starlark.net/starlark"
@@ -14,12 +17,44 @@ import (
 )
 
 var (
+	// CustomCompleters is a process-global completer registry retained only as a
+	// deprecated fallback for callers that pre-date per-session completers.
+	//
+	// Deprecated: register_completer now stores completers in the session's own
+	// globals dict under "__completers__"; repl/completer.go reads that first and
+	// only falls back to this map. Do not rely on this for isolated sessions.
 	CustomCompleters = make(map[string]starlark.Callable)
 	CompletersMu     sync.RWMutex
 )
 
-// SetupExtensions injects all standard library extensions into the given dict
-func SetupExtensions(env starlark.StringDict, restricted bool) {
+// ExtensionOptions carries the per-session context SetupExtensions needs so that
+// each session builds its own isolated set of builtins (restricted-mode
+// omissions, per-session sec.is_restricted, session id, injectable I/O). Passing
+// a struct keeps the call sites readable and lets new per-session context be
+// threaded through without churning every caller's signature again.
+type ExtensionOptions struct {
+	// Env is the session's globals dict the extensions are injected into.
+	Env starlark.StringDict
+	// Restricted omits file/network/exec builtins and pins sec.is_restricted.
+	Restricted bool
+	// SessionID, when non-empty, is stored as env["SESSION_ID"].
+	SessionID string
+	// In/Out/Err are the session's I/O streams. They are carried for session
+	// builtins that need them; core extensions do not read process os.Std* here.
+	In  io.Reader
+	Out io.Writer
+	Err io.Writer
+	// Engine is the security engine this session resolves through. It is carried
+	// for future per-session wiring; today the exec builtins still resolve the
+	// process-global default engine (TODO(session): thread Engine into exec_cmd,
+	// exec_json, exec_async).
+	Engine *security.Engine
+}
+
+// SetupExtensions injects all standard library extensions into opts.Env.
+func SetupExtensions(opts ExtensionOptions) {
+	env := opts.Env
+	restricted := opts.Restricted
 	// Cloud providers
 	SetupAWSAPI(env)
 	ExpandAWSAPI(env) // adds rds, eks, iam, sqs, ecr
@@ -88,7 +123,7 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 		sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", createExecAsync(env, restricted)))
 		sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", createExecJSON(env, restricted)))
 		sysDict.SetKey(starlark.String("register_command"), createRegisterCommand(env))
-		sysDict.SetKey(starlark.String("register_completer"), starlark.NewBuiltin("register_completer", builtinRegisterCompleter))
+		sysDict.SetKey(starlark.String("register_completer"), createRegisterCompleter(env))
 	}
 	env["sys"] = sysDict
 
@@ -128,6 +163,10 @@ func SetupExtensions(env starlark.StringDict, restricted bool) {
 	SetupTemplateAPI(env)
 	ExpandAWSAPIExtra(env)
 	ExpandNotifyAPI(env)
+
+	if opts.SessionID != "" {
+		env["SESSION_ID"] = starlark.String(opts.SessionID)
+	}
 }
 
 func builtinMD5(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -222,14 +261,33 @@ func createRegisterCommand(env starlark.StringDict) *starlark.Builtin {
 	})
 }
 
-func builtinRegisterCompleter(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var cmd string
-	var callable starlark.Callable
-	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "cmd", &cmd, "callable", &callable); err != nil {
-		return nil, err
-	}
-	CompletersMu.Lock()
-	defer CompletersMu.Unlock()
-	CustomCompleters[cmd] = callable
-	return starlark.None, nil
+// createRegisterCompleter returns a register_completer builtin that stores the
+// completer in this session's own globals dict (under "__completers__") so that
+// completers registered in one session do not leak into other sessions. It also
+// writes the deprecated process-global CustomCompleters map for backwards
+// compatibility with any reader that has not been updated to the per-session
+// dict.
+func createRegisterCompleter(env starlark.StringDict) *starlark.Builtin {
+	return starlark.NewBuiltin("register_completer", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var cmd string
+		var callable starlark.Callable
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "cmd", &cmd, "callable", &callable); err != nil {
+			return nil, err
+		}
+
+		dict, ok := env["__completers__"].(*starlark.Dict)
+		if !ok {
+			dict = starlark.NewDict(8)
+			env["__completers__"] = dict
+		}
+		if err := dict.SetKey(starlark.String(cmd), callable); err != nil {
+			return nil, err
+		}
+
+		// Deprecated global fallback.
+		CompletersMu.Lock()
+		CustomCompleters[cmd] = callable
+		CompletersMu.Unlock()
+		return starlark.None, nil
+	})
 }
