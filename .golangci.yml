@@ -1,0 +1,46 @@
+# golangci-lint configuration (v2 schema).
+# Deliberately modest: correctness-focused linters only, no style nits that
+# would drown the existing ~17k LOC in noise. The CI lint job runs this with
+# continue-on-error while the codebase is brought up to a clean baseline.
+version: "2"
+
+run:
+  timeout: 5m
+  # Include e2e-tagged files so the harness is linted too.
+  build-tags:
+    - e2e
+
+linters:
+  # Start from nothing and opt in explicitly, so upgrades don't silently add
+  # noisy linters.
+  default: none
+  enable:
+    - errcheck      # unchecked errors
+    - govet         # suspicious constructs
+    - ineffassign   # ineffectual assignments
+    - misspell      # common misspellings in comments/strings
+    - staticcheck   # bug-prone patterns (subsumes gosimple + stylecheck in v2)
+
+  settings:
+    misspell:
+      locale: US
+
+  exclusions:
+    # Don't fight generated code or vendored dependencies.
+    generated: lax
+    paths:
+      - vendor
+      - third_party
+    # Pragmatic presets: silence the extremely common (and low-value) unchecked
+    # errors on fmt.Fprint*/(*bytes.Buffer).Write and similar.
+    presets:
+      - common-false-positives
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - vendor
+      - third_party
