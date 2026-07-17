@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"gopkg.in/yaml.v3"
 	"os"
-	"sync"
 )
 
 type EntitlementsConfig struct {
@@ -13,13 +12,8 @@ type EntitlementsConfig struct {
 	Menus  map[string]string   `yaml:"menus"`
 }
 
-var (
-	entitlements   EntitlementsConfig
-	entitlementsMu sync.RWMutex
-)
-
 // LoadEntitlements reads the RBAC yaml configuration
-func LoadEntitlements(path string) error {
+func (e *Engine) LoadEntitlements(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -29,30 +23,37 @@ func LoadEntitlements(path string) error {
 		return err
 	}
 
-	entitlementsMu.Lock()
-	defer entitlementsMu.Unlock()
+	e.entitlementsMu.Lock()
+	defer e.entitlementsMu.Unlock()
 
-	err = yaml.Unmarshal(data, &entitlements)
+	err = yaml.Unmarshal(data, &e.entitlements)
 	if err != nil {
 		return fmt.Errorf("failed to parse entitlements: %v", err)
 	}
 	return nil
 }
 
+// LoadEntitlements reads the RBAC yaml configuration.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func LoadEntitlements(path string) error {
+	return defaultEngine.LoadEntitlements(path)
+}
+
 // IsAuthorized checks if the user or their principals are authorized to run a virtual binary or custom command.
 // If the command is not listed in any entitlement, access is denied (Default-Deny).
 // If no entitlements file was loaded, it allows everything.
-func IsAuthorized(user string, principals []string, command string) bool {
-	entitlementsMu.RLock()
-	defer entitlementsMu.RUnlock()
+func (e *Engine) IsAuthorized(user string, principals []string, command string) bool {
+	e.entitlementsMu.RLock()
+	defer e.entitlementsMu.RUnlock()
 
 	// If no config loaded, default deny (fail-closed)
-	if len(entitlements.Groups) == 0 && len(entitlements.Users) == 0 {
+	if len(e.entitlements.Groups) == 0 && len(e.entitlements.Users) == 0 {
 		return false
 	}
 
 	// 1. Check User-specific entitlements
-	if allowedCmds, ok := entitlements.Users[user]; ok {
+	if allowedCmds, ok := e.entitlements.Users[user]; ok {
 		for _, cmd := range allowedCmds {
 			if cmd == command || cmd == "*" {
 				return true
@@ -62,7 +63,7 @@ func IsAuthorized(user string, principals []string, command string) bool {
 
 	// 2. Check Principal-specific entitlements
 	for _, principal := range principals {
-		if allowedCmds, ok := entitlements.Groups[principal]; ok {
+		if allowedCmds, ok := e.entitlements.Groups[principal]; ok {
 			for _, cmd := range allowedCmds {
 				if cmd == command || cmd == "*" {
 					return true
@@ -74,26 +75,40 @@ func IsAuthorized(user string, principals []string, command string) bool {
 	return false
 }
 
-// GetMenuForUser checks if a specific menu YAML file is assigned to the user or their groups.
-func GetMenuForUser(user string, principals []string) string {
-	entitlementsMu.RLock()
-	defer entitlementsMu.RUnlock()
+// IsAuthorized checks whether the user or their principals may run command.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func IsAuthorized(user string, principals []string, command string) bool {
+	return defaultEngine.IsAuthorized(user, principals, command)
+}
 
-	if len(entitlements.Menus) == 0 {
+// GetMenuForUser checks if a specific menu YAML file is assigned to the user or their groups.
+func (e *Engine) GetMenuForUser(user string, principals []string) string {
+	e.entitlementsMu.RLock()
+	defer e.entitlementsMu.RUnlock()
+
+	if len(e.entitlements.Menus) == 0 {
 		return ""
 	}
 
 	// 1. Check User-specific menu
-	if menuPath, ok := entitlements.Menus[user]; ok {
+	if menuPath, ok := e.entitlements.Menus[user]; ok {
 		return menuPath
 	}
 
 	// 2. Check Principal-specific menu
 	for _, principal := range principals {
-		if menuPath, ok := entitlements.Menus[principal]; ok {
+		if menuPath, ok := e.entitlements.Menus[principal]; ok {
 			return menuPath
 		}
 	}
 
 	return ""
+}
+
+// GetMenuForUser checks if a menu YAML file is assigned to the user or their groups.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func GetMenuForUser(user string, principals []string) string {
+	return defaultEngine.GetMenuForUser(user, principals)
 }

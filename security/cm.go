@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -259,40 +258,56 @@ func IsTicketValid(t *CMTicket) bool {
 	return true
 }
 
-// Package-level session state — the active CM ticket for the current session.
-
-var (
-	cmMu           sync.Mutex
-	activeCMTicket *CMTicket
-	activeCMID     string
-)
+// Active CM ticket session state — now held on the Engine.
 
 // SetActiveCMTicket stores t as the active CM ticket for this session.
+func (e *Engine) SetActiveCMTicket(t *CMTicket, id string) {
+	e.cmMu.Lock()
+	defer e.cmMu.Unlock()
+	e.activeCMTicket = t
+	e.activeCMID = id
+}
+
+// SetActiveCMTicket stores t as the active CM ticket for this session.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
 func SetActiveCMTicket(t *CMTicket, id string) {
-	cmMu.Lock()
-	defer cmMu.Unlock()
-	activeCMTicket = t
-	activeCMID = id
+	defaultEngine.SetActiveCMTicket(t, id)
 }
 
 // GetActiveCMTicket returns the active CM ticket and its ID.
+func (e *Engine) GetActiveCMTicket() (*CMTicket, string) {
+	e.cmMu.Lock()
+	defer e.cmMu.Unlock()
+	return e.activeCMTicket, e.activeCMID
+}
+
+// GetActiveCMTicket returns the active CM ticket and its ID.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
 func GetActiveCMTicket() (*CMTicket, string) {
-	cmMu.Lock()
-	defer cmMu.Unlock()
-	return activeCMTicket, activeCMID
+	return defaultEngine.GetActiveCMTicket()
 }
 
 // ClearActiveCMTicket removes the active CM ticket from the session.
+func (e *Engine) ClearActiveCMTicket() {
+	e.cmMu.Lock()
+	defer e.cmMu.Unlock()
+	e.activeCMTicket = nil
+	e.activeCMID = ""
+}
+
+// ClearActiveCMTicket removes the active CM ticket from the session.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
 func ClearActiveCMTicket() {
-	cmMu.Lock()
-	defer cmMu.Unlock()
-	activeCMTicket = nil
-	activeCMID = ""
+	defaultEngine.ClearActiveCMTicket()
 }
 
 // CMRequiredForCommand checks whether cmd matches any pattern in
 // ADSSH_CM_PATTERNS (comma-separated, filepath.Match globs).
 func CMRequiredForCommand(cmd string) bool {
+	// TODO(engine-config): read from EngineConfig instead of the process env.
 	raw := os.Getenv("ADSSH_CM_PATTERNS")
 	if raw == "" {
 		return false
@@ -315,5 +330,6 @@ func CMRequiredForCommand(cmd string) bool {
 
 // CMStrictMode returns true when ADSSH_CM_STRICT=1.
 func CMStrictMode() bool {
+	// TODO(engine-config): read from EngineConfig instead of the process env.
 	return os.Getenv("ADSSH_CM_STRICT") == "1"
 }

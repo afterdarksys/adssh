@@ -139,10 +139,15 @@ func (auditBinary) Run(ctx context.Context, args []string) error {
 }
 
 // chainLedgerPath returns the current ledger path.
+func (e *Engine) chainLedgerPath() string {
+	e.chainMu.Lock()
+	defer e.chainMu.Unlock()
+	return e.chainPath
+}
+
+// chainLedgerPath returns the default engine's current ledger path.
 func chainLedgerPath() string {
-	chainMu.Lock()
-	defer chainMu.Unlock()
-	return chainPath
+	return defaultEngine.chainLedgerPath()
 }
 
 func auditVerify(_ context.Context, hc interp.HandlerContext, ledger string) error {

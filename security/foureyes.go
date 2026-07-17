@@ -30,7 +30,10 @@ type FourEyesPending struct {
 	Rule      FourEyesRule `json:"rule"`
 }
 
-// FourEyesDir returns the base directory for four-eyes IPC files.
+// FourEyesDir returns the HOME-derived base directory for four-eyes IPC files.
+// The default engine (and any engine constructed without an explicit
+// FourEyesDir) resolves its base directory through this at call time, so tests
+// that sandbox HOME see the sandboxed directory.
 func FourEyesDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -39,27 +42,41 @@ func FourEyesDir() string {
 	return filepath.Join(home, ".adssh", "foureyes")
 }
 
-func fourEyesRulesPath() string {
-	return filepath.Join(FourEyesDir(), "rules")
+// fourEyesBaseDir returns the engine's four-eyes base directory: its explicit
+// fourEyesDir if set, otherwise the HOME-derived FourEyesDir() resolved now.
+func (e *Engine) fourEyesBaseDir() string {
+	if e.fourEyesDir != "" {
+		return e.fourEyesDir
+	}
+	return FourEyesDir()
 }
 
-func fourEyesPendingDir() string {
-	return filepath.Join(FourEyesDir(), "pending")
+func (e *Engine) fourEyesRulesPath() string {
+	return filepath.Join(e.fourEyesBaseDir(), "rules")
 }
 
-func fourEyesApprovedDir() string {
-	return filepath.Join(FourEyesDir(), "approved")
+func (e *Engine) fourEyesPendingDir() string {
+	return filepath.Join(e.fourEyesBaseDir(), "pending")
 }
 
-func fourEyesDeniedDir() string {
-	return filepath.Join(FourEyesDir(), "denied")
+func (e *Engine) fourEyesApprovedDir() string {
+	return filepath.Join(e.fourEyesBaseDir(), "approved")
 }
 
-func ensureFourEyesDirs() error {
+func (e *Engine) fourEyesDeniedDir() string {
+	return filepath.Join(e.fourEyesBaseDir(), "denied")
+}
+
+func fourEyesRulesPath() string   { return defaultEngine.fourEyesRulesPath() }
+func fourEyesPendingDir() string  { return defaultEngine.fourEyesPendingDir() }
+func fourEyesApprovedDir() string { return defaultEngine.fourEyesApprovedDir() }
+func fourEyesDeniedDir() string   { return defaultEngine.fourEyesDeniedDir() }
+
+func (e *Engine) ensureFourEyesDirs() error {
 	for _, d := range []string{
-		fourEyesPendingDir(),
-		fourEyesApprovedDir(),
-		fourEyesDeniedDir(),
+		e.fourEyesPendingDir(),
+		e.fourEyesApprovedDir(),
+		e.fourEyesDeniedDir(),
 	} {
 		if err := os.MkdirAll(d, 0700); err != nil {
 			return fmt.Errorf("foureyes: mkdir %s: %w", d, err)
@@ -68,9 +85,11 @@ func ensureFourEyesDirs() error {
 	return nil
 }
 
+func ensureFourEyesDirs() error { return defaultEngine.ensureFourEyesDirs() }
+
 // LoadFourEyesRules reads the rules file. Returns empty slice if file doesn't exist.
-func LoadFourEyesRules() ([]FourEyesRule, error) {
-	data, err := os.ReadFile(fourEyesRulesPath())
+func (e *Engine) LoadFourEyesRules() ([]FourEyesRule, error) {
+	data, err := os.ReadFile(e.fourEyesRulesPath())
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -84,24 +103,38 @@ func LoadFourEyesRules() ([]FourEyesRule, error) {
 	return rules, nil
 }
 
+// LoadFourEyesRules reads the rules file.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func LoadFourEyesRules() ([]FourEyesRule, error) {
+	return defaultEngine.LoadFourEyesRules()
+}
+
 // SaveFourEyesRules writes the rules file atomically.
-func SaveFourEyesRules(rules []FourEyesRule) error {
-	if err := os.MkdirAll(FourEyesDir(), 0700); err != nil {
+func (e *Engine) SaveFourEyesRules(rules []FourEyesRule) error {
+	if err := os.MkdirAll(e.fourEyesBaseDir(), 0700); err != nil {
 		return fmt.Errorf("foureyes: mkdir: %w", err)
 	}
 	data, err := json.MarshalIndent(rules, "", "  ")
 	if err != nil {
 		return fmt.Errorf("foureyes: marshal rules: %w", err)
 	}
-	return os.WriteFile(fourEyesRulesPath(), data, 0600)
+	return os.WriteFile(e.fourEyesRulesPath(), data, 0600)
+}
+
+// SaveFourEyesRules writes the rules file atomically.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func SaveFourEyesRules(rules []FourEyesRule) error {
+	return defaultEngine.SaveFourEyesRules(rules)
 }
 
 // AddFourEyesRule appends a new rule. Applies a default TTL of 300 if ttl <= 0.
-func AddFourEyesRule(pattern, approver string, ttl int) error {
+func (e *Engine) AddFourEyesRule(pattern, approver string, ttl int) error {
 	if ttl <= 0 {
 		ttl = 300
 	}
-	rules, err := LoadFourEyesRules()
+	rules, err := e.LoadFourEyesRules()
 	if err != nil {
 		return err
 	}
@@ -109,16 +142,23 @@ func AddFourEyesRule(pattern, approver string, ttl int) error {
 	for i, r := range rules {
 		if r.Pattern == pattern {
 			rules[i] = FourEyesRule{Pattern: pattern, Approver: approver, TTL: ttl}
-			return SaveFourEyesRules(rules)
+			return e.SaveFourEyesRules(rules)
 		}
 	}
 	rules = append(rules, FourEyesRule{Pattern: pattern, Approver: approver, TTL: ttl})
-	return SaveFourEyesRules(rules)
+	return e.SaveFourEyesRules(rules)
+}
+
+// AddFourEyesRule appends a new rule.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func AddFourEyesRule(pattern, approver string, ttl int) error {
+	return defaultEngine.AddFourEyesRule(pattern, approver, ttl)
 }
 
 // RemoveFourEyesRule removes the first rule matching pattern.
-func RemoveFourEyesRule(pattern string) error {
-	rules, err := LoadFourEyesRules()
+func (e *Engine) RemoveFourEyesRule(pattern string) error {
+	rules, err := e.LoadFourEyesRules()
 	if err != nil {
 		return err
 	}
@@ -128,7 +168,14 @@ func RemoveFourEyesRule(pattern string) error {
 			filtered = append(filtered, r)
 		}
 	}
-	return SaveFourEyesRules(filtered)
+	return e.SaveFourEyesRules(filtered)
+}
+
+// RemoveFourEyesRule removes the first rule matching pattern.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func RemoveFourEyesRule(pattern string) error {
+	return defaultEngine.RemoveFourEyesRule(pattern)
 }
 
 // MatchesFourEyes returns the first rule whose pattern matches cmd, or nil.
@@ -139,8 +186,8 @@ func RemoveFourEyesRule(pattern string) error {
 // cross the '/' path separator). Matching is anchored to the full command
 // string, so "rm *" does not match "ls" and does not prefix-match "format".
 // A rule whose pattern fails to compile as a regexp is skipped (cannot match).
-func MatchesFourEyes(cmd string) (*FourEyesRule, bool) {
-	rules, err := LoadFourEyesRules()
+func (e *Engine) MatchesFourEyes(cmd string) (*FourEyesRule, bool) {
+	rules, err := e.LoadFourEyesRules()
 	if err != nil || len(rules) == 0 {
 		return nil, false
 	}
@@ -155,6 +202,13 @@ func MatchesFourEyes(cmd string) (*FourEyesRule, bool) {
 		}
 	}
 	return nil, false
+}
+
+// MatchesFourEyes returns the first rule whose pattern matches cmd, or nil.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func MatchesFourEyes(cmd string) (*FourEyesRule, bool) {
+	return defaultEngine.MatchesFourEyes(cmd)
 }
 
 // globToRegexp translates a glob pattern into an anchored regexp source where
@@ -175,8 +229,8 @@ func generateToken(cmd string) string {
 
 // RequestApproval creates a pending request and polls until approved, denied, or timed out.
 // Prints the token prominently on stderr and shows a spinner while waiting.
-func RequestApproval(cmd string, rule FourEyesRule) error {
-	if err := ensureFourEyesDirs(); err != nil {
+func (e *Engine) RequestApproval(cmd string, rule FourEyesRule) error {
+	if err := e.ensureFourEyesDirs(); err != nil {
 		return err
 	}
 
@@ -203,7 +257,7 @@ func RequestApproval(cmd string, rule FourEyesRule) error {
 	if err != nil {
 		return fmt.Errorf("foureyes: marshal pending: %w", err)
 	}
-	pendingFile := filepath.Join(fourEyesPendingDir(), token+".json")
+	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
 	if err := os.WriteFile(pendingFile, data, 0600); err != nil {
 		return fmt.Errorf("foureyes: write pending: %w", err)
 	}
@@ -212,6 +266,7 @@ func RequestApproval(cmd string, rule FourEyesRule) error {
 	fmt.Fprintf(os.Stderr, "\n\U0001F510 4-eyes required. Token: %s\nRun: 4eyes approve %s\n\n", token, token)
 
 	// Send webhook notification if configured
+	// TODO(engine-config): read the webhook URL from EngineConfig instead of the process env.
 	if webhookURL := os.Getenv("ADSSH_4EYES_WEBHOOK"); webhookURL != "" {
 		go sendWebhookNotification(webhookURL, token, cmd, requester, hostname)
 	}
@@ -225,8 +280,8 @@ func RequestApproval(cmd string, rule FourEyesRule) error {
 	spinChars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spinIdx := 0
 
-	approvedPath := filepath.Join(fourEyesApprovedDir(), token)
-	deniedPath := filepath.Join(fourEyesDeniedDir(), token)
+	approvedPath := filepath.Join(e.fourEyesApprovedDir(), token)
+	deniedPath := filepath.Join(e.fourEyesDeniedDir(), token)
 
 	for time.Now().Before(deadline) {
 		remaining := int(time.Until(deadline).Seconds())
@@ -252,6 +307,13 @@ func RequestApproval(cmd string, rule FourEyesRule) error {
 	fmt.Fprintf(os.Stderr, "\r\033[K\u23F0 Request %s timed out.\n", token)
 	os.Remove(pendingFile) //nolint:errcheck
 	return fmt.Errorf("foureyes: request %s timed out after %ds", token, ttl)
+}
+
+// RequestApproval creates a pending request and polls until approved, denied, or timed out.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func RequestApproval(cmd string, rule FourEyesRule) error {
+	return defaultEngine.RequestApproval(cmd, rule)
 }
 
 // sendWebhookNotification POSTs approval request details to a webhook URL.
@@ -282,38 +344,52 @@ func sendWebhookNotification(webhookURL, token, cmd, requester, hostname string)
 }
 
 // ApproveRequest writes an approved marker and removes the pending file.
-func ApproveRequest(token string) error {
-	if err := ensureFourEyesDirs(); err != nil {
+func (e *Engine) ApproveRequest(token string) error {
+	if err := e.ensureFourEyesDirs(); err != nil {
 		return err
 	}
-	approvedPath := filepath.Join(fourEyesApprovedDir(), token)
+	approvedPath := filepath.Join(e.fourEyesApprovedDir(), token)
 	if err := os.WriteFile(approvedPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
 		return fmt.Errorf("foureyes: write approved marker: %w", err)
 	}
 	// Remove pending file (best effort)
-	pendingFile := filepath.Join(fourEyesPendingDir(), token+".json")
+	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
+	os.Remove(pendingFile) //nolint:errcheck
+	return nil
+}
+
+// ApproveRequest writes an approved marker and removes the pending file.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func ApproveRequest(token string) error {
+	return defaultEngine.ApproveRequest(token)
+}
+
+// DenyRequest writes a denied marker and removes the pending file.
+func (e *Engine) DenyRequest(token string) error {
+	if err := e.ensureFourEyesDirs(); err != nil {
+		return err
+	}
+	deniedPath := filepath.Join(e.fourEyesDeniedDir(), token)
+	if err := os.WriteFile(deniedPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
+		return fmt.Errorf("foureyes: write denied marker: %w", err)
+	}
+	// Remove pending file (best effort)
+	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
 	os.Remove(pendingFile) //nolint:errcheck
 	return nil
 }
 
 // DenyRequest writes a denied marker and removes the pending file.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
 func DenyRequest(token string) error {
-	if err := ensureFourEyesDirs(); err != nil {
-		return err
-	}
-	deniedPath := filepath.Join(fourEyesDeniedDir(), token)
-	if err := os.WriteFile(deniedPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
-		return fmt.Errorf("foureyes: write denied marker: %w", err)
-	}
-	// Remove pending file (best effort)
-	pendingFile := filepath.Join(fourEyesPendingDir(), token+".json")
-	os.Remove(pendingFile) //nolint:errcheck
-	return nil
+	return defaultEngine.DenyRequest(token)
 }
 
 // ListPending returns all pending approval requests.
-func ListPending() ([]FourEyesPending, error) {
-	entries, err := os.ReadDir(fourEyesPendingDir())
+func (e *Engine) ListPending() ([]FourEyesPending, error) {
+	entries, err := os.ReadDir(e.fourEyesPendingDir())
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -321,11 +397,11 @@ func ListPending() ([]FourEyesPending, error) {
 		return nil, fmt.Errorf("foureyes: list pending: %w", err)
 	}
 	var out []FourEyesPending
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(fourEyesPendingDir(), e.Name()))
+		data, err := os.ReadFile(filepath.Join(e.fourEyesPendingDir(), ent.Name()))
 		if err != nil {
 			continue
 		}
@@ -336,4 +412,11 @@ func ListPending() ([]FourEyesPending, error) {
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+// ListPending returns all pending approval requests.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func ListPending() ([]FourEyesPending, error) {
+	return defaultEngine.ListPending()
 }

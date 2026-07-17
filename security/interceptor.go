@@ -16,7 +16,25 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
+// BashInterceptor returns the shell exec middleware for the process-global
+// default engine, honoring the caller-supplied restricted flag.
+//
+// Deprecated: use (*Engine).BashInterceptor; retained for the binary until the engine facade lands.
 func BashInterceptor(restricted bool, globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return defaultEngine.execHandler(restricted, globals)
+}
+
+// BashInterceptor returns the shell exec middleware for this engine, using the
+// engine's own restricted flag and its own security gates.
+func (e *Engine) BashInterceptor(globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return e.execHandler(e.restricted, globals)
+}
+
+// execHandler is the shared implementation behind BashInterceptor and
+// (*Engine).BashInterceptor. All authorization gates and logging run against
+// engine e; restricted is parameterized so the deprecated package shim can pass
+// the caller's flag while the method form uses e.restricted.
+func (e *Engine) execHandler(restricted bool, globals starlark.StringDict) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		return func(ctx context.Context, args []string) error {
 			if len(args) == 0 {
@@ -33,30 +51,30 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 			}
 
 			cmd := strings.Join(args, " ")
-			LogCommand("BASH", cmd)
+			e.LogCommand("BASH", cmd)
 
 			// 0. Rego policy evaluation (primary authorization)
 			pctx := BuildPolicyContext(args[0], args[1:], "")
-			allowed, reason, policyErr := EvaluatePolicy(pctx)
+			allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 			if policyErr != nil {
 				return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
 			}
 			if !allowed {
-				LogPolicyDecision(pctx.User, cmd, false, reason)
+				e.LogPolicyDecision(pctx.User, cmd, false, reason)
 				if reason != "" {
 					return fmt.Errorf("adssh: access denied: %s", reason)
 				}
 				return fmt.Errorf("adssh: access denied for '%s' by policy", args[0])
 			}
-			LogPolicyDecision(pctx.User, cmd, true, "")
+			e.LogPolicyDecision(pctx.User, cmd, true, "")
 
 			// 0a. Change management ticket check
-			if err := CMSessionCheck(args[0], args[1:]); err != nil {
+			if err := e.CMSessionCheck(args[0], args[1:]); err != nil {
 				return err
 			}
 
 			// 0b. 4-eyes dual-approval gate
-			if err := CheckFourEyes(cmd, args, nil); err != nil {
+			if err := e.CheckFourEyes(cmd, args, nil); err != nil {
 				return err
 			}
 
@@ -231,14 +249,14 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 					return fmt.Errorf("type: usage: type name")
 				}
 				name := args[1]
-				return resolveType(ctx, name, globals, hc, false)
+				return e.resolveType(ctx, name, globals, hc, false)
 
 			// ------------------------------------------------------------------
 			// command
 			// ------------------------------------------------------------------
 			case "command":
 				if len(args) >= 3 && args[1] == "-v" {
-					return resolveType(ctx, args[2], globals, hc, true)
+					return e.resolveType(ctx, args[2], globals, hc, true)
 				}
 				// fall through to real shell for other command forms
 				return next(ctx, args)
@@ -358,7 +376,7 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 			}
 
 			// 2. Virtual binary registry — thread sessionID through context for binaries that need it
-			if vb, ok := Lookup(args[0]); ok {
+			if vb, ok := e.Lookup(args[0]); ok {
 				sessionID := ""
 				if globals != nil {
 					if val, ok := globals["SESSION_ID"]; ok {
@@ -367,7 +385,7 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 						}
 					}
 				}
-				return DispatchVBin(WithSessionID(ctx, sessionID), vb, args)
+				return e.DispatchVBin(WithSessionID(ctx, sessionID), vb, args)
 			}
 
 			// 3. Restricted mode checks before falling through to the real shell
@@ -387,9 +405,9 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 
 // resolveType looks up what name resolves to.  When scripting=true the output
 // is terse (just the path/descriptor), matching command -v semantics.
-func resolveType(ctx context.Context, name string, globals starlark.StringDict, hc interp.HandlerContext, scripting bool) error {
+func (e *Engine) resolveType(ctx context.Context, name string, globals starlark.StringDict, hc interp.HandlerContext, scripting bool) error {
 	// 1. VBIN registry
-	if _, ok := Lookup(name); ok {
+	if _, ok := e.Lookup(name); ok {
 		if scripting {
 			fmt.Fprintf(hc.Stdout, "%s\n", name)
 		} else {

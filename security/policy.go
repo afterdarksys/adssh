@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	osuser "os/user"
-	"sync"
 	"time"
 
 	"github.com/afterdarksys/adssh/sys"
@@ -23,14 +22,9 @@ type PolicyContext struct {
 	SessionID string   `json:"session_id"`
 }
 
-var (
-	preparedQuery *rego.PreparedEvalQuery
-	policyMu      sync.RWMutex
-)
-
 // LoadPolicy reads a Rego file and prepares the OPA query.
 // Returns nil if the file does not exist (allow-all fallback).
-func LoadPolicy(path string) error {
+func (e *Engine) LoadPolicy(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -38,35 +32,25 @@ func LoadPolicy(path string) error {
 		}
 		return fmt.Errorf("failed to read policy: %w", err)
 	}
+	return e.compilePolicy(path, data)
+}
 
-	ctx := context.Background()
-	query, err := rego.New(
-		rego.Query("data.adssh.authz"),
-		rego.Module(path, string(data)),
-		// Fail closed: surface builtin runtime errors (div-by-zero, bad
-		// to_number, etc.) as Eval errors instead of silently treating the
-		// rule as undefined. EvaluatePolicy returns those as errors and the
-		// interceptor treats them as deny (Wave 2 fix for the fail-open gap).
-		rego.StrictBuiltinErrors(true),
-	).PrepareForEval(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to compile policy: %w", err)
-	}
-
-	policyMu.Lock()
-	defer policyMu.Unlock()
-	preparedQuery = &query
-	return nil
+// LoadPolicy reads a Rego file and prepares the OPA query.
+// Returns nil if the file does not exist (allow-all fallback).
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func LoadPolicy(path string) error {
+	return defaultEngine.LoadPolicy(path)
 }
 
 // EvaluatePolicy evaluates the loaded Rego policy against the given context.
 // Returns (true, "", nil) if no policy is loaded.
 // Returns (false, "", err) on evaluation error — fail closed on errors (T-01-02).
-func EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
-	policyMu.RLock()
-	defer policyMu.RUnlock()
+func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
+	e.policyMu.RLock()
+	defer e.policyMu.RUnlock()
 
-	if preparedQuery == nil {
+	if e.preparedQuery == nil {
 		return true, "", nil
 	}
 
@@ -80,7 +64,7 @@ func EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 		"session_id": pctx.SessionID,
 	}
 
-	results, err := preparedQuery.Eval(ctx, rego.EvalInput(input))
+	results, err := e.preparedQuery.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
 		return false, "", fmt.Errorf("policy evaluation failed: %w", err)
 	}
@@ -108,7 +92,16 @@ func EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 	return allowed, denyReason, nil
 }
 
+// EvaluatePolicy evaluates the loaded Rego policy against the given context.
+// Returns (true, "", nil) if no policy is loaded.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
+	return defaultEngine.EvaluatePolicy(pctx)
+}
+
 // BuildPolicyContext creates a PolicyContext from the current OS user and command.
+// It is stateless (no engine state), so it remains a plain package function.
 func BuildPolicyContext(command string, args []string, sessionID string) PolicyContext {
 	pctx := PolicyContext{
 		Command:   command,

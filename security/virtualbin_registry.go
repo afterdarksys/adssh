@@ -19,10 +19,10 @@ type VirtualBinary interface {
 	Run(ctx context.Context, args []string) error
 }
 
-var vbinRegistry = map[string]VirtualBinary{}
-
-// Register adds a virtual binary to the registry. Call from init().
-func Register(vb VirtualBinary) {
+// Register adds a virtual binary to the engine's registry. Call from init()
+// (via the package-level Register shim) or at runtime. It panics on
+// programmer error (empty/invalid/duplicate name), matching the legacy global.
+func (e *Engine) Register(vb VirtualBinary) {
 	name := vb.Name()
 	if strings.TrimSpace(name) == "" {
 		panic("adssh: virtual binary name cannot be empty")
@@ -30,26 +30,60 @@ func Register(vb VirtualBinary) {
 	if strings.ContainsAny(name, " \t\r\n/") {
 		panic(fmt.Sprintf("adssh: invalid virtual binary name %q", name))
 	}
-	if _, exists := vbinRegistry[name]; exists {
+	e.vbinMu.Lock()
+	defer e.vbinMu.Unlock()
+	if _, exists := e.vbins[name]; exists {
 		panic(fmt.Sprintf("adssh: duplicate virtual binary %q", name))
 	}
-	vbinRegistry[name] = vb
+	e.vbins[name] = vb
+}
+
+// Register adds a virtual binary to the process-global registry. Call from init().
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func Register(vb VirtualBinary) {
+	defaultEngine.Register(vb)
 }
 
 // Lookup returns the virtual binary registered under name.
-func Lookup(name string) (VirtualBinary, bool) {
-	vb, ok := vbinRegistry[name]
+func (e *Engine) Lookup(name string) (VirtualBinary, bool) {
+	e.vbinMu.RLock()
+	defer e.vbinMu.RUnlock()
+	vb, ok := e.vbins[name]
 	return vb, ok
 }
 
+// Lookup returns the virtual binary registered under name.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func Lookup(name string) (VirtualBinary, bool) {
+	return defaultEngine.Lookup(name)
+}
+
 // ListVBins returns all registered virtual binaries sorted by name.
-func ListVBins() []VirtualBinary {
-	out := make([]VirtualBinary, 0, len(vbinRegistry))
-	for _, vb := range vbinRegistry {
+func (e *Engine) ListVBins() []VirtualBinary {
+	e.vbinMu.RLock()
+	out := make([]VirtualBinary, 0, len(e.vbins))
+	for _, vb := range e.vbins {
 		out = append(out, vb)
 	}
+	e.vbinMu.RUnlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
 	return out
+}
+
+// ListVBins returns all registered virtual binaries sorted by name.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func ListVBins() []VirtualBinary {
+	return defaultEngine.ListVBins()
+}
+
+// DispatchVBin runs a virtual binary, handling --help automatically. It holds no
+// engine state (vb is supplied by the caller) but is exposed as a method for
+// API symmetry.
+func (e *Engine) DispatchVBin(ctx context.Context, vb VirtualBinary, args []string) error {
+	return DispatchVBin(ctx, vb, args)
 }
 
 // DispatchVBin runs a virtual binary, handling --help automatically.

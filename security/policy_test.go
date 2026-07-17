@@ -8,11 +8,13 @@ import (
 	"time"
 )
 
-// resetPolicy resets the package-level policy state between tests.
+// resetPolicy resets the default engine's policy state between tests.
+// (Wave 2: policy state moved from package globals onto the Engine; this helper
+// now resets defaultEngine's fields but its assertions are unchanged.)
 func resetPolicy() {
-	policyMu.Lock()
-	defer policyMu.Unlock()
-	preparedQuery = nil
+	defaultEngine.policyMu.Lock()
+	defer defaultEngine.policyMu.Unlock()
+	defaultEngine.preparedQuery = nil
 }
 
 // Test 1: EvaluatePolicy returns (true, "", nil) when no policy is loaded

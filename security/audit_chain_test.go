@@ -10,11 +10,13 @@ import (
 	"testing"
 )
 
-// resetChain resets the package-level audit-chain state between tests.
+// resetChain resets the default engine's audit-chain state between tests.
+// (Wave 2: chain state moved from package globals onto the Engine; this helper
+// now resets defaultEngine's fields but its assertions are unchanged.)
 func resetChain() {
-	chainMu.Lock()
-	defer chainMu.Unlock()
-	chainPath, chainKey, chainSession = "", nil, ""
+	defaultEngine.chainMu.Lock()
+	defer defaultEngine.chainMu.Unlock()
+	defaultEngine.chainPath, defaultEngine.chainKey, defaultEngine.chainSession = "", nil, ""
 }
 
 // readChainLines reads the ledger file and returns its non-empty lines, in order.
@@ -307,9 +309,9 @@ func TestChain_NoInitIsNoOp(t *testing.T) {
 		t.Errorf("expected no files created, found: %v", entries)
 	}
 
-	chainMu.Lock()
-	path, key := chainPath, chainKey
-	chainMu.Unlock()
+	defaultEngine.chainMu.Lock()
+	path, key := defaultEngine.chainPath, defaultEngine.chainKey
+	defaultEngine.chainMu.Unlock()
 	if path != "" || key != nil {
 		t.Errorf("expected chain state to remain unset, got path=%q key=%v", path, key)
 	}

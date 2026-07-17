@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -50,27 +49,27 @@ type chainEntryForHash struct {
 	PrevHash  string  `json:"prev_hash"`
 }
 
-var (
-	chainPath    string
-	chainKey     []byte
-	chainSession string
-	chainMu      sync.Mutex
-)
-
 // InitChain sets the ledger path, loads or creates the HMAC key, and sets the session ID.
-func InitChain(ledgerPath, keyPath, sessionID string) {
-	chainMu.Lock()
-	defer chainMu.Unlock()
+func (e *Engine) InitChain(ledgerPath, keyPath, sessionID string) {
+	e.chainMu.Lock()
+	defer e.chainMu.Unlock()
 
-	chainPath = ledgerPath
-	chainSession = sessionID
+	e.chainPath = ledgerPath
+	e.chainSession = sessionID
 
 	key, err := loadOrCreateChainKey(keyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit chain: failed to load/create key: %v\n", err)
 		return
 	}
-	chainKey = key
+	e.chainKey = key
+}
+
+// InitChain sets the ledger path, loads or creates the HMAC key, and sets the session ID.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func InitChain(ledgerPath, keyPath, sessionID string) {
+	defaultEngine.InitChain(ledgerPath, keyPath, sessionID)
 }
 
 // loadOrCreateChainKey reads the HMAC key from path, or generates and writes a new one.
@@ -170,20 +169,20 @@ func readLastChainLine(path string) (prevHash string, nextSeq int64) {
 
 // AppendChain appends a new entry to the HMAC chain ledger.
 // It is a no-op if InitChain has not been called.
-func AppendChain(entry ChainEntry) {
-	chainMu.Lock()
-	defer chainMu.Unlock()
+func (e *Engine) AppendChain(entry ChainEntry) {
+	e.chainMu.Lock()
+	defer e.chainMu.Unlock()
 
-	if chainPath == "" || chainKey == nil {
+	if e.chainPath == "" || e.chainKey == nil {
 		return
 	}
 
-	prevHash, nextSeq := readLastChainLine(chainPath)
+	prevHash, nextSeq := readLastChainLine(e.chainPath)
 
 	entry.Seq = nextSeq
 	entry.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	if entry.SessionID == "" {
-		entry.SessionID = chainSession
+		entry.SessionID = e.chainSession
 	}
 	if entry.User == "" {
 		entry.User = currentUser()
@@ -192,18 +191,18 @@ func AppendChain(entry ChainEntry) {
 		entry.Hostname = currentHostname()
 	}
 	entry.PrevHash = prevHash
-	entry.Hash = computeHash(chainKey, prevHash, entry)
+	entry.Hash = computeHash(e.chainKey, prevHash, entry)
 
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return
 	}
 
-	if err := os.MkdirAll(filepath.Dir(chainPath), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(e.chainPath), 0700); err != nil {
 		return
 	}
 
-	f, err := os.OpenFile(chainPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(e.chainPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return
 	}
@@ -212,19 +211,26 @@ func AppendChain(entry ChainEntry) {
 	f.Write([]byte("\n"))
 }
 
+// AppendChain appends a new entry to the HMAC chain ledger.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func AppendChain(entry ChainEntry) {
+	defaultEngine.AppendChain(entry)
+}
+
 // VerifyChain reads every line of the ledger and recomputes each hash.
 // Returns ok=true if the chain is intact, otherwise ok=false with the
 // sequence number of the first broken link.
-func VerifyChain(path string) (ok bool, badSeq int64, err error) {
+func (e *Engine) VerifyChain(path string) (ok bool, badSeq int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return false, -1, fmt.Errorf("open ledger: %v", err)
 	}
 	defer f.Close()
 
-	chainMu.Lock()
-	key := chainKey
-	chainMu.Unlock()
+	e.chainMu.Lock()
+	key := e.chainKey
+	e.chainMu.Unlock()
 
 	if key == nil {
 		return false, -1, fmt.Errorf("chain not initialised")
@@ -260,8 +266,17 @@ func VerifyChain(path string) (ok bool, badSeq int64, err error) {
 	return true, -1, nil
 }
 
+// VerifyChain reads every line of the ledger and recomputes each hash.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func VerifyChain(path string) (ok bool, badSeq int64, err error) {
+	return defaultEngine.VerifyChain(path)
+}
+
 // ExportChain reads the ledger, filters by timestamp range, and outputs JSON or CSV.
-func ExportChain(path, format, since, until string) ([]byte, error) {
+// It reads only the file at path and holds no engine state, but is exposed as an
+// Engine method for API symmetry.
+func (e *Engine) ExportChain(path, format, since, until string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open ledger: %v", err)
@@ -346,4 +361,11 @@ func ExportChain(path, format, since, until string) ([]byte, error) {
 	default: // json
 		return json.MarshalIndent(entries, "", "  ")
 	}
+}
+
+// ExportChain reads the ledger, filters by timestamp range, and outputs JSON or CSV.
+//
+// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
+func ExportChain(path, format, since, until string) ([]byte, error) {
+	return defaultEngine.ExportChain(path, format, since, until)
 }
