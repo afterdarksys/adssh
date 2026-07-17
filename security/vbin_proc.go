@@ -1,7 +1,7 @@
 package security
 
 import (
-	"adssh/sysmgmt"
+	"github.com/afterdarksys/adssh/sysmgmt"
 	"context"
 )
 

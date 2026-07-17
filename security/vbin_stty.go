@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"adssh/sys"
+	"github.com/afterdarksys/adssh/sys"
 
 	"mvdan.cc/sh/v3/interp"
 )

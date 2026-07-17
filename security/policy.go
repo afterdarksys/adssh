@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"adssh/sys"
+	"github.com/afterdarksys/adssh/sys"
 
 	"github.com/open-policy-agent/opa/rego"
 )

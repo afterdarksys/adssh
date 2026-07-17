@@ -1,4 +1,4 @@
-module adssh
+module github.com/afterdarksys/adssh
 
 go 1.26.0
 

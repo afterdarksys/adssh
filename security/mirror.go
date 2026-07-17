@@ -1,7 +1,7 @@
 package security
 
 import (
-	"adssh/sys"
+	"github.com/afterdarksys/adssh/sys"
 	"context"
 	"fmt"
 	"io"

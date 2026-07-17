@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	"adssh/security"
+	"github.com/afterdarksys/adssh/security"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"

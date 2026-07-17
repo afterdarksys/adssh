@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"adssh/sys"
+	"github.com/afterdarksys/adssh/sys"
 )
 
 // grant — temporary role escalation

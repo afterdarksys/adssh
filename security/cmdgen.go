@@ -1,7 +1,7 @@
 package security
 
 import (
-	"adssh/devops"
+	"github.com/afterdarksys/adssh/devops"
 	"context"
 	"fmt"
 	"strings"

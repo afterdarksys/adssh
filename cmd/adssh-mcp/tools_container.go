@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"adssh/security"
+	"github.com/afterdarksys/adssh/security"
 
 	"github.com/docker/docker/api/types/container"
 	dockerimage "github.com/docker/docker/api/types/image"

@@ -15,12 +15,12 @@ import (
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 
-	"adssh/config"
-	"adssh/parser"
-	"adssh/repl"
-	"adssh/security"
-	"adssh/starlarkext"
-	"adssh/sys"
+	"github.com/afterdarksys/adssh/config"
+	"github.com/afterdarksys/adssh/parser"
+	"github.com/afterdarksys/adssh/repl"
+	"github.com/afterdarksys/adssh/security"
+	"github.com/afterdarksys/adssh/starlarkext"
+	"github.com/afterdarksys/adssh/sys"
 )
 
 func init() {

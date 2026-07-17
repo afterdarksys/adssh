@@ -1,7 +1,7 @@
 package starlarkext
 
 import (
-	"adssh/security"
+	"github.com/afterdarksys/adssh/security"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"

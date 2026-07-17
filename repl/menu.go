@@ -10,8 +10,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"adssh/security"
-	"adssh/starlarkext"
+	"github.com/afterdarksys/adssh/security"
+	"github.com/afterdarksys/adssh/starlarkext"
 
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
