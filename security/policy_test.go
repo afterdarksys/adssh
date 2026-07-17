@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // resetPolicy resets the package-level policy state between tests.
@@ -156,5 +157,130 @@ func TestPolicyContext_JSONMarshal(t *testing.T) {
 	args, ok := result["args"].([]interface{})
 	if !ok || len(args) != 2 {
 		t.Errorf("expected args to be array of 2, got: %v", result["args"])
+	}
+}
+
+// Test 6: LoadPolicy with malformed Rego returns an error, and any
+// previously-loaded policy remains active (LoadPolicy does not clear
+// preparedQuery before compiling the new module).
+func TestLoadPolicy_MalformedRego(t *testing.T) {
+	resetPolicy()
+	dir := t.TempDir()
+
+	// First load a good deny-everything policy.
+	goodPath := filepath.Join(dir, "good.rego")
+	goodPolicy := `package adssh.authz
+default allow = false
+deny_reason = "blocked by good policy" { input.command == "rm" }`
+	if err := os.WriteFile(goodPath, []byte(goodPolicy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadPolicy(goodPath); err != nil {
+		t.Fatalf("LoadPolicy(good) failed: %v", err)
+	}
+
+	// Now attempt to load garbage Rego.
+	badPath := filepath.Join(dir, "bad.rego")
+	badPolicy := `this is not valid rego at all { { {`
+	if err := os.WriteFile(badPath, []byte(badPolicy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadPolicy(badPath); err == nil {
+		t.Fatal("expected LoadPolicy to return an error for malformed rego, got nil")
+	}
+
+	// The previously loaded (good) policy must still be active.
+	allowed, reason, err := EvaluatePolicy(PolicyContext{
+		User:      "alice",
+		Groups:    []string{"staff"},
+		Command:   "rm",
+		Args:      []string{"-rf", "/"},
+		Time:      "2026-05-06T00:00:00Z",
+		SessionID: "test-session",
+	})
+	if err != nil {
+		t.Fatalf("EvaluatePolicy error: %v", err)
+	}
+	if allowed {
+		t.Errorf("expected allowed=false (good policy still active after failed reload), got true")
+	}
+	if reason != "blocked by good policy" {
+		t.Errorf("expected deny_reason from the still-active good policy, got: %q", reason)
+	}
+}
+
+// Test 7: EvaluatePolicy's PolicyContext fields actually reach the Rego
+// input document — allow is keyed on both input.user and input.groups.
+func TestEvaluatePolicy_InputFieldsReachRego(t *testing.T) {
+	resetPolicy()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fields.rego")
+	policy := `package adssh.authz
+default allow = false
+allow { input.user == "alice"; input.groups[_] == "ops" }
+deny_reason = "user/group mismatch" { not allow }`
+	if err := os.WriteFile(path, []byte(policy), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadPolicy(path); err != nil {
+		t.Fatalf("LoadPolicy failed: %v", err)
+	}
+
+	// alice + ops -> allowed
+	allowed, reason, err := EvaluatePolicy(PolicyContext{
+		User:      "alice",
+		Groups:    []string{"ops"},
+		Command:   "kubectl",
+		Args:      []string{"get", "pods"},
+		Time:      "2026-05-06T00:00:00Z",
+		SessionID: "test-session",
+	})
+	if err != nil {
+		t.Fatalf("EvaluatePolicy error: %v", err)
+	}
+	if !allowed {
+		t.Errorf("expected allowed=true for user=alice groups=[ops], got false (reason=%q)", reason)
+	}
+
+	// bob (wrong user, same group) -> denied
+	allowed, reason, err = EvaluatePolicy(PolicyContext{
+		User:      "bob",
+		Groups:    []string{"ops"},
+		Command:   "kubectl",
+		Args:      []string{"get", "pods"},
+		Time:      "2026-05-06T00:00:00Z",
+		SessionID: "test-session",
+	})
+	if err != nil {
+		t.Fatalf("EvaluatePolicy error: %v", err)
+	}
+	if allowed {
+		t.Errorf("expected allowed=false for user=bob, got true")
+	}
+	if reason != "user/group mismatch" {
+		t.Errorf("expected deny_reason='user/group mismatch', got: %q", reason)
+	}
+}
+
+// Test 8: BuildPolicyContext with an empty sessionID falls back to the
+// current OS user/groups (no session to look up), and stamps a
+// RFC3339-parseable Time.
+func TestBuildPolicyContext_Defaults(t *testing.T) {
+	pctx := BuildPolicyContext("ls", []string{"-la"}, "")
+
+	if pctx.User == "" {
+		t.Error("expected User to be populated from the current OS user, got empty string")
+	}
+	if pctx.Command != "ls" {
+		t.Errorf("expected Command=%q, got %q", "ls", pctx.Command)
+	}
+	if len(pctx.Args) != 1 || pctx.Args[0] != "-la" {
+		t.Errorf("expected Args=[-la], got %v", pctx.Args)
+	}
+	if pctx.SessionID != "" {
+		t.Errorf("expected SessionID to remain empty, got %q", pctx.SessionID)
+	}
+	if _, err := time.Parse(time.RFC3339, pctx.Time); err != nil {
+		t.Errorf("expected Time to parse as RFC3339, got %q: %v", pctx.Time, err)
 	}
 }
