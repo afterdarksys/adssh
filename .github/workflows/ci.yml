@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build adssh
+        run: go build -o adssh .
+      - name: Build adssh-mcp
+        run: go build -o adssh-mcp ./cmd/adssh-mcp
+
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./...
+
+  test:
+    name: Test (race + coverage)
+    runs-on: ubuntu-latest
+    env:
+      # Starting coverage ratchet. Override with a repo/org variable
+      # (vars.COVERAGE_THRESHOLD) as the suite grows. NOTE: the current baseline
+      # is ~2% (only security/ and starlarkext/ have unit tests), so 25% is an
+      # aspirational target — lower this or add tests before making it a hard gate.
+      COVERAGE_THRESHOLD: ${{ vars.COVERAGE_THRESHOLD || '25' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests with race detector and coverage
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+      - name: Enforce coverage threshold
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          echo "Total coverage: ${total}% (threshold: ${COVERAGE_THRESHOLD}%)"
+          awk -v t="$total" -v gate="$COVERAGE_THRESHOLD" \
+            'BEGIN { if (t + 0 < gate + 0) { print "FAIL: coverage " t "% is below the " gate "% ratchet"; exit 1 } }'
+
+  e2e:
+    name: E2E (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run end-to-end suite
+        run: make test-e2e
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    # Soft-fail while the codebase is brought to a clean lint baseline.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.1.6
+          args: --timeout=5m
