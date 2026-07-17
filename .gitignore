@@ -17,3 +17,8 @@ test_env
 
 # VSCode
 .vscode/
+
+# Claude/OMC local state
+.claude/worktrees/
+.omc/
+.tool-versions

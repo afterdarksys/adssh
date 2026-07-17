@@ -1,10 +1,11 @@
 package repl
 
 import (
+	"adssh/security"
+	"adssh/starlarkext"
 	"os"
 	"path/filepath"
 	"strings"
-	"adssh/starlarkext"
 
 	"go.starlark.net/starlark"
 )
@@ -21,12 +22,6 @@ import (
 type adsshCompleter struct {
 	globals starlark.StringDict
 	history *[]string
-}
-
-var virtualBinaries = []string{
-	"jq", "yq", "http", "mirror", "cmdgen",
-	"stty", "vbins", "darkscan", "memforensics",
-	"proc", "package", "history", "fc", "help",
 }
 
 var shellBuiltins = []string{
@@ -56,17 +51,17 @@ var starlarkNamespaceKeys = map[string][]string{
 	"i18n":   {"load", "set_lang", "T"},
 	"cloud":  {"gen"},
 	// Cloud providers
-	"aws":        {"ec2", "s3", "ecs", "lambda"},
-	"aws.ec2":    {"list_instances", "start_instance", "stop_instance", "terminate_instance"},
-	"aws.s3":     {"list_buckets", "get_object", "put_object", "delete_object"},
-	"aws.ecs":    {"list_clusters", "list_services"},
-	"aws.lambda": {"list_functions", "invoke"},
-	"oci":             {"compute", "storage"},
-	"oci.compute":     {"list_instances", "start_instance", "stop_instance"},
-	"oci.storage":     {"list_buckets", "get_object", "put_object", "delete_object"},
-	"gcp":             {"compute", "storage"},
-	"gcp.compute":     {"list_instances", "start_instance", "stop_instance"},
-	"gcp.storage":     {"list_buckets", "get_object", "put_object", "delete_object"},
+	"aws":         {"ec2", "s3", "ecs", "lambda"},
+	"aws.ec2":     {"list_instances", "start_instance", "stop_instance", "terminate_instance"},
+	"aws.s3":      {"list_buckets", "get_object", "put_object", "delete_object"},
+	"aws.ecs":     {"list_clusters", "list_services"},
+	"aws.lambda":  {"list_functions", "invoke"},
+	"oci":         {"compute", "storage"},
+	"oci.compute": {"list_instances", "start_instance", "stop_instance"},
+	"oci.storage": {"list_buckets", "get_object", "put_object", "delete_object"},
+	"gcp":         {"compute", "storage"},
+	"gcp.compute": {"list_instances", "start_instance", "stop_instance"},
+	"gcp.storage": {"list_buckets", "get_object", "put_object", "delete_object"},
 	// VCS
 	"git":    {"clone", "open", "status", "add", "commit", "push", "pull", "log"},
 	"github": {"list_repos", "list_prs", "create_pr", "merge_pr", "list_issues", "create_issue", "close_issue", "create_release", "list_workflows", "trigger_workflow"},
@@ -230,7 +225,8 @@ func (c *adsshCompleter) completeCommand(prefix string) ([][]rune, int) {
 	seen := make(map[string]bool)
 	var candidates []string
 
-	for _, name := range virtualBinaries {
+	for _, vb := range security.ListVBins() {
+		name := vb.Name()
 		if !seen[name] {
 			seen[name] = true
 			candidates = append(candidates, name)

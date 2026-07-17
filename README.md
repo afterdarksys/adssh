@@ -16,6 +16,7 @@ git clone https://github.com/afterdarksys/adssh
 cd adssh
 make install        # installs adssh + adssh-mcp to $GOPATH/bin
 adssh --init        # create ~/.adssh/ starter config
+adssh --doctor      # check policy, audit, history, SSH, and host-tool readiness
 adssh               # launch
 ```
 
@@ -169,6 +170,7 @@ Tools exposed: `eval_starlark`, `run_shell`, `list_sessions`, `cloud_query`, `co
 
 ```bash
 adssh --init       # creates ~/.adssh/ with starter files
+adssh --doctor     # validates local readiness before using it as a primary shell
 ```
 
 | Env var | Default | Purpose |

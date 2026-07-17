@@ -1,6 +1,6 @@
 # adssh Virtual Binary (VBIN) Specification
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Status:** Normative
 
 ---
@@ -20,6 +20,7 @@ VBINs are the canonical extension point for tools that adssh ships as built-ins 
 3. **Audit-first.** Every VBIN invocation passes through `BashInterceptor` before dispatch. Policy evaluation, access control, and command logging happen automatically — VBIN authors do not implement these.
 4. **Self-describing.** Every VBIN exposes its name, one-line description, and usage string. `vbins --help` and tab completion are driven by this metadata.
 5. **Register-by-init.** VBINs self-register in a Go `init()` function. No central registry file requires editing to add a new VBIN.
+6. **Replacement-shell quality.** VBINs that shadow common Unix tools must preserve familiar stdin/stdout behavior, exit semantics, and composability unless their help text explicitly documents the difference.
 
 ---
 
@@ -40,7 +41,7 @@ type VirtualBinary interface {
 
 | Method | Contract |
 |--------|----------|
-| `Name()` | Returns the command name as it appears on the shell prompt. Must be a single token with no whitespace. Must be unique across all registered VBINs. |
+| `Name()` | Returns the command name as it appears on the shell prompt. Must be a single token with no whitespace or `/`. Must be unique across all registered VBINs. |
 | `Description()` | One-line human-readable description used by `vbins` and tab completion. No trailing period. 80 characters or fewer. |
 | `Usage()` | Minimal usage synopsis, e.g. `jq <filter>`. Shown by `--help`. |
 | `Run(ctx, args)` | Executes the command. `args[0]` is the command name (matching `Name()`). Returns a non-nil error to signal failure; the shell prints the error and sets `$?` to a non-zero exit code. |
@@ -57,7 +58,7 @@ func init() {
 }
 ```
 
-The registry stores VBINs in a `map[string]VirtualBinary` keyed by `Name()`. Duplicate names panic at init time.
+The registry stores VBINs in a `map[string]VirtualBinary` keyed by `Name()`. `Register` panics at init time when a VBIN has an empty name, a name containing whitespace or `/`, or a name that duplicates an existing VBIN.
 
 ---
 
@@ -85,6 +86,16 @@ Shell command
 ```
 
 VBINs occupy layer 2. They run after policy has approved the command, and before the real shell tries to exec anything. A VBIN for a name that also exists as a real binary always wins.
+
+### Shadowing real commands
+
+Shadowing is intentional for tools that adssh wants to provide everywhere, such as `jq`, `yq`, and `http`. Shadowing is also a compatibility risk. A VBIN that shadows a common host command must meet one of these criteria:
+
+- It is a close behavioral subset of the common command and documents unsupported flags in `Usage()` or command-specific help.
+- It is adssh-specific and has a name that is unlikely to collide with POSIX or common admin tooling.
+- It is explicitly security-gated by policy or entitlements because it changes system state.
+
+Do not shadow shell control flow, POSIX special builtins, or commands whose semantics scripts commonly depend on: `cd`, `export`, `exec`, `exit`, `read`, `set`, `test`, `[`, `[[`, `trap`, `return`, `shift`, `eval`.
 
 ### DispatchVBin
 
@@ -127,6 +138,19 @@ func (b myBinary) Run(ctx context.Context, args []string) error {
 
 `hc.Stdin`, `hc.Stdout`, and `hc.Stderr` are wired by `mvdan.cc/sh` and reflect whatever redirections the user specified (`< file`, `| next-cmd`, `2>/dev/null`, etc.). Never read `os.Stdin` or write to `os.Stdout`/`os.Stderr` directly.
 
+### Pipeline contract
+
+A VBIN must be composable in shell pipelines:
+
+- Read data from `hc.Stdin` when input is not supplied by explicit arguments.
+- Write machine-readable primary output to `hc.Stdout`.
+- Write warnings, prompts, diagnostics, progress, and human-only messages to `hc.Stderr`.
+- Do not emit banners or progress output to `stdout` when the command is likely to be piped.
+- Return after `ctx.Done()` is closed for long-running operations.
+- Do not close `hc.Stdin`, `hc.Stdout`, or `hc.Stderr`; the shell owns them.
+
+Commands that may produce structured output should prefer stable JSON by default or provide a documented flag for JSON output.
+
 ---
 
 ## Session Context
@@ -165,6 +189,21 @@ security.LogEvent(fmt.Sprintf("darkscan: submitted %s", args[1]))
 
 ---
 
+## Portability Tiers
+
+Every VBIN should be clear about where it works.
+
+| Tier | Meaning | Requirements |
+|------|---------|--------------|
+| Portable | Works on supported adssh platforms without host-specific files or tools | No subprocess dependency; no Linux-only filesystem assumptions |
+| Host-adapter | Wraps or inspects host capabilities | Detect missing capability and return a clear error |
+| Platform-specific | Intentionally tied to an OS or subsystem | Document the platform in `Description()` or `Usage()` and fail cleanly elsewhere |
+| Privileged | Requires elevated rights or mutates protected state | Must be policy/entitlement friendly and audit meaningful sub-actions |
+
+The default expectation is Portable. Use a lower tier only when the command's purpose requires it.
+
+---
+
 ## Built-in VBINs
 
 | Name | File | Description |
@@ -175,8 +214,18 @@ security.LogEvent(fmt.Sprintf("darkscan: submitted %s", args[1]))
 | `darkscan` | `security/virtualbin.go` | Malware scanner stub — submits a file path to the DarkAPI scanner |
 | `memforensics` | `security/virtualbin.go` | Memory forensics stub — scans a PID for secrets and injections |
 | `vbins` | `security/vbin_vbins.go` | Discovery — lists all registered VBINs with their descriptions |
-| `proc` | `sysmgmt/proc.go` | Linux `/proc` filesystem accessor — `proc get|set <path> [value]` |
-| `package` | `sysmgmt/package.go` | Cross-distro package manager wrapper — `package install|remove|update|list <pkg>` |
+| `help` | `security/vbin_help.go` | Shell help system |
+| `history` | `security/vbin_history.go` | Interactive command history |
+| `fc` | `security/vbin_history.go` | History listing/editing command |
+| `audit` | `security/vbin_audit.go` | Audit-chain inspection and export |
+| `mirror` | `security/mirror.go` | Session mirroring and console access |
+| `cmdgen` | `security/cmdgen.go` | Cloud and container command generator |
+| `grant` | `security/grants.go` | Temporary role escalation |
+| `4eyes` | `security/vbin_foureyes.go` | Four-eyes approval workflow |
+| `cm` | `security/vbin_cm.go` | Change-management workflow |
+| `stty` | `security/vbin_stty.go` | Terminal mode controls |
+| `proc` | `security/vbin_proc.go` | Linux `/proc` filesystem accessor — `proc get|set <path> [value]` |
+| `package` | `security/vbin_package.go` | Cross-distro package manager wrapper — `package install|remove|update|list <pkg>` |
 
 ---
 
@@ -220,9 +269,7 @@ func init() { Register(myToolBinary{}) }
 import _ "adssh/sysmgmt"
 ```
 
-4. **Update tab completion** in `repl/completer.go`. Add the binary name to the `virtualBinaries` slice so it appears in first-word completions.
-
-5. **Build and verify.**
+4. **Build and verify.**
 
 ```bash
 go build ./...
@@ -235,13 +282,9 @@ vbins
 
 ## Tab Completion
 
-The completer (`repl/completer.go`) includes a static slice of known VBIN names for first-word tab completion. When adding a VBIN, update this slice to include the new name:
+The REPL completer reads first-word VBIN completions from `security.ListVBins()`. A registered VBIN appears in first-word completion automatically.
 
-```go
-var virtualBinaries = []string{"jq", "yq", "http", "mirror", "cmdgen", "mytool"}
-```
-
-Dynamic completion based on `ListVBins()` is a planned improvement.
+Argument completion is still command-specific. Add first-argument completions to `vbinSubcommands` in `repl/completer.go` when the command has a small stable subcommand set. Do not add file, URL, or free-form value domains there.
 
 ---
 
@@ -263,13 +306,36 @@ return fmt.Errorf("mytool: expected <arg>, got nothing")
 
 The shell prints this to stderr and sets a non-zero exit status. Do not call `os.Exit` from a VBIN — it terminates the entire shell process.
 
+For replacement-shell reliability:
+
+- Validate arguments before performing side effects.
+- Prefer deterministic errors over partial output.
+- For unsupported flags, return a clear message instead of silently ignoring them.
+- For network operations, set bounded timeouts and honor context cancellation.
+- For mutating commands, log meaningful sub-actions with `security.LogEvent`.
+
+---
+
+## Test Requirements
+
+Every non-trivial VBIN should have focused tests. Minimum coverage:
+
+- `--help` or `Usage()` output is coherent.
+- Missing/invalid arguments return an error prefixed with the binary name.
+- Stdin/stdout behavior works under `interp.HandlerCtx`.
+- Structured output is parseable when the command promises structured output.
+- Host-adapter and platform-specific commands handle missing capabilities cleanly.
+- Mutating or privileged commands verify policy/entitlement/audit behavior where applicable.
+
+Prefer tests around `Run(ctx, args)` with a handler context over end-to-end shell tests unless the command depends on parser or redirection behavior.
+
 ---
 
 ## Future Extensions
 
 | Feature | Notes |
 |---------|-------|
-| Dynamic tab completion | Drive `virtualBinaries` from `ListVBins()` at completer init time |
 | Per-VBIN entitlement blocks | Allow entitlements YAML to list VBINs by name, not just arbitrary commands |
 | Starlark-defined VBINs | `sys.register_command` already covers this use case for simple cases |
 | VBIN argument completion | Extend the `VirtualBinary` interface with an optional `Complete(args []string) []string` method |
+| Extended metadata | Add optional categories, portability tier, examples, and output format metadata |

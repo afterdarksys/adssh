@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"mvdan.cc/sh/v3/interp"
 )
@@ -12,9 +13,9 @@ import (
 // Add a new virtual binary by implementing this interface and calling
 // Register in an init() function.
 type VirtualBinary interface {
-	Name()        string
+	Name() string
 	Description() string
-	Usage()       string
+	Usage() string
 	Run(ctx context.Context, args []string) error
 }
 
@@ -22,7 +23,17 @@ var vbinRegistry = map[string]VirtualBinary{}
 
 // Register adds a virtual binary to the registry. Call from init().
 func Register(vb VirtualBinary) {
-	vbinRegistry[vb.Name()] = vb
+	name := vb.Name()
+	if strings.TrimSpace(name) == "" {
+		panic("adssh: virtual binary name cannot be empty")
+	}
+	if strings.ContainsAny(name, " \t\r\n/") {
+		panic(fmt.Sprintf("adssh: invalid virtual binary name %q", name))
+	}
+	if _, exists := vbinRegistry[name]; exists {
+		panic(fmt.Sprintf("adssh: duplicate virtual binary %q", name))
+	}
+	vbinRegistry[name] = vb
 }
 
 // Lookup returns the virtual binary registered under name.

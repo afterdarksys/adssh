@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -42,6 +43,7 @@ func main() {
 	cfg.IsLoginShell = strings.HasPrefix(os.Args[0], "-")
 
 	var cmdFlag string // -c "expression"
+	doctorFlag := false
 
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -49,6 +51,8 @@ func main() {
 		case arg == "-h" || arg == "--help":
 			printHelp()
 			return
+		case arg == "--doctor":
+			doctorFlag = true
 		case arg == "--init":
 			if err := runInit(); err != nil {
 				fmt.Fprintf(os.Stderr, "init error: %v\n", err)
@@ -74,6 +78,13 @@ func main() {
 		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "":
 			cfg.ScriptPath = arg
 		}
+	}
+
+	if doctorFlag {
+		if code := runDoctor(cfg); code != 0 {
+			os.Exit(code)
+		}
+		return
 	}
 
 	// 3. Initialize audit logging
@@ -238,6 +249,7 @@ USAGE
 OPTIONS
   -h, --help                  Show this help
       --init                  Create ~/.adssh/ with starter config and exit
+      --doctor                Check local configuration and readiness
   -r, --restricted            Restricted mode (no path traversal, no cd/export)
   -l, --login                 Login shell (load ~/.adsshprofile)
       --serve <addr>          Start built-in SSH server (e.g. --serve :2222)
@@ -275,13 +287,160 @@ Run 'adssh --init' to create a starter config in ~/.adssh/
 `)
 }
 
+type doctorCheck struct {
+	Status  string
+	Name    string
+	Details string
+}
+
+func runDoctor(cfg config.AppConfig) int {
+	checks := []doctorCheck{}
+	failures := 0
+
+	add := func(status, name, details string) {
+		checks = append(checks, doctorCheck{Status: status, Name: name, Details: details})
+		if status == "FAIL" {
+			failures++
+		}
+	}
+
+	addPathCheck := func(name, path string, required bool) {
+		if path == "" {
+			if required {
+				add("FAIL", name, "path is empty")
+			} else {
+				add("WARN", name, "not configured")
+			}
+			return
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) && !required {
+				add("WARN", name, fmt.Sprintf("%s does not exist", path))
+				return
+			}
+			add("FAIL", name, fmt.Sprintf("%s: %v", path, err))
+			return
+		}
+		if info.IsDir() {
+			add("FAIL", name, fmt.Sprintf("%s is a directory", path))
+			return
+		}
+		add("OK", name, path)
+	}
+
+	addWritableDirCheck := func(name, path string) {
+		if path == "" {
+			add("FAIL", name, "path is empty")
+			return
+		}
+		dir := filepath.Dir(path)
+		info, err := os.Stat(dir)
+		if err != nil {
+			add("FAIL", name, fmt.Sprintf("%s: %v", dir, err))
+			return
+		}
+		if !info.IsDir() {
+			add("FAIL", name, fmt.Sprintf("%s is not a directory", dir))
+			return
+		}
+		f, err := os.CreateTemp(dir, ".adssh-doctor-*")
+		if err != nil {
+			add("FAIL", name, fmt.Sprintf("%s is not writable: %v", dir, err))
+			return
+		}
+		tmp := f.Name()
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		add("OK", name, fmt.Sprintf("%s is writable", dir))
+	}
+
+	fmt.Println("adssh doctor")
+	fmt.Println()
+
+	if exe, err := os.Executable(); err == nil {
+		add("OK", "binary", exe)
+	} else {
+		add("WARN", "binary", fmt.Sprintf("cannot resolve executable: %v", err))
+	}
+
+	cfgDir := config.XDGConfigHome()
+	if info, err := os.Stat(cfgDir); err == nil && info.IsDir() {
+		add("OK", "config directory", cfgDir)
+	} else if err == nil {
+		add("FAIL", "config directory", fmt.Sprintf("%s is not a directory", cfgDir))
+	} else if os.IsNotExist(err) {
+		add("WARN", "config directory", fmt.Sprintf("%s does not exist; run adssh --init", cfgDir))
+	} else {
+		add("FAIL", "config directory", fmt.Sprintf("%s: %v", cfgDir, err))
+	}
+
+	addWritableDirCheck("audit log directory", cfg.AuditLogPath)
+	addWritableDirCheck("history directory", cfg.HistoryFile)
+	addPathCheck("rc script", cfg.RCPath, false)
+	addPathCheck("login profile", cfg.ProfilePath, false)
+
+	if _, err := os.Stat(cfg.PolicyPath); err != nil {
+		if os.IsNotExist(err) {
+			add("WARN", "policy", fmt.Sprintf("%s does not exist; running with allow-all fallback", cfg.PolicyPath))
+		} else {
+			add("FAIL", "policy", fmt.Sprintf("%s: %v", cfg.PolicyPath, err))
+		}
+	} else if err := security.LoadPolicy(cfg.PolicyPath); err != nil {
+		add("FAIL", "policy", fmt.Sprintf("%s: %v", cfg.PolicyPath, err))
+	} else {
+		pctx := security.BuildPolicyContext("true", []string{}, "")
+		if allowed, reason, err := security.EvaluatePolicy(pctx); err != nil {
+			add("FAIL", "policy", fmt.Sprintf("evaluation failed: %v", err))
+		} else if !allowed {
+			if reason == "" {
+				reason = "sample command denied"
+			}
+			add("WARN", "policy", fmt.Sprintf("%s compiled, but denies a sample command: %s", cfg.PolicyPath, reason))
+		} else {
+			add("OK", "policy", fmt.Sprintf("%s compiles", cfg.PolicyPath))
+		}
+	}
+
+	if cfg.ServeAddr != "" {
+		if os.Geteuid() != 0 {
+			add("FAIL", "ssh server", "adssh --serve currently requires root")
+		} else {
+			add("OK", "ssh server", "running as root")
+		}
+		addPathCheck("authorized_keys", cfg.AuthorizedKeysPath, true)
+	} else {
+		addPathCheck("authorized_keys", cfg.AuthorizedKeysPath, false)
+	}
+
+	for _, tool := range []string{"ssh", "git", "docker", "kubectl"} {
+		if path, err := exec.LookPath(tool); err == nil {
+			add("OK", "host tool: "+tool, path)
+		} else {
+			add("WARN", "host tool: "+tool, "not found in PATH")
+		}
+	}
+
+	for _, check := range checks {
+		fmt.Printf("%-4s  %-22s %s\n", check.Status, check.Name, check.Details)
+	}
+	fmt.Println()
+
+	if failures > 0 {
+		fmt.Printf("%d readiness check(s) failed.\n", failures)
+		return 1
+	}
+	fmt.Println("No failing readiness checks.")
+	return 0
+}
+
 func runInit() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("cannot determine home directory: %v", err)
 	}
 
-	dir := filepath.Join(home, ".adssh")
+	dir := config.XDGConfigHome()
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("cannot create %s: %v", dir, err)
 	}
@@ -289,16 +448,19 @@ func runInit() error {
 	files := map[string]string{
 		"authorized_keys": "# Add SSH public keys here (one per line) to allow remote access via adssh --serve\n",
 
-		"default.rego": `package adssh
+		"policy.rego": `package adssh.authz
 
 # Default policy: allow everything.
 # Replace with your own rules to restrict what users can run.
 # See policy/examples/ for more patterns.
 
 default allow = true
+default deny_reason = ""
 `,
+	}
 
-		".adsshrc": `# ~/.adssh/.adsshrc — loaded on every interactive session
+	rcPath := filepath.Join(home, ".adsshrc")
+	rcContent := `# ~/.adsshrc — loaded on every interactive session
 # This is Starlark (https://bazel.build/rules/language), a safe Python dialect.
 
 # Custom prompt
@@ -316,8 +478,7 @@ def k8s_pods(namespace="default"):
 
 # Example: load a plugin
 # sys.load_plugin("/path/to/myplugin.so")
-`,
-	}
+`
 
 	created := []string{}
 	skipped := []string{}
@@ -334,6 +495,15 @@ def k8s_pods(namespace="default"):
 		created = append(created, path)
 	}
 
+	if _, err := os.Stat(rcPath); err == nil {
+		skipped = append(skipped, rcPath)
+	} else {
+		if err := os.WriteFile(rcPath, []byte(rcContent), 0600); err != nil {
+			return fmt.Errorf("cannot write %s: %v", rcPath, err)
+		}
+		created = append(created, rcPath)
+	}
+
 	fmt.Printf("adssh init — %s\n\n", dir)
 	for _, f := range created {
 		fmt.Printf("  created  %s\n", f)
@@ -344,8 +514,8 @@ def k8s_pods(namespace="default"):
 
 	fmt.Printf(`
 Next steps:
-  1. Edit ~/.adssh/.adsshrc to customize your session
-  2. Set ADSSH_RC=~/.adssh/.adsshrc  (or it auto-loads ~/.adsshrc)
+  1. Edit ~/.adsshrc to customize your session
+  2. Run: adssh --doctor
   3. Run: adssh
   4. Try: aws.ec2.list_instances(region="us-east-1")
      Or:  ls -la | jq '.'
@@ -374,4 +544,3 @@ func smartReplWrapper(globals starlark.StringDict, restricted bool, historyFile 
 
 	repl.Start(globals, restricted, historyFile, in, out, errOut)
 }
-

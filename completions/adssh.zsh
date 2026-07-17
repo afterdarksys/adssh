@@ -9,6 +9,7 @@ _adssh() {
     _arguments -s -S \
         '(- 1 *)'{-h,--help}'[show help and exit]' \
         '--init[create starter config in ~/.adssh/ and exit]' \
+        '--doctor[check local configuration and readiness]' \
         {-l,--login}'[run as a login shell (load profile)]' \
         {-r,--restricted}'[enable restricted (sandboxed) mode]' \
         '-c[evaluate expression and exit]:expression: ' \

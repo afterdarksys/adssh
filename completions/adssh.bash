@@ -12,7 +12,7 @@ _adssh() {
         cword=$COMP_CWORD
     }
 
-    local flags="-h --help -l --login -r --restricted -c --serve --entitlements --policy --init"
+    local flags="-h --help -l --login -r --restricted -c --serve --entitlements --policy --init --doctor"
 
     case "${prev}" in
         --policy|--entitlements)
