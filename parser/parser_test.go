@@ -61,22 +61,22 @@ func TestDetermineMode(t *testing.T) {
 		{name: "assignment expression", input: "y = x + 1", want: ModeStarlark},
 		{name: "assignment with surrounding whitespace", input: "  x = 5  ", want: ModeStarlark},
 		{
-			name: "env-prefix assignment before command", input: "FOO=bar cmd", want: ModeStarlark,
-			quirk: "CHARACTERIZATION: this looks like a shell env-prefixed command invocation, but the heuristic only checks for '=' and misroutes it to Starlark",
+			name: "env-prefix assignment before command", input: "FOO=bar cmd", want: ModeShell,
+			quirk: "FIXED (Wave 2): an env-prefix command invocation ('FOO=bar cmd') is now detected by envPrefixCmdRe and routed to shell, before the '=' assignment heuristic can misroute it to Starlark",
 		},
 		{
-			name: "env-prefix assignment before shell pipeline", input: "FOO=bar ls -la", want: ModeStarlark,
-			quirk: "CHARACTERIZATION: same env-prefix quirk as above — routes to Starlark instead of shell",
+			name: "env-prefix assignment before shell pipeline", input: "FOO=bar ls -la", want: ModeShell,
+			quirk: "FIXED (Wave 2): same env-prefix rule as above — now correctly routes to shell",
 		},
 		{
-			name: "export assignment", input: "export FOO=bar", want: ModeStarlark,
-			quirk: "CHARACTERIZATION: 'export FOO=bar' is valid shell syntax but contains '=' so it is misrouted to Starlark",
+			name: "export assignment", input: "export FOO=bar", want: ModeShell,
+			quirk: "FIXED (Wave 2): 'export FOO=bar' now matches the explicit 'export ' shell-prefix rule before the '=' heuristic runs, so it routes to shell",
 		},
 
 		// --- "==" comparisons: ACTUAL behavior, not the naively-expected one ---
 		{
 			name: "bare equality comparison", input: "x == 5", want: ModeStarlark,
-			quirk: "CHARACTERIZATION: the '==' exclusion only checks whether the TRIMMED LINE ITSELF starts with '==', not whether the '=' occurrence is part of '=='. 'x == 5' contains '=' and does not start with '==', so it is routed to ModeStarlark, not shell as one might naively expect",
+			quirk: "DELIBERATE: 'x == 5' is a bare comparison, which in this hybrid REPL is a valid Starlark expression, so it is intentionally routed to ModeStarlark — this is a design decision, not a misroute",
 		},
 		{
 			name: "line literally starting with ==", input: "==5", want: ModeShell,
@@ -84,11 +84,11 @@ func TestDetermineMode(t *testing.T) {
 		},
 		{
 			name: "not-equal comparison", input: "x != 5", want: ModeStarlark,
-			quirk: "CHARACTERIZATION: '!=' contains the '=' rune and doesn't start with '==', so it is also misrouted to ModeStarlark",
+			quirk: "DELIBERATE: 'x != 5' is a bare comparison and a valid Starlark expression, so it is intentionally routed to ModeStarlark in this hybrid REPL — a design decision, not a misroute",
 		},
 		{
-			name: "bracket-test equality", input: "[ $x == 5 ]", want: ModeStarlark,
-			quirk: "CHARACTERIZATION: POSIX test-bracket syntax with '==' is misrouted to ModeStarlark for the same reason as the bare comparison case",
+			name: "bracket-test equality", input: "[ $x == 5 ]", want: ModeShell,
+			quirk: "FIXED (Wave 2): a line starting with '[' is POSIX test-bracket syntax and now matches the explicit '[' shell-prefix rule before the '=' heuristic runs, so it routes to shell",
 		},
 		{name: "if-guard with equality (keyword wins)", input: "if x == 5:", want: ModeStarlark},
 

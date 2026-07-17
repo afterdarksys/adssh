@@ -99,15 +99,6 @@ default allow = true`)); err != nil {
 	}
 }
 
-// CHARACTERIZATION-GAP: the plan's suggested division-by-zero construct
-// (`allow = true { 1 / 0 > 0 }`) does NOT trigger a Go-level eval error here.
-// Probed directly against github.com/open-policy-agent/opa/rego: LoadPolicy's
-// rego.New(...) does not set rego.StrictBuiltinErrors(true), so by default
-// OPA swallows builtin runtime errors (div-by-zero, to_number on a bad
-// string, etc.) and treats the rule as simply undefined rather than
-// returning an error from Eval(). See TestInterceptor_PolicyBuiltinError_FailsOpen_GAP
-// below for the consequence of that (a genuine fail-open gap).
-//
 // A Rego construct that DOES reliably produce a Go-level eval error in this
 // OPA version is a conflicting complete rule: two `allow` definitions that
 // both match the same input and assign different values trigger
@@ -134,17 +125,18 @@ allow = "no" { input.command == "anything" }`)); err != nil {
 	}
 }
 
-// CHARACTERIZATION-GAP: builtin runtime errors (e.g. division by zero) are
-// NOT surfaced as eval errors by OPA in the default (non-strict) mode that
-// policy.LoadPolicy uses. The rule silently becomes undefined, and
-// EvaluatePolicy's fallback ("no allow key in result => allowed=true")
-// kicks in — so a policy that hits a builtin runtime error FAILS OPEN, not
-// closed, despite the "fail closed on errors (T-01-02)" comment on
-// EvaluatePolicy. This is a real gap for Wave 2 (fix: rego.StrictBuiltinErrors(true)
-// on the PrepareForEval call in policy.go, or an explicit default-deny rule).
-// This test pins the CURRENT (undesirable) behavior; it must be revisited,
-// not silently relied upon, once fixed.
-func TestInterceptor_PolicyBuiltinError_FailsOpen_GAP(t *testing.T) {
+// GAP CLOSED (Wave 2): builtin runtime errors (e.g. division by zero) used to
+// be swallowed by OPA in the default (non-strict) mode that policy.LoadPolicy
+// used — the rule silently became undefined and EvaluatePolicy's fallback
+// ("no allow key in result => allowed=true") kicked in, so a policy hitting a
+// builtin runtime error FAILED OPEN despite the "fail closed on errors
+// (T-01-02)" contract. Wave 2 closed this by adding rego.StrictBuiltinErrors(true)
+// to the rego.New(...) options in policy.go, so builtin runtime errors now
+// surface as Eval errors. EvaluatePolicy returns those as errors and the
+// interceptor treats them as deny. This test now pins the correct fail-closed
+// behavior: the command must be blocked with a "policy evaluation error" and
+// must never fall through to exec.
+func TestInterceptor_PolicyBuiltinError_FailsClosed(t *testing.T) {
 	resetPolicy()
 	t.Cleanup(resetPolicy)
 	if err := LoadPolicy(writePolicy(t, `package adssh.authz
@@ -152,11 +144,14 @@ allow = true { 1 / 0 > 0 }`)); err != nil {
 		t.Fatal(err)
 	}
 	_, _, runErr, rec := runShell(t, false, starlark.StringDict{}, "anything")
-	if runErr != nil {
-		t.Fatalf("CHARACTERIZATION-GAP assumption changed: expected fail-open (nil error) for a builtin runtime error under non-strict OPA settings, got: %v — if this now errors, the gap may be fixed; update this test's intent accordingly rather than deleting it", runErr)
+	if runErr == nil {
+		t.Fatal("expected error when policy hits a builtin runtime error (fail-closed)")
 	}
-	if len(rec.calls) != 1 || rec.calls[0][0] != "anything" {
-		t.Errorf("expected command to fall through to exec (fail-open gap), got: %v", rec.calls)
+	if !strings.Contains(runErr.Error(), "policy evaluation error") {
+		t.Errorf("expected policy-evaluation-error message, got: %v", runErr)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("command executed despite policy builtin runtime error: %v", rec.calls)
 	}
 }
 

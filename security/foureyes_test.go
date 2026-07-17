@@ -86,20 +86,37 @@ func TestFourEyes_Match(t *testing.T) {
 		t.Errorf("expected \"rm -rf x\" to match rule \"rm *\", got rule=%+v matched=%v", rule, matched)
 	}
 
-	// CHARACTERIZATION: filepath.Match's "*" never matches a path separator,
-	// and MatchesFourEyes's fallback substring/token check doesn't rescue
-	// multi-token commands either (it re-tries filepath.Match per token,
-	// which still fails once "/" appears inside a token). So the textbook
-	// dangerous command "rm -rf /" does NOT match a "rm *" rule, even though
-	// a human author of that rule would expect it to be exactly the case
-	// being guarded against. This is a real security-relevant gap, not just
-	// a quirk — flagged for Wave 2, not fixed here.
-	if rule, matched := MatchesFourEyes("rm -rf /"); matched {
-		t.Errorf("CHARACTERIZATION violated: \"rm -rf /\" unexpectedly matched rule \"rm *\": %+v", rule)
+	// GAP CLOSED (Wave 2): MatchesFourEyes now translates the glob into an
+	// anchored regexp where '*' matches any characters including spaces and
+	// '/'. The textbook dangerous command "rm -rf /" therefore matches a
+	// "rm *" rule — exactly the case a human author of that rule expects to
+	// be guarded. (Previously filepath.Match's '*' would not cross the '/'
+	// separator, so this silently failed to match — a real security gap.)
+	if rule, matched := MatchesFourEyes("rm -rf /"); !matched || rule == nil || rule.Pattern != "rm *" {
+		t.Errorf("expected \"rm -rf /\" to match rule \"rm *\", got rule=%+v matched=%v", rule, matched)
 	}
 
+	// Anchored matching: "rm *" must not match unrelated commands and must
+	// not prefix-match a command that merely starts with the same letters.
 	if _, matched := MatchesFourEyes("ls"); matched {
 		t.Error("expected \"ls\" not to match rule \"rm *\"")
+	}
+	if _, matched := MatchesFourEyes("format"); matched {
+		t.Error("expected \"format\" not to match rule \"rm *\" (no false prefix match)")
+	}
+}
+
+func TestFourEyes_Match_SubstringGlob(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	if err := AddFourEyesRule("*prod*", "", 60); err != nil {
+		t.Fatalf("AddFourEyesRule: %v", err)
+	}
+
+	// A "*prod*" pattern must match a command containing "prod" anywhere,
+	// including across spaces and hyphenated tokens.
+	if rule, matched := MatchesFourEyes("kubectl delete pod --context prod-1"); !matched || rule == nil || rule.Pattern != "*prod*" {
+		t.Errorf("expected \"kubectl delete pod --context prod-1\" to match rule \"*prod*\", got rule=%+v matched=%v", rule, matched)
 	}
 }
 

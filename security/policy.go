@@ -43,6 +43,11 @@ func LoadPolicy(path string) error {
 	query, err := rego.New(
 		rego.Query("data.adssh.authz"),
 		rego.Module(path, string(data)),
+		// Fail closed: surface builtin runtime errors (div-by-zero, bad
+		// to_number, etc.) as Eval errors instead of silently treating the
+		// rule as undefined. EvaluatePolicy returns those as errors and the
+		// interceptor treats them as deny (Wave 2 fix for the fail-open gap).
+		rego.StrictBuiltinErrors(true),
 	).PrepareForEval(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to compile policy: %w", err)

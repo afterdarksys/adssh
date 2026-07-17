@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -131,33 +132,39 @@ func RemoveFourEyesRule(pattern string) error {
 }
 
 // MatchesFourEyes returns the first rule whose pattern matches cmd, or nil.
-// Uses filepath.Match glob semantics.
+// The glob pattern is translated into an anchored regexp: '*' matches any run
+// of characters (including spaces and '/') and '?' matches any single
+// character. This is a deliberate change from filepath.Match semantics — a
+// rule like "rm *" now matches "rm -rf /" (filepath.Match's '*' would not
+// cross the '/' path separator). Matching is anchored to the full command
+// string, so "rm *" does not match "ls" and does not prefix-match "format".
+// A rule whose pattern fails to compile as a regexp is skipped (cannot match).
 func MatchesFourEyes(cmd string) (*FourEyesRule, bool) {
 	rules, err := LoadFourEyesRules()
 	if err != nil || len(rules) == 0 {
 		return nil, false
 	}
 	for _, r := range rules {
-		matched, err := filepath.Match(r.Pattern, cmd)
+		re, err := regexp.Compile(globToRegexp(r.Pattern))
 		if err != nil {
 			continue
 		}
-		if matched {
+		if re.MatchString(cmd) {
 			rule := r
 			return &rule, true
 		}
-		// Also check if any word in the command matches the pattern (substring glob)
-		if strings.Contains(cmd, strings.Trim(r.Pattern, "*")) && r.Pattern != "" {
-			// Try matching against individual tokens
-			for _, tok := range strings.Fields(cmd) {
-				if m, _ := filepath.Match(r.Pattern, tok); m {
-					rule := r
-					return &rule, true
-				}
-			}
-		}
 	}
 	return nil, false
+}
+
+// globToRegexp translates a glob pattern into an anchored regexp source where
+// '*' matches any characters (including spaces and '/') and '?' matches any
+// single character. All other glob metacharacters are taken literally.
+func globToRegexp(pattern string) string {
+	quoted := regexp.QuoteMeta(pattern)
+	quoted = strings.ReplaceAll(quoted, `\*`, `.*`)
+	quoted = strings.ReplaceAll(quoted, `\?`, `.`)
+	return `^(?s:` + quoted + `)$`
 }
 
 // generateToken creates a short deterministic token from cmd + current time.
