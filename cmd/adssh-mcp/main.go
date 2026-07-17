@@ -8,6 +8,7 @@ import (
 	"go.starlark.net/starlark"
 
 	"github.com/afterdarksys/adssh/config"
+	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/security"
 	"github.com/afterdarksys/adssh/starlarkext"
 )
@@ -36,23 +37,40 @@ func main() {
 		}
 	}
 
-	// 3. Init audit logging
-	security.InitAuditLog(cfg.AuditLogPath, cfg.AuditURL, cfg.AuditToken)
-
-	// 4. Load Rego policy engine
-	if err := security.LoadPolicy(cfg.PolicyPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load policy from %s: %v\n", cfg.PolicyPath, err)
-	} else {
-		security.LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath))
+	// 3. Build the security engine from configuration (fail-closed: a malformed
+	// policy aborts startup). As in the shell binary, this configures the audit
+	// log and Rego policy the MCP server enforces; the HMAC chain and RBAC
+	// entitlements are intentionally left uninitialised, matching the prior
+	// package-level init sequence.
+	eng, err := engine.New(engine.Config{
+		EngineConfig: security.EngineConfig{
+			PolicyPath:    cfg.PolicyPath,
+			AuditLogPath:  cfg.AuditLogPath,
+			AuditLogURL:   cfg.AuditURL,
+			AuditLogToken: cfg.AuditToken,
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adssh-mcp: %v\n", err)
+		os.Exit(1)
 	}
 
-	// 5. Build Starlark env (shared across all tool calls)
-	globals := starlark.StringDict{}
-	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: false})
+	// TODO(engine-facade): the Starlark exec builtins (eval_starlark) and the
+	// run_shell interceptor still resolve the process-global default engine.
+	// Point the default at the engine we built so those tool paths authorize
+	// through the same policy and audit log as policyGate.
+	security.SetDefaultEngine(eng.Security())
+	if _, statErr := os.Stat(cfg.PolicyPath); statErr == nil {
+		eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath))
+	}
 
-	// 6. Start MCP server
-	security.LogEvent("adssh-mcp server starting")
-	if err := serveMCP(cfg, globals, apiKey); err != nil {
+	// 4. Build Starlark env (shared across all tool calls)
+	globals := starlark.StringDict{}
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: false, Engine: eng.Security()})
+
+	// 5. Start MCP server
+	eng.Security().LogEvent("adssh-mcp server starting")
+	if err := serveMCP(cfg, eng, globals, apiKey); err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
 		os.Exit(1)
 	}

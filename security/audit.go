@@ -69,26 +69,12 @@ func (e *Engine) InitAuditLog(path, url, token string) {
 	e.auditLogger = log.New(logFile, "AUDIT: ", log.Ldate|log.Ltime)
 }
 
-// InitAuditLog initialises the audit logger at the given path and sets up remote SIEM.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func InitAuditLog(path, url, token string) {
-	defaultEngine.InitAuditLog(path, url, token)
-}
-
 // SetAuditSession sets the chain session ID. Call this after InitChain if the session
 // ID is known separately (e.g. for SSH sessions generated after startup).
 func (e *Engine) SetAuditSession(id string) {
 	e.chainMu.Lock()
 	e.chainSession = id
 	e.chainMu.Unlock()
-}
-
-// SetAuditSession sets the chain session ID.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func SetAuditSession(id string) {
-	defaultEngine.SetAuditSession(id)
 }
 
 // SetAuditChangeID stores a CM ticket ID that is embedded in every subsequent chain entry.
@@ -98,25 +84,11 @@ func (e *Engine) SetAuditChangeID(id string) {
 	e.chainMu.Unlock()
 }
 
-// SetAuditChangeID stores a CM ticket ID embedded in every subsequent chain entry.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func SetAuditChangeID(id string) {
-	defaultEngine.SetAuditChangeID(id)
-}
-
 // GetAuditChangeID returns the current CM ticket ID.
 func (e *Engine) GetAuditChangeID() string {
 	e.chainMu.Lock()
 	defer e.chainMu.Unlock()
 	return e.auditChangeID
-}
-
-// GetAuditChangeID returns the current CM ticket ID.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func GetAuditChangeID() string {
-	return defaultEngine.GetAuditChangeID()
 }
 
 // isSyslogWarning returns true if the event string contains keywords that indicate
@@ -227,13 +199,6 @@ func (e *Engine) LogPolicyDecision(user, command string, allowed bool, denyReaso
 	})
 }
 
-// LogPolicyDecision records a Rego policy evaluation result in the audit log.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func LogPolicyDecision(user, command string, allowed bool, denyReason string) {
-	defaultEngine.LogPolicyDecision(user, command, allowed, denyReason)
-}
-
 // LogCMTicket records a change management ticket entry in the chain.
 func (e *Engine) LogCMTicket(ticketID string) {
 	if e.auditLogger != nil {
@@ -244,11 +209,4 @@ func (e *Engine) LogCMTicket(ticketID string) {
 		Reason:   ticketID,
 		ChangeID: ticketID,
 	})
-}
-
-// LogCMTicket records a change management ticket entry in the chain.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func LogCMTicket(ticketID string) {
-	defaultEngine.LogCMTicket(ticketID)
 }

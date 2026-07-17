@@ -33,13 +33,6 @@ func (e *Engine) LoadEntitlements(path string) error {
 	return nil
 }
 
-// LoadEntitlements reads the RBAC yaml configuration.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func LoadEntitlements(path string) error {
-	return defaultEngine.LoadEntitlements(path)
-}
-
 // IsAuthorized checks if the user or their principals are authorized to run a virtual binary or custom command.
 // If the command is not listed in any entitlement, access is denied (Default-Deny).
 // If no entitlements file was loaded, it allows everything.
@@ -75,13 +68,6 @@ func (e *Engine) IsAuthorized(user string, principals []string, command string) 
 	return false
 }
 
-// IsAuthorized checks whether the user or their principals may run command.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func IsAuthorized(user string, principals []string, command string) bool {
-	return defaultEngine.IsAuthorized(user, principals, command)
-}
-
 // GetMenuForUser checks if a specific menu YAML file is assigned to the user or their groups.
 func (e *Engine) GetMenuForUser(user string, principals []string) string {
 	e.entitlementsMu.RLock()
@@ -104,11 +90,4 @@ func (e *Engine) GetMenuForUser(user string, principals []string) string {
 	}
 
 	return ""
-}
-
-// GetMenuForUser checks if a menu YAML file is assigned to the user or their groups.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func GetMenuForUser(user string, principals []string) string {
-	return defaultEngine.GetMenuForUser(user, principals)
 }

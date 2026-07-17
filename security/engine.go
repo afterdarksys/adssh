@@ -118,6 +118,26 @@ func newDefaultEngine() *Engine {
 	}
 }
 
+// DefaultEngine returns the process-global default engine that every
+// package-level function delegates to. The built-in binaries (adssh, adssh-mcp)
+// use it to route the paths that still resolve the package default — the SSH
+// server, the Starlark exec builtins and the completer — through the same
+// engine their sessions authorize against. Embedded hosts should NOT rely on it:
+// build isolated engines with NewEngine (or engine.New) instead.
+func DefaultEngine() *Engine { return defaultEngine }
+
+// SetDefaultEngine replaces the process-global default engine. It is intended
+// for the binaries' single-tenant startup: after building a configured engine,
+// they point the default at it so every package-default path (SSH sessions,
+// exec builtins, sec.audit) shares that one configured engine. Call it once at
+// startup, before any session or server is created; it is NOT safe to call
+// concurrently with running sessions, and multi-tenant hosts must never use it.
+func SetDefaultEngine(e *Engine) {
+	if e != nil {
+		defaultEngine = e
+	}
+}
+
 // NewEngine builds an isolated Engine from cfg. It FAILS CLOSED: malformed Rego
 // (via PolicySource or PolicyPath) returns an error, and RequirePolicy with no
 // policy configured/found returns an error. When RequirePolicy is false and no

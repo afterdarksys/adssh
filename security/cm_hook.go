@@ -34,10 +34,3 @@ func (e *Engine) CMCurrentTicketID() string {
 	_, id := e.GetActiveCMTicket()
 	return id
 }
-
-// CMCurrentTicketID returns the active ticket ID or "" for embedding in audit entries.
-//
-// Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func CMCurrentTicketID() string {
-	return defaultEngine.CMCurrentTicketID()
-}

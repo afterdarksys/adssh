@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/afterdarksys/adssh/config"
+	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/security"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -13,7 +14,8 @@ import (
 )
 
 // serveMCP creates the MCP server, registers all tools, and starts stdio transport.
-func serveMCP(cfg config.AppConfig, globals starlark.StringDict, apiKey string) error {
+// Every tool is gated by the engine's Rego policy via policyGate.
+func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringDict, apiKey string) error {
 	s := server.NewMCPServer(
 		"adssh-mcp",
 		"1.0.0",
@@ -29,7 +31,7 @@ func serveMCP(cfg config.AppConfig, globals starlark.StringDict, apiKey string) 
 				mcp.Description("Starlark code to evaluate"),
 			),
 		),
-		policyGate("eval_starlark", handleEvalStarlark(globals)),
+		policyGate(eng, "eval_starlark", handleEvalStarlark(globals)),
 	)
 
 	// Register run_shell tool
@@ -41,7 +43,7 @@ func serveMCP(cfg config.AppConfig, globals starlark.StringDict, apiKey string) 
 				mcp.Description("Shell command to execute"),
 			),
 		),
-		policyGate("run_shell", handleRunShell(globals)),
+		policyGate(eng, "run_shell", handleRunShell(globals)),
 	)
 
 	// Register list_sessions tool
@@ -49,7 +51,7 @@ func serveMCP(cfg config.AppConfig, globals starlark.StringDict, apiKey string) 
 		mcp.NewTool("list_sessions",
 			mcp.WithDescription("List active SSH sessions. Returns a JSON array of session IDs."),
 		),
-		policyGate("list_sessions", handleListSessions()),
+		policyGate(eng, "list_sessions", handleListSessions()),
 	)
 
 	// Register cloud_query tool
@@ -65,7 +67,7 @@ func serveMCP(cfg config.AppConfig, globals starlark.StringDict, apiKey string) 
 				mcp.Description("Function name within the namespace to call"),
 			),
 		),
-		policyGate("cloud_query", handleCloudQuery(globals)),
+		policyGate(eng, "cloud_query", handleCloudQuery(globals)),
 	)
 
 	// Register container_exec tool
@@ -81,7 +83,7 @@ func serveMCP(cfg config.AppConfig, globals starlark.StringDict, apiKey string) 
 				mcp.Description("Command to run, as a JSON array of strings (e.g. [\"ls\",\"-la\"]) or a single command string"),
 			),
 		),
-		policyGate("container_exec", handleContainerExec()),
+		policyGate(eng, "container_exec", handleContainerExec()),
 	)
 
 	// Register audit_log tool
@@ -96,31 +98,32 @@ func serveMCP(cfg config.AppConfig, globals starlark.StringDict, apiKey string) 
 				mcp.Description("Optional substring filter to match against log entries"),
 			),
 		),
-		policyGate("audit_log", handleAuditLog(cfg.AuditLogPath)),
+		policyGate(eng, "audit_log", handleAuditLog(cfg.AuditLogPath)),
 	)
 
-	security.LogEvent("adssh-mcp serving on stdio")
+	eng.Security().LogEvent("adssh-mcp serving on stdio")
 	return server.ServeStdio(s)
 }
 
-// policyGate wraps a tool handler with Rego policy evaluation.
-// Every tool invocation is evaluated before execution (MCP-08).
-func policyGate(toolName string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
+// policyGate wraps a tool handler with the engine's Rego policy evaluation.
+// Every tool invocation is evaluated against eng before execution (MCP-08).
+func policyGate(eng *engine.Engine, toolName string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
+	sec := eng.Security()
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		pctx := security.BuildPolicyContext(toolName, []string{}, "")
-		allowed, reason, policyErr := security.EvaluatePolicy(pctx)
+		allowed, reason, policyErr := sec.EvaluatePolicy(pctx)
 		if policyErr != nil {
-			security.LogPolicyDecision(pctx.User, toolName, false, fmt.Sprintf("error: %v", policyErr))
+			sec.LogPolicyDecision(pctx.User, toolName, false, fmt.Sprintf("error: %v", policyErr))
 			return mcp.NewToolResultError(fmt.Sprintf("policy evaluation error: %v", policyErr)), nil
 		}
 		if !allowed {
-			security.LogPolicyDecision(pctx.User, toolName, false, reason)
+			sec.LogPolicyDecision(pctx.User, toolName, false, reason)
 			if reason != "" {
 				return mcp.NewToolResultError(fmt.Sprintf("access denied: %s", reason)), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("access denied for '%s' by policy", toolName)), nil
 		}
-		security.LogPolicyDecision(pctx.User, toolName, true, "")
+		sec.LogPolicyDecision(pctx.User, toolName, true, "")
 		return handler(ctx, req)
 	}
 }

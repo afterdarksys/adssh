@@ -12,10 +12,10 @@ import (
 
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
-	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/afterdarksys/adssh/config"
+	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/parser"
 	"github.com/afterdarksys/adssh/repl"
 	"github.com/afterdarksys/adssh/security"
@@ -87,48 +87,74 @@ func main() {
 		return
 	}
 
-	// 3. Initialize audit logging
-	security.InitAuditLog(cfg.AuditLogPath, cfg.AuditURL, cfg.AuditToken)
-
-	// 3b. Initialize HMAC chain ledger (next to the flat audit log)
+	// 3. Build the security engine from configuration. Construction is
+	// FAIL-CLOSED: a malformed policy or an unreadable entitlements file aborts
+	// startup rather than silently running unprotected. A missing policy file
+	// still falls back to allow-by-default (RequirePolicy is left unset).
 	sessionID := fmt.Sprintf("%d", time.Now().UnixNano())
 	xdgDataHome := config.XDGDataHome()
-	security.InitChain(
-		cfg.AuditLogPath+".chain",
-		filepath.Join(xdgDataHome, "audit.key"),
-		sessionID,
-	)
+	eng, err := engine.New(engine.Config{
+		EngineConfig: security.EngineConfig{
+			PolicyPath:       cfg.PolicyPath,
+			AuditLogPath:     cfg.AuditLogPath,
+			AuditLogURL:      cfg.AuditURL,
+			AuditLogToken:    cfg.AuditToken,
+			ChainPath:        cfg.AuditLogPath + ".chain",
+			ChainKeyPath:     filepath.Join(xdgDataHome, "audit.key"),
+			SessionID:        sessionID,
+			EntitlementsPath: cfg.EntitlementsPath,
+			Restricted:       cfg.Restricted,
+		},
+		ProfilePath:  cfg.ProfilePath,
+		RCPath:       cfg.RCPath,
+		HistoryFile:  cfg.HistoryFile,
+		IsLoginShell: cfg.IsLoginShell,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+		os.Exit(1)
+	}
 
-	// 4. Load RBAC entitlements (if a path was configured)
+	// TODO(engine-facade): the SSH server (sshStarter/repl.Start), the Starlark
+	// exec builtins (starlarkext/exec.go, job.go) and the REPL completer still
+	// resolve the process-global default engine. Point the default at the engine
+	// we just built so those paths authorize through the same policy, audit log
+	// and hash chain as the sessions opened below — until repl/ and starlarkext/
+	// accept an *engine.Engine directly.
+	security.SetDefaultEngine(eng.Security())
+
 	if cfg.EntitlementsPath != "" {
-		if err := security.LoadEntitlements(cfg.EntitlementsPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load entitlements from %s: %v\n", cfg.EntitlementsPath, err)
-		} else {
-			security.LogEvent(fmt.Sprintf("Entitlements loaded from %s", cfg.EntitlementsPath))
-		}
+		eng.Security().LogEvent(fmt.Sprintf("Entitlements loaded from %s", cfg.EntitlementsPath))
+	}
+	if _, statErr := os.Stat(cfg.PolicyPath); statErr == nil {
+		eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath))
 	}
 
-	// 4b. Load Rego policy engine
-	if err := security.LoadPolicy(cfg.PolicyPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to load policy from %s: %v\n", cfg.PolicyPath, err)
-	} else {
-		security.LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath))
-	}
-
-	// 5. Setup signal handling and terminal
+	// 4. Setup signal handling and terminal
 	sys.SetupSignals()
 	if err := sys.InitTerminal(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize terminal: %v\n", err)
 	}
 
-	// 6. Build Starlark environment and load profiles
-	thread := &starlark.Thread{Name: "main"}
-	globals := starlark.StringDict{}
-	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: cfg.Restricted})
-
-	env, err := config.LoadProfiles(thread, globals, cfg.IsLoginShell, cfg.ProfilePath, cfg.RCPath)
+	// 5. Open the single-user session for the interactive / -c / script paths.
+	// The engine builds its globals fresh; the login/RC profiles are then layered
+	// on top so ~/.adsshprofile and ~/.adsshrc customisations still apply.
+	sess, err := eng.NewSession(engine.SessionOptions{
+		SessionID:   sessionID,
+		Restricted:  cfg.Restricted,
+		In:          os.Stdin,
+		Out:         os.Stdout,
+		Err:         os.Stderr,
+		HistoryFile: cfg.HistoryFile,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading profiles: %v\n", err)
+		fmt.Fprintf(os.Stderr, "adssh: failed to open session: %v\n", err)
+		os.Exit(1)
+	}
+	thread := sess.Thread
+	env := sess.Globals
+	if _, perr := config.LoadProfiles(thread, env, cfg.IsLoginShell, cfg.ProfilePath, cfg.RCPath); perr != nil {
+		fmt.Fprintf(os.Stderr, "Error loading profiles: %v\n", perr)
 	}
 
 	// sshStarter builds each SSH session's OWN isolated globals (fresh
@@ -151,7 +177,7 @@ func main() {
 		if _, perr := config.LoadProfiles(sessThread, sessGlobals, false, cfg.ProfilePath, cfg.RCPath); perr != nil {
 			fmt.Fprintf(errOut, "Error loading profiles: %v\n", perr)
 		}
-		if menuPath := security.GetMenuForUser(user, principals); menuPath != "" {
+		if menuPath := eng.Security().GetMenuForUser(user, principals); menuPath != "" {
 			repl.StartMenu(menuPath, sessGlobals, cfg.Restricted, in, out, errOut)
 			return
 		}
@@ -186,7 +212,7 @@ func main() {
 
 	// 7a. -c flag: evaluate a single expression/command and exit
 	if cmdFlag != "" {
-		if err := evalOnce(thread, cmdFlag, env, cfg.Restricted); err != nil {
+		if err := evalOnce(sess, cmdFlag); err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
@@ -221,20 +247,22 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		smartReplWrapper(env, cfg.Restricted, cfg.HistoryFile, os.Stdin, os.Stdout, os.Stderr)
+		smartReplWrapper(eng, env, cfg.Restricted, cfg.HistoryFile, os.Stdin, os.Stdout, os.Stderr)
 	}
 }
 
-// evalOnce evaluates a single expression or command (for -c flag).
-// It goes through the same security/audit machinery as the REPL.
-func evalOnce(thread *starlark.Thread, src string, globals starlark.StringDict, restricted bool) error {
+// evalOnce evaluates a single expression or command (for -c flag) against the
+// engine-bound session, so it passes through the same policy/audit/chain
+// machinery as the REPL: Starlark runs on the session thread/globals, shell runs
+// on the session's engine-authorized runner.
+func evalOnce(sess *engine.Session, src string) error {
 	security.LogCommand(src, "")
 
 	mode := parser.DetermineMode(src)
 
 	if mode == parser.ModeStarlark {
 		// Try expression first
-		val, err := starlark.Eval(thread, "<-c>", src, globals)
+		val, err := starlark.Eval(sess.Thread, "<-c>", src, sess.Globals)
 		if err == nil {
 			if val != nil && val != starlark.None {
 				fmt.Println(val.String())
@@ -242,26 +270,18 @@ func evalOnce(thread *starlark.Thread, src string, globals starlark.StringDict, 
 			return nil
 		}
 		// Fall back to statement (def, assignment, etc.)
-		if _, err2 := starlark.ExecFile(thread, "<-c>", src, globals); err2 != nil {
+		if _, err2 := starlark.ExecFile(sess.Thread, "<-c>", src, sess.Globals); err2 != nil {
 			return fmt.Errorf("starlark error: %v", err2)
 		}
 		return nil
 	}
 
-	// Shell mode
+	// Shell mode — run through this session's engine-authorized runner.
 	f, parseErr := syntax.NewParser().Parse(strings.NewReader(src), "")
 	if parseErr != nil {
 		return fmt.Errorf("parse error: %v", parseErr)
 	}
-	runner, runErr := interp.New(
-		interp.StdIO(os.Stdin, os.Stdout, os.Stderr),
-		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
-		interp.OpenHandler(security.VirtualOpenHandler()),
-	)
-	if runErr != nil {
-		return fmt.Errorf("runner error: %v", runErr)
-	}
-	if err := runner.Run(context.Background(), f); err != nil {
+	if err := sess.Runner.Run(context.Background(), f); err != nil {
 		return fmt.Errorf("command error: %v", err)
 	}
 	return nil
@@ -551,7 +571,7 @@ Next steps:
 	return nil
 }
 
-func smartReplWrapper(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
+func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
 	var sessionID string
 	if val, ok := globals["SESSION_ID"]; ok {
 		if strVal, ok := val.(starlark.String); ok {
@@ -561,7 +581,7 @@ func smartReplWrapper(globals starlark.StringDict, restricted bool, historyFile 
 
 	if sessionID != "" {
 		if session := sys.GetSession(sessionID); session != nil {
-			menuPath := security.GetMenuForUser(session.User, session.Principals)
+			menuPath := eng.Security().GetMenuForUser(session.User, session.Principals)
 			if menuPath != "" {
 				repl.StartMenu(menuPath, globals, restricted, in, out, errOut)
 				return
