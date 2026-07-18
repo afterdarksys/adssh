@@ -1,8 +1,8 @@
 package starlarkext
 
 import (
-	"github.com/afterdarksys/adssh/i18n"
 	"fmt"
+	"github.com/afterdarksys/adssh/i18n"
 
 	"go.starlark.net/starlark"
 )

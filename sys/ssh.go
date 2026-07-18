@@ -229,7 +229,7 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 
 	for newChannel := range chans {
 		if newChannel.ChannelType() != "session" {
-			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type") // best-effort
 			continue
 		}
 		channel, requests, err := newChannel.Accept()
@@ -253,16 +253,16 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 			for req := range in {
 				switch req.Type {
 				case "shell":
-					req.Reply(true, nil)
+					_ = req.Reply(true, nil) // best-effort
 				case "pty-req":
 					termLen := req.Payload[3]
 					w, h := parseDims(req.Payload[termLen+4:])
-					pty.Setsize(ptyMaster, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
-					req.Reply(true, nil)
+					_ = pty.Setsize(ptyMaster, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) // best-effort
+					_ = req.Reply(true, nil)                                                   // best-effort
 				case "window-change":
 					w, h := parseDims(req.Payload)
-					pty.Setsize(ptyMaster, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)})
-					req.Reply(true, nil)
+					_ = pty.Setsize(ptyMaster, &pty.Winsize{Rows: uint16(h), Cols: uint16(w)}) // best-effort
+					_ = req.Reply(true, nil)                                                   // best-effort
 				}
 			}
 		}(requests)
@@ -292,8 +292,8 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 
 			interceptedChannel := &CtrlCInterceptor{r: channel, session: session}
 
-			go io.Copy(outCast, ptyMaster)
-			go io.Copy(ptyMaster, interceptedChannel)
+			go func() { _, _ = io.Copy(outCast, ptyMaster) }()            // best-effort: stream ends on session close
+			go func() { _, _ = io.Copy(ptyMaster, interceptedChannel) }() // best-effort: stream ends on session close
 
 			// start builds this session's OWN fresh globals (no shared/shallow
 			// copy) and runs the REPL/menu on the PTY slave.

@@ -42,28 +42,28 @@ import (
 func SetupVCSAPI(env starlark.StringDict) {
 	// git
 	gitDict := starlark.NewDict(8)
-	gitDict.SetKey(starlark.String("clone"), starlark.NewBuiltin("clone", gitClone))
-	gitDict.SetKey(starlark.String("open"), starlark.NewBuiltin("open", gitOpen))
-	gitDict.SetKey(starlark.String("status"), starlark.NewBuiltin("status", gitStatus))
-	gitDict.SetKey(starlark.String("add"), starlark.NewBuiltin("add", gitAdd))
-	gitDict.SetKey(starlark.String("commit"), starlark.NewBuiltin("commit", gitCommit))
-	gitDict.SetKey(starlark.String("push"), starlark.NewBuiltin("push", gitPush))
-	gitDict.SetKey(starlark.String("pull"), starlark.NewBuiltin("pull", gitPull))
-	gitDict.SetKey(starlark.String("log"), starlark.NewBuiltin("log", gitLog))
+	_ = gitDict.SetKey(starlark.String("clone"), starlark.NewBuiltin("clone", gitClone))
+	_ = gitDict.SetKey(starlark.String("open"), starlark.NewBuiltin("open", gitOpen))
+	_ = gitDict.SetKey(starlark.String("status"), starlark.NewBuiltin("status", gitStatus))
+	_ = gitDict.SetKey(starlark.String("add"), starlark.NewBuiltin("add", gitAdd))
+	_ = gitDict.SetKey(starlark.String("commit"), starlark.NewBuiltin("commit", gitCommit))
+	_ = gitDict.SetKey(starlark.String("push"), starlark.NewBuiltin("push", gitPush))
+	_ = gitDict.SetKey(starlark.String("pull"), starlark.NewBuiltin("pull", gitPull))
+	_ = gitDict.SetKey(starlark.String("log"), starlark.NewBuiltin("log", gitLog))
 	env["git"] = gitDict
 
 	// github
 	ghDict := starlark.NewDict(9)
-	ghDict.SetKey(starlark.String("list_repos"), starlark.NewBuiltin("list_repos", ghListRepos))
-	ghDict.SetKey(starlark.String("list_prs"), starlark.NewBuiltin("list_prs", ghListPRs))
-	ghDict.SetKey(starlark.String("create_pr"), starlark.NewBuiltin("create_pr", ghCreatePR))
-	ghDict.SetKey(starlark.String("merge_pr"), starlark.NewBuiltin("merge_pr", ghMergePR))
-	ghDict.SetKey(starlark.String("list_issues"), starlark.NewBuiltin("list_issues", ghListIssues))
-	ghDict.SetKey(starlark.String("create_issue"), starlark.NewBuiltin("create_issue", ghCreateIssue))
-	ghDict.SetKey(starlark.String("close_issue"), starlark.NewBuiltin("close_issue", ghCloseIssue))
-	ghDict.SetKey(starlark.String("create_release"), starlark.NewBuiltin("create_release", ghCreateRelease))
-	ghDict.SetKey(starlark.String("list_workflows"), starlark.NewBuiltin("list_workflows", ghListWorkflows))
-	ghDict.SetKey(starlark.String("trigger_workflow"), starlark.NewBuiltin("trigger_workflow", ghTriggerWorkflow))
+	_ = ghDict.SetKey(starlark.String("list_repos"), starlark.NewBuiltin("list_repos", ghListRepos))
+	_ = ghDict.SetKey(starlark.String("list_prs"), starlark.NewBuiltin("list_prs", ghListPRs))
+	_ = ghDict.SetKey(starlark.String("create_pr"), starlark.NewBuiltin("create_pr", ghCreatePR))
+	_ = ghDict.SetKey(starlark.String("merge_pr"), starlark.NewBuiltin("merge_pr", ghMergePR))
+	_ = ghDict.SetKey(starlark.String("list_issues"), starlark.NewBuiltin("list_issues", ghListIssues))
+	_ = ghDict.SetKey(starlark.String("create_issue"), starlark.NewBuiltin("create_issue", ghCreateIssue))
+	_ = ghDict.SetKey(starlark.String("close_issue"), starlark.NewBuiltin("close_issue", ghCloseIssue))
+	_ = ghDict.SetKey(starlark.String("create_release"), starlark.NewBuiltin("create_release", ghCreateRelease))
+	_ = ghDict.SetKey(starlark.String("list_workflows"), starlark.NewBuiltin("list_workflows", ghListWorkflows))
+	_ = ghDict.SetKey(starlark.String("trigger_workflow"), starlark.NewBuiltin("trigger_workflow", ghTriggerWorkflow))
 	env["github"] = ghDict
 }
 
@@ -132,7 +132,7 @@ func gitStatus(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple
 	}
 	d := starlark.NewDict(len(status))
 	for file, s := range status {
-		d.SetKey(starlark.String(file), makeDict(
+		_ = d.SetKey(starlark.String(file), makeDict(
 			"staging", string(s.Staging),
 			"worktree", string(s.Worktree),
 		))

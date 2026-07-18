@@ -14,9 +14,9 @@ import (
 type JobStatus string
 
 const (
-	JobRunning  JobStatus = "running"
-	JobStopped  JobStatus = "stopped"
-	JobDone     JobStatus = "done"
+	JobRunning JobStatus = "running"
+	JobStopped JobStatus = "stopped"
+	JobDone    JobStatus = "done"
 )
 
 // Job holds metadata for a single background/foreground job.

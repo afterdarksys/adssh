@@ -1,10 +1,10 @@
 package starlarkext
 
 import (
-	"github.com/afterdarksys/adssh/security"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/afterdarksys/adssh/security"
 	"go.starlark.net/starlark"
 	"io"
 	"os"
@@ -12,13 +12,13 @@ import (
 
 func SetupSecurityAPI(env starlark.StringDict, restricted bool) {
 	secDict := starlark.NewDict(4)
-	secDict.SetKey(starlark.String("audit"), starlark.NewBuiltin("audit", builtinSecAudit))
+	_ = secDict.SetKey(starlark.String("audit"), starlark.NewBuiltin("audit", builtinSecAudit))
 	// is_restricted closes over this session's restricted flag rather than a
 	// package-level global, so a restricted session and an unrestricted session
 	// can coexist in the same process without last-writer-wins clobbering.
-	secDict.SetKey(starlark.String("is_restricted"), makeSecIsRestricted(restricted))
-	secDict.SetKey(starlark.String("file_hash"), starlark.NewBuiltin("file_hash", builtinSecFileHash))
-	secDict.SetKey(starlark.String("check_policy"), starlark.NewBuiltin("check_policy", builtinSecCheckPolicy))
+	_ = secDict.SetKey(starlark.String("is_restricted"), makeSecIsRestricted(restricted))
+	_ = secDict.SetKey(starlark.String("file_hash"), starlark.NewBuiltin("file_hash", builtinSecFileHash))
+	_ = secDict.SetKey(starlark.String("check_policy"), starlark.NewBuiltin("check_policy", builtinSecCheckPolicy))
 	env["sec"] = secDict
 }
 
@@ -70,7 +70,7 @@ func builtinSecCheckPolicy(thread *starlark.Thread, b *starlark.Builtin, args st
 	}
 
 	result := starlark.NewDict(2)
-	result.SetKey(starlark.String("allowed"), starlark.Bool(allowed))
-	result.SetKey(starlark.String("reason"), starlark.String(reason))
+	_ = result.SetKey(starlark.String("allowed"), starlark.Bool(allowed))
+	_ = result.SetKey(starlark.String("reason"), starlark.String(reason))
 	return result, nil
 }

@@ -319,12 +319,12 @@ func RequestApproval(cmd string, rule FourEyesRule) error {
 // sendWebhookNotification POSTs approval request details to a webhook URL.
 func sendWebhookNotification(webhookURL, token, cmd, requester, hostname string) {
 	payload := map[string]string{
-		"token":        token,
-		"command":      cmd,
-		"requester":    requester,
-		"hostname":     hostname,
-		"approve_cmd":  "4eyes approve " + token,
-		"deny_cmd":     "4eyes deny " + token,
+		"token":       token,
+		"command":     cmd,
+		"requester":   requester,
+		"hostname":    hostname,
+		"approve_cmd": "4eyes approve " + token,
+		"deny_cmd":    "4eyes deny " + token,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

@@ -31,27 +31,27 @@ import (
 //	az.aks.get_credentials(sub="subscription-id", rg="resource-group", name="cluster-name")
 func SetupAzureAPI(env starlark.StringDict) {
 	rgDict := starlark.NewDict(1)
-	rgDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", azRGList))
+	_ = rgDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", azRGList))
 
 	vmDict := starlark.NewDict(5)
-	vmDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", azVMList))
-	vmDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", azVMGet))
-	vmDict.SetKey(starlark.String("start"), starlark.NewBuiltin("start", azVMStart))
-	vmDict.SetKey(starlark.String("stop"), starlark.NewBuiltin("stop", azVMStop))
-	vmDict.SetKey(starlark.String("deallocate"), starlark.NewBuiltin("deallocate", azVMDeallocate))
+	_ = vmDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", azVMList))
+	_ = vmDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", azVMGet))
+	_ = vmDict.SetKey(starlark.String("start"), starlark.NewBuiltin("start", azVMStart))
+	_ = vmDict.SetKey(starlark.String("stop"), starlark.NewBuiltin("stop", azVMStop))
+	_ = vmDict.SetKey(starlark.String("deallocate"), starlark.NewBuiltin("deallocate", azVMDeallocate))
 
 	storageDict := starlark.NewDict(1)
-	storageDict.SetKey(starlark.String("list_accounts"), starlark.NewBuiltin("list_accounts", azStorageListAccounts))
+	_ = storageDict.SetKey(starlark.String("list_accounts"), starlark.NewBuiltin("list_accounts", azStorageListAccounts))
 
 	aksDict := starlark.NewDict(2)
-	aksDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", azAKSListClusters))
-	aksDict.SetKey(starlark.String("get_credentials"), starlark.NewBuiltin("get_credentials", azAKSGetCredentials))
+	_ = aksDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", azAKSListClusters))
+	_ = aksDict.SetKey(starlark.String("get_credentials"), starlark.NewBuiltin("get_credentials", azAKSGetCredentials))
 
 	azDict := starlark.NewDict(4)
-	azDict.SetKey(starlark.String("rg"), rgDict)
-	azDict.SetKey(starlark.String("vm"), vmDict)
-	azDict.SetKey(starlark.String("storage"), storageDict)
-	azDict.SetKey(starlark.String("aks"), aksDict)
+	_ = azDict.SetKey(starlark.String("rg"), rgDict)
+	_ = azDict.SetKey(starlark.String("vm"), vmDict)
+	_ = azDict.SetKey(starlark.String("storage"), storageDict)
+	_ = azDict.SetKey(starlark.String("aks"), aksDict)
 	env["az"] = azDict
 }
 
@@ -89,18 +89,18 @@ func azRGList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwar
 		for _, rg := range page.Value {
 			d := starlark.NewDict(4)
 			if rg.Name != nil {
-				d.SetKey(starlark.String("name"), starlark.String(*rg.Name))
+				_ = d.SetKey(starlark.String("name"), starlark.String(*rg.Name))
 			}
 			if rg.Location != nil {
-				d.SetKey(starlark.String("location"), starlark.String(*rg.Location))
+				_ = d.SetKey(starlark.String("location"), starlark.String(*rg.Location))
 			}
 			if rg.ID != nil {
-				d.SetKey(starlark.String("id"), starlark.String(*rg.ID))
+				_ = d.SetKey(starlark.String("id"), starlark.String(*rg.ID))
 			}
 			if rg.Properties != nil && rg.Properties.ProvisioningState != nil {
-				d.SetKey(starlark.String("provisioning_state"), starlark.String(*rg.Properties.ProvisioningState))
+				_ = d.SetKey(starlark.String("provisioning_state"), starlark.String(*rg.Properties.ProvisioningState))
 			}
-			result.Append(d)
+			_ = result.Append(d)
 		}
 	}
 	return result, nil
@@ -131,7 +131,7 @@ func azVMList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwar
 				return nil, fmt.Errorf("az.vm.list: %v", err)
 			}
 			for _, vm := range page.Value {
-				result.Append(azVMToDict(vm))
+				_ = result.Append(azVMToDict(vm))
 			}
 		}
 	} else {
@@ -142,7 +142,7 @@ func azVMList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwar
 				return nil, fmt.Errorf("az.vm.list: %v", err)
 			}
 			for _, vm := range page.Value {
-				result.Append(azVMToDict(vm))
+				_ = result.Append(azVMToDict(vm))
 			}
 		}
 	}
@@ -242,25 +242,25 @@ func azVMDeallocate(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple
 func azVMToDict(vm *armcompute.VirtualMachine) *starlark.Dict {
 	d := starlark.NewDict(6)
 	if vm.Name != nil {
-		d.SetKey(starlark.String("name"), starlark.String(*vm.Name))
+		_ = d.SetKey(starlark.String("name"), starlark.String(*vm.Name))
 	}
 	if vm.Location != nil {
-		d.SetKey(starlark.String("location"), starlark.String(*vm.Location))
+		_ = d.SetKey(starlark.String("location"), starlark.String(*vm.Location))
 	}
 	if vm.ID != nil {
-		d.SetKey(starlark.String("id"), starlark.String(*vm.ID))
+		_ = d.SetKey(starlark.String("id"), starlark.String(*vm.ID))
 	}
 	if vm.Properties != nil {
 		if vm.Properties.HardwareProfile != nil && vm.Properties.HardwareProfile.VMSize != nil {
-			d.SetKey(starlark.String("size"), starlark.String(string(*vm.Properties.HardwareProfile.VMSize)))
+			_ = d.SetKey(starlark.String("size"), starlark.String(string(*vm.Properties.HardwareProfile.VMSize)))
 		}
 		if vm.Properties.ProvisioningState != nil {
-			d.SetKey(starlark.String("provisioning_state"), starlark.String(*vm.Properties.ProvisioningState))
+			_ = d.SetKey(starlark.String("provisioning_state"), starlark.String(*vm.Properties.ProvisioningState))
 		}
 		if vm.Properties.StorageProfile != nil &&
 			vm.Properties.StorageProfile.ImageReference != nil &&
 			vm.Properties.StorageProfile.ImageReference.Offer != nil {
-			d.SetKey(starlark.String("image_offer"), starlark.String(*vm.Properties.StorageProfile.ImageReference.Offer))
+			_ = d.SetKey(starlark.String("image_offer"), starlark.String(*vm.Properties.StorageProfile.ImageReference.Offer))
 		}
 	}
 	return d
@@ -291,7 +291,7 @@ func azStorageListAccounts(_ *starlark.Thread, b *starlark.Builtin, args starlar
 				return nil, fmt.Errorf("az.storage.list_accounts: %v", err)
 			}
 			for _, acct := range page.Value {
-				result.Append(azStorageAccountToDict(acct))
+				_ = result.Append(azStorageAccountToDict(acct))
 			}
 		}
 	} else {
@@ -302,7 +302,7 @@ func azStorageListAccounts(_ *starlark.Thread, b *starlark.Builtin, args starlar
 				return nil, fmt.Errorf("az.storage.list_accounts: %v", err)
 			}
 			for _, acct := range page.Value {
-				result.Append(azStorageAccountToDict(acct))
+				_ = result.Append(azStorageAccountToDict(acct))
 			}
 		}
 	}
@@ -312,16 +312,16 @@ func azStorageListAccounts(_ *starlark.Thread, b *starlark.Builtin, args starlar
 func azStorageAccountToDict(acct *armstorage.Account) *starlark.Dict {
 	d := starlark.NewDict(4)
 	if acct.Name != nil {
-		d.SetKey(starlark.String("name"), starlark.String(*acct.Name))
+		_ = d.SetKey(starlark.String("name"), starlark.String(*acct.Name))
 	}
 	if acct.Location != nil {
-		d.SetKey(starlark.String("location"), starlark.String(*acct.Location))
+		_ = d.SetKey(starlark.String("location"), starlark.String(*acct.Location))
 	}
 	if acct.ID != nil {
-		d.SetKey(starlark.String("id"), starlark.String(*acct.ID))
+		_ = d.SetKey(starlark.String("id"), starlark.String(*acct.ID))
 	}
 	if acct.Kind != nil {
-		d.SetKey(starlark.String("kind"), starlark.String(string(*acct.Kind)))
+		_ = d.SetKey(starlark.String("kind"), starlark.String(string(*acct.Kind)))
 	}
 	return d
 }
@@ -351,7 +351,7 @@ func azAKSListClusters(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 				return nil, fmt.Errorf("az.aks.list_clusters: %v", err)
 			}
 			for _, c := range page.Value {
-				result.Append(azAKSClusterToDict(c))
+				_ = result.Append(azAKSClusterToDict(c))
 			}
 		}
 	} else {
@@ -362,7 +362,7 @@ func azAKSListClusters(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 				return nil, fmt.Errorf("az.aks.list_clusters: %v", err)
 			}
 			for _, c := range page.Value {
-				result.Append(azAKSClusterToDict(c))
+				_ = result.Append(azAKSClusterToDict(c))
 			}
 		}
 	}
@@ -390,12 +390,12 @@ func azAKSGetCredentials(_ *starlark.Thread, b *starlark.Builtin, args starlark.
 	for _, kc := range resp.Kubeconfigs {
 		d := starlark.NewDict(2)
 		if kc.Name != nil {
-			d.SetKey(starlark.String("name"), starlark.String(*kc.Name))
+			_ = d.SetKey(starlark.String("name"), starlark.String(*kc.Name))
 		}
 		if kc.Value != nil {
-			d.SetKey(starlark.String("kubeconfig"), starlark.String(string(kc.Value)))
+			_ = d.SetKey(starlark.String("kubeconfig"), starlark.String(string(kc.Value)))
 		}
-		result.Append(d)
+		_ = result.Append(d)
 	}
 	return result, nil
 }
@@ -403,23 +403,23 @@ func azAKSGetCredentials(_ *starlark.Thread, b *starlark.Builtin, args starlark.
 func azAKSClusterToDict(c *armcontainerservice.ManagedCluster) *starlark.Dict {
 	d := starlark.NewDict(6)
 	if c.Name != nil {
-		d.SetKey(starlark.String("name"), starlark.String(*c.Name))
+		_ = d.SetKey(starlark.String("name"), starlark.String(*c.Name))
 	}
 	if c.Location != nil {
-		d.SetKey(starlark.String("location"), starlark.String(*c.Location))
+		_ = d.SetKey(starlark.String("location"), starlark.String(*c.Location))
 	}
 	if c.ID != nil {
-		d.SetKey(starlark.String("id"), starlark.String(*c.ID))
+		_ = d.SetKey(starlark.String("id"), starlark.String(*c.ID))
 	}
 	if c.Properties != nil {
 		if c.Properties.KubernetesVersion != nil {
-			d.SetKey(starlark.String("kubernetes_version"), starlark.String(*c.Properties.KubernetesVersion))
+			_ = d.SetKey(starlark.String("kubernetes_version"), starlark.String(*c.Properties.KubernetesVersion))
 		}
 		if c.Properties.ProvisioningState != nil {
-			d.SetKey(starlark.String("provisioning_state"), starlark.String(*c.Properties.ProvisioningState))
+			_ = d.SetKey(starlark.String("provisioning_state"), starlark.String(*c.Properties.ProvisioningState))
 		}
 		if c.Properties.PowerState != nil && c.Properties.PowerState.Code != nil {
-			d.SetKey(starlark.String("power_state"), starlark.String(string(*c.Properties.PowerState.Code)))
+			_ = d.SetKey(starlark.String("power_state"), starlark.String(string(*c.Properties.PowerState.Code)))
 		}
 	}
 	return d

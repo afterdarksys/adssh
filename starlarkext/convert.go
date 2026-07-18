@@ -44,13 +44,13 @@ func toStarlark(v interface{}) starlark.Value {
 	case map[string]interface{}:
 		d := starlark.NewDict(len(val))
 		for k, v2 := range val {
-			d.SetKey(starlark.String(k), toStarlark(v2))
+			_ = d.SetKey(starlark.String(k), toStarlark(v2))
 		}
 		return d
 	case map[string]string:
 		d := starlark.NewDict(len(val))
 		for k, v2 := range val {
-			d.SetKey(starlark.String(k), starlark.String(v2))
+			_ = d.SetKey(starlark.String(k), starlark.String(v2))
 		}
 		return d
 	case []interface{}:
@@ -87,7 +87,7 @@ func makeDict(pairs ...interface{}) *starlark.Dict {
 	d := starlark.NewDict(len(pairs) / 2)
 	for i := 0; i < len(pairs); i += 2 {
 		key := pairs[i].(string)
-		d.SetKey(starlark.String(key), toStarlark(pairs[i+1]))
+		_ = d.SetKey(starlark.String(key), toStarlark(pairs[i+1]))
 	}
 	return d
 }

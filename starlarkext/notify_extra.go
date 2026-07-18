@@ -28,7 +28,7 @@ func ExpandNotifyAPI(env starlark.StringDict) {
 	if !ok {
 		return
 	}
-	notifyDict.SetKey(starlark.String("teams"), starlark.NewBuiltin("teams", notifyTeams))
+	_ = notifyDict.SetKey(starlark.String("teams"), starlark.NewBuiltin("teams", notifyTeams))
 }
 
 // ── Microsoft Teams ───────────────────────────────────────────────────────────

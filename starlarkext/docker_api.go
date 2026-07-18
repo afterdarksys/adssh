@@ -39,27 +39,27 @@ import (
 //	docker.volumes.remove(name, force=False)
 func SetupDockerAPI(env starlark.StringDict) {
 	imagesDict := starlark.NewDict(3)
-	imagesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", dockerImagesList))
-	imagesDict.SetKey(starlark.String("pull"), starlark.NewBuiltin("pull", dockerImagesPull))
-	imagesDict.SetKey(starlark.String("remove"), starlark.NewBuiltin("remove", dockerImagesRemove))
+	_ = imagesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", dockerImagesList))
+	_ = imagesDict.SetKey(starlark.String("pull"), starlark.NewBuiltin("pull", dockerImagesPull))
+	_ = imagesDict.SetKey(starlark.String("remove"), starlark.NewBuiltin("remove", dockerImagesRemove))
 
 	networksDict := starlark.NewDict(3)
-	networksDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", dockerNetworksList))
-	networksDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", dockerNetworksCreate))
-	networksDict.SetKey(starlark.String("remove"), starlark.NewBuiltin("remove", dockerNetworksRemove))
+	_ = networksDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", dockerNetworksList))
+	_ = networksDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", dockerNetworksCreate))
+	_ = networksDict.SetKey(starlark.String("remove"), starlark.NewBuiltin("remove", dockerNetworksRemove))
 
 	volumesDict := starlark.NewDict(3)
-	volumesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", dockerVolumesList))
-	volumesDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", dockerVolumesCreate))
-	volumesDict.SetKey(starlark.String("remove"), starlark.NewBuiltin("remove", dockerVolumesRemove))
+	_ = volumesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", dockerVolumesList))
+	_ = volumesDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", dockerVolumesCreate))
+	_ = volumesDict.SetKey(starlark.String("remove"), starlark.NewBuiltin("remove", dockerVolumesRemove))
 
 	dockerDict := starlark.NewDict(6)
-	dockerDict.SetKey(starlark.String("ps"), starlark.NewBuiltin("ps", dockerPS))
-	dockerDict.SetKey(starlark.String("inspect"), starlark.NewBuiltin("inspect", dockerInspect))
-	dockerDict.SetKey(starlark.String("logs"), starlark.NewBuiltin("logs", dockerLogs))
-	dockerDict.SetKey(starlark.String("images"), imagesDict)
-	dockerDict.SetKey(starlark.String("networks"), networksDict)
-	dockerDict.SetKey(starlark.String("volumes"), volumesDict)
+	_ = dockerDict.SetKey(starlark.String("ps"), starlark.NewBuiltin("ps", dockerPS))
+	_ = dockerDict.SetKey(starlark.String("inspect"), starlark.NewBuiltin("inspect", dockerInspect))
+	_ = dockerDict.SetKey(starlark.String("logs"), starlark.NewBuiltin("logs", dockerLogs))
+	_ = dockerDict.SetKey(starlark.String("images"), imagesDict)
+	_ = dockerDict.SetKey(starlark.String("networks"), networksDict)
+	_ = dockerDict.SetKey(starlark.String("volumes"), volumesDict)
 	env["docker"] = dockerDict
 }
 
@@ -95,16 +95,16 @@ func dockerPS(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwar
 		if len(id) > 12 {
 			id = id[:12]
 		}
-		d.SetKey(starlark.String("id"), starlark.String(id))
-		d.SetKey(starlark.String("image"), starlark.String(c.Image))
-		d.SetKey(starlark.String("status"), starlark.String(c.Status))
-		d.SetKey(starlark.String("state"), starlark.String(c.State))
+		_ = d.SetKey(starlark.String("id"), starlark.String(id))
+		_ = d.SetKey(starlark.String("image"), starlark.String(c.Image))
+		_ = d.SetKey(starlark.String("status"), starlark.String(c.Status))
+		_ = d.SetKey(starlark.String("state"), starlark.String(c.State))
 		names := starlark.NewList(nil)
 		for _, n := range c.Names {
-			names.Append(starlark.String(strings.TrimPrefix(n, "/")))
+			_ = names.Append(starlark.String(strings.TrimPrefix(n, "/")))
 		}
-		d.SetKey(starlark.String("names"), names)
-		result.Append(d)
+		_ = d.SetKey(starlark.String("names"), names)
+		_ = result.Append(d)
 	}
 	return result, nil
 }
@@ -125,22 +125,22 @@ func dockerInspect(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple,
 		return nil, fmt.Errorf("docker.inspect: %v", err)
 	}
 	d := starlark.NewDict(6)
-	d.SetKey(starlark.String("id"), starlark.String(info.ID))
-	d.SetKey(starlark.String("name"), starlark.String(strings.TrimPrefix(info.Name, "/")))
+	_ = d.SetKey(starlark.String("id"), starlark.String(info.ID))
+	_ = d.SetKey(starlark.String("name"), starlark.String(strings.TrimPrefix(info.Name, "/")))
 	if info.Config != nil {
-		d.SetKey(starlark.String("image"), starlark.String(info.Config.Image))
+		_ = d.SetKey(starlark.String("image"), starlark.String(info.Config.Image))
 	}
 	if info.State != nil {
-		d.SetKey(starlark.String("status"), starlark.String(info.State.Status))
-		d.SetKey(starlark.String("running"), starlark.Bool(info.State.Running))
-		d.SetKey(starlark.String("started_at"), starlark.String(info.State.StartedAt))
+		_ = d.SetKey(starlark.String("status"), starlark.String(info.State.Status))
+		_ = d.SetKey(starlark.String("running"), starlark.Bool(info.State.Running))
+		_ = d.SetKey(starlark.String("started_at"), starlark.String(info.State.StartedAt))
 	}
 	return d, nil
 }
 
 func dockerLogs(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var id string
-	var tail int = 100
+	var tail = 100
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "id", &id, "tail?", &tail); err != nil {
 		return nil, err
 	}
@@ -182,15 +182,15 @@ func dockerImagesList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tup
 	result := starlark.NewList(nil)
 	for _, img := range images {
 		d := starlark.NewDict(4)
-		d.SetKey(starlark.String("id"), starlark.String(img.ID))
-		d.SetKey(starlark.String("size"), starlark.MakeInt64(img.Size))
-		d.SetKey(starlark.String("created"), starlark.MakeInt64(img.Created))
+		_ = d.SetKey(starlark.String("id"), starlark.String(img.ID))
+		_ = d.SetKey(starlark.String("size"), starlark.MakeInt64(img.Size))
+		_ = d.SetKey(starlark.String("created"), starlark.MakeInt64(img.Created))
 		tags := starlark.NewList(nil)
 		for _, t := range img.RepoTags {
-			tags.Append(starlark.String(t))
+			_ = tags.Append(starlark.String(t))
 		}
-		d.SetKey(starlark.String("tags"), tags)
-		result.Append(d)
+		_ = d.SetKey(starlark.String("tags"), tags)
+		_ = result.Append(d)
 	}
 	return result, nil
 }
@@ -261,11 +261,11 @@ func dockerNetworksList(_ *starlark.Thread, b *starlark.Builtin, args starlark.T
 		if len(id) > 12 {
 			id = id[:12]
 		}
-		d.SetKey(starlark.String("id"), starlark.String(id))
-		d.SetKey(starlark.String("name"), starlark.String(n.Name))
-		d.SetKey(starlark.String("driver"), starlark.String(n.Driver))
-		d.SetKey(starlark.String("scope"), starlark.String(n.Scope))
-		result.Append(d)
+		_ = d.SetKey(starlark.String("id"), starlark.String(id))
+		_ = d.SetKey(starlark.String("name"), starlark.String(n.Name))
+		_ = d.SetKey(starlark.String("driver"), starlark.String(n.Driver))
+		_ = d.SetKey(starlark.String("scope"), starlark.String(n.Scope))
+		_ = result.Append(d)
 	}
 	return result, nil
 }
@@ -287,8 +287,8 @@ func dockerNetworksCreate(_ *starlark.Thread, b *starlark.Builtin, args starlark
 		return nil, fmt.Errorf("docker.networks.create: %v", err)
 	}
 	d := starlark.NewDict(2)
-	d.SetKey(starlark.String("id"), starlark.String(resp.ID))
-	d.SetKey(starlark.String("warning"), starlark.String(resp.Warning))
+	_ = d.SetKey(starlark.String("id"), starlark.String(resp.ID))
+	_ = d.SetKey(starlark.String("warning"), starlark.String(resp.Warning))
 	return d, nil
 }
 
@@ -325,10 +325,10 @@ func dockerVolumesList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 	result := starlark.NewList(nil)
 	for _, v := range resp.Volumes {
 		d := starlark.NewDict(3)
-		d.SetKey(starlark.String("name"), starlark.String(v.Name))
-		d.SetKey(starlark.String("driver"), starlark.String(v.Driver))
-		d.SetKey(starlark.String("mountpoint"), starlark.String(v.Mountpoint))
-		result.Append(d)
+		_ = d.SetKey(starlark.String("name"), starlark.String(v.Name))
+		_ = d.SetKey(starlark.String("driver"), starlark.String(v.Driver))
+		_ = d.SetKey(starlark.String("mountpoint"), starlark.String(v.Mountpoint))
+		_ = result.Append(d)
 	}
 	return result, nil
 }
@@ -349,9 +349,9 @@ func dockerVolumesCreate(_ *starlark.Thread, b *starlark.Builtin, args starlark.
 		return nil, fmt.Errorf("docker.volumes.create: %v", err)
 	}
 	d := starlark.NewDict(3)
-	d.SetKey(starlark.String("name"), starlark.String(vol.Name))
-	d.SetKey(starlark.String("driver"), starlark.String(vol.Driver))
-	d.SetKey(starlark.String("mountpoint"), starlark.String(vol.Mountpoint))
+	_ = d.SetKey(starlark.String("name"), starlark.String(vol.Name))
+	_ = d.SetKey(starlark.String("driver"), starlark.String(vol.Driver))
+	_ = d.SetKey(starlark.String("mountpoint"), starlark.String(vol.Mountpoint))
 	return d, nil
 }
 

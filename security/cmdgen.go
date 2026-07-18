@@ -1,9 +1,9 @@
 package security
 
 import (
-	"github.com/afterdarksys/adssh/devops"
 	"context"
 	"fmt"
+	"github.com/afterdarksys/adssh/devops"
 	"strings"
 
 	"mvdan.cc/sh/v3/interp"
@@ -13,9 +13,11 @@ import (
 
 type cmdgenBinary struct{}
 
-func (cmdgenBinary) Name() string        { return "cmdgen" }
-func (cmdgenBinary) Description() string { return "DevOps command generator — generate CLI commands for cloud providers" }
-func (cmdgenBinary) Usage() string       { return "cmdgen <provider> <resource> <action> [key=value ...]" }
+func (cmdgenBinary) Name() string { return "cmdgen" }
+func (cmdgenBinary) Description() string {
+	return "DevOps command generator — generate CLI commands for cloud providers"
+}
+func (cmdgenBinary) Usage() string { return "cmdgen <provider> <resource> <action> [key=value ...]" }
 
 func (cmdgenBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)

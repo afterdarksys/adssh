@@ -81,7 +81,7 @@ func (j *JobValue) wait(thread *starlark.Thread, b *starlark.Builtin, args starl
 		}
 		return starlark.True, nil
 	}
-	
+
 	j.err = <-j.waitChan
 	j.done = true
 	if j.err != nil {

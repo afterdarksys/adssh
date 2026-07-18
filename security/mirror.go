@@ -1,9 +1,9 @@
 package security
 
 import (
-	"github.com/afterdarksys/adssh/sys"
 	"context"
 	"fmt"
+	"github.com/afterdarksys/adssh/sys"
 	"io"
 
 	"mvdan.cc/sh/v3/interp"
@@ -13,9 +13,11 @@ import (
 
 type mirrorBinary struct{}
 
-func (mirrorBinary) Name() string        { return "mirror" }
-func (mirrorBinary) Description() string { return "Session mirroring — view or take console of an active shell session" }
-func (mirrorBinary) Usage() string       { return "mirror <list|view|console> [session_id]" }
+func (mirrorBinary) Name() string { return "mirror" }
+func (mirrorBinary) Description() string {
+	return "Session mirroring — view or take console of an active shell session"
+}
+func (mirrorBinary) Usage() string { return "mirror <list|view|console> [session_id]" }
 
 func (mirrorBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
@@ -58,7 +60,7 @@ func (mirrorBinary) Run(ctx context.Context, args []string) error {
 		fmt.Fprintf(hc.Stdout, "Attached to session %s (Console). Press Ctrl+C to exit.\r\n", targetID)
 		session.Out.AddListener(hc.Stdout)
 		defer session.Out.RemoveListener(hc.Stdout)
-		go io.Copy(session.PTYMaster, hc.Stdin)
+		go func() { _, _ = io.Copy(session.PTYMaster, hc.Stdin) }() // best-effort: stream ends on session close
 		<-ctx.Done()
 		fmt.Fprintf(hc.Stdout, "\r\nDetached from session %s\r\n", targetID)
 		return nil

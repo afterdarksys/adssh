@@ -199,7 +199,7 @@ func TestGateNeg_EmptyAndWhitespaceCommand_NoExec(t *testing.T) {
 
 // B: a denied command must leave a policy-decision entry (allowed=false) in the
 // audit chain, and an allowed command must leave allowed=true. The interceptor
-// logs through the defaultEngine, so the chain is initialised on defaultEngine
+// logs through the defaultEngine, so the chain is initialized on defaultEngine
 // via the InitChain shim.
 func TestAuditNeg_PolicyDecisionsAreChained(t *testing.T) {
 	resetPolicy()

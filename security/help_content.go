@@ -44,7 +44,7 @@ func registerBuiltinHelp() {
 			Name:        "set",
 			Category:    "builtin",
 			Summary:     "Set or unset shell options and positional parameters",
-			Description: "Controls shell behaviour flags. Common flags: -e (exit on error), -u (error on unset variables), -x (trace commands), -o pipefail (fail on pipe errors).",
+			Description: "Controls shell behavior flags. Common flags: -e (exit on error), -u (error on unset variables), -x (trace commands), -o pipefail (fail on pipe errors).",
 			Usage:       "set [-e | +e | -u | +u | -x | +x | -o option | +o option]",
 			Examples: []HelpExample{
 				{Command: "set -e", Description: "exit immediately on error"},
@@ -288,7 +288,7 @@ patterns before they execute. Required for SOX, PCI-DSS, and FedRAMP compliance.
 
 When a command matches a 4eyes rule, the shell prints a token and pauses.
 The approver runs '4eyes approve <token>' on their own session.
-If approved the command proceeds; if denied or timed out it is cancelled.
+If approved the command proceeds; if denied or timed out it is canceled.
 
 Webhook notifications: set ADSSH_4EYES_WEBHOOK=<url> to POST approval
 requests to a Slack/Teams/PagerDuty webhook.`,
@@ -394,11 +394,11 @@ file I/O, process execution, plugin loading, and terminal control.`,
 			Tags:    []string{"sys", "system", "env", "file", "exec", "process", "plugin"},
 		},
 		{
-			Name:     "net",
-			Category: "starlark",
-			Summary:  "Network — HTTP requests and TCP connections",
+			Name:        "net",
+			Category:    "starlark",
+			Summary:     "Network — HTTP requests and TCP connections",
 			Description: "The net namespace provides HTTP GET and TCP send operations.",
-			Usage:    "net.<method>(args...)",
+			Usage:       "net.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: "net.http_get('https://api.example.com/status')", Description: "HTTP GET"},
 				{Command: "net.tcp_send('localhost:9000', 'PING')", Description: "raw TCP send"},
@@ -408,11 +408,11 @@ file I/O, process execution, plugin loading, and terminal control.`,
 			Tags: []string{"net", "network", "http", "tcp", "tls", "request"},
 		},
 		{
-			Name:     "crypto",
-			Category: "starlark",
-			Summary:  "Cryptographic hashing — MD5, SHA-256",
+			Name:        "crypto",
+			Category:    "starlark",
+			Summary:     "Cryptographic hashing — MD5, SHA-256",
 			Description: "The crypto namespace provides hashing functions.",
-			Usage:    "crypto.<method>(data)",
+			Usage:       "crypto.<method>(data)",
 			Examples: []HelpExample{
 				{Command: "crypto.md5('hello')", Description: "compute MD5 hex digest"},
 				{Command: "crypto.sha256('hello')", Description: "compute SHA-256 hex digest"},
@@ -420,25 +420,27 @@ file I/O, process execution, plugin loading, and terminal control.`,
 			Tags: []string{"crypto", "hash", "md5", "sha256", "checksum"},
 		},
 		{
-			Name:     "data",
-			Category: "starlark",
-			Summary:  "Data serialisation — JSON and YAML parse/dump",
+			Name:        "data",
+			Category:    "starlark",
+			Summary:     "Data serialization — JSON and YAML parse/dump",
 			Description: "The data namespace converts between Starlark values and JSON/YAML strings.",
-			Usage:    "data.<method>(value)",
+			Usage:       "data.<method>(value)",
 			Examples: []HelpExample{
 				{Command: `data.json_parse('{"key":"value"}')`, Description: "parse JSON string"},
-				{Command: "data.json_dump({'key': 'value'})", Description: "serialise to JSON"},
+				{Command: "data.json_dump({'key': 'value'})", Description: "serialize to JSON"},
 				{Command: "data.yaml_parse('key: value')", Description: "parse YAML string"},
-				{Command: "data.yaml_dump({'key': 'value'})", Description: "serialise to YAML"},
+				{Command: "data.yaml_dump({'key': 'value'})", Description: "serialize to YAML"},
 			},
+			// nolint:misspell // "serialise" kept intentionally alongside "serialize" so
+			// help search matches either British or American spelling.
 			Tags: []string{"data", "json", "yaml", "parse", "serialise", "serialize"},
 		},
 		{
-			Name:     "re",
-			Category: "starlark",
-			Summary:  "Regular expressions — Go regexp and PCRE matching",
+			Name:        "re",
+			Category:    "starlark",
+			Summary:     "Regular expressions — Go regexp and PCRE matching",
 			Description: "The re namespace provides regex match functions using Go's regexp syntax and PCRE.",
-			Usage:    "re.<method>(pattern, string)",
+			Usage:       "re.<method>(pattern, string)",
 			Examples: []HelpExample{
 				{Command: `re.match(r"^v\d+\.\d+", "v1.2.3")`, Description: "match with Go regexp"},
 				{Command: `re.pcre_match(r"(?i)hello", "HELLO")`, Description: "case-insensitive PCRE match"},
@@ -446,11 +448,11 @@ file I/O, process execution, plugin loading, and terminal control.`,
 			Tags: []string{"re", "regex", "regexp", "pcre", "pattern", "match"},
 		},
 		{
-			Name:     "sec",
-			Category: "starlark",
-			Summary:  "Security primitives — audit, restriction checks, file hashing, policy",
+			Name:        "sec",
+			Category:    "starlark",
+			Summary:     "Security primitives — audit, restriction checks, file hashing, policy",
 			Description: "The sec namespace exposes security primitives for Starlark scripts.",
-			Usage:    "sec.<method>(args...)",
+			Usage:       "sec.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `sec.audit("deployed v1.2")`, Description: "write an audit log entry"},
 				{Command: "sec.is_restricted()", Description: "check if shell is in restricted mode"},
@@ -504,11 +506,11 @@ Credentials are read from GOOGLE_APPLICATION_CREDENTIALS or Application Default 
 			Tags: []string{"gcp", "gke", "compute", "storage", "pubsub", "cloud run", "google", "cloud"},
 		},
 		{
-			Name:     "oci",
-			Category: "starlark",
-			Summary:  "Oracle Cloud Infrastructure — Compute and Object Storage",
+			Name:        "oci",
+			Category:    "starlark",
+			Summary:     "Oracle Cloud Infrastructure — Compute and Object Storage",
 			Description: "The oci namespace provides access to OCI Compute instances and Object Storage.",
-			Usage:    "oci.<service>.<method>(args...)",
+			Usage:       "oci.<service>.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `oci.compute.list_instances("compartment-ocid")`, Description: "list OCI instances"},
 				{Command: `oci.compute.start_instance("instance-ocid")`, Description: "start OCI instance"},
@@ -517,11 +519,11 @@ Credentials are read from GOOGLE_APPLICATION_CREDENTIALS or Application Default 
 			Tags: []string{"oci", "oracle", "cloud", "compute", "storage"},
 		},
 		{
-			Name:     "git",
-			Category: "starlark",
-			Summary:  "Git operations — clone, status, commit, push, pull",
+			Name:        "git",
+			Category:    "starlark",
+			Summary:     "Git operations — clone, status, commit, push, pull",
 			Description: "The git namespace wraps go-git to provide repository operations from Starlark.",
-			Usage:    "git.<method>(args...)",
+			Usage:       "git.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `git.clone("https://github.com/org/repo", "/tmp/repo")`, Description: "clone a repo"},
 				{Command: `r = git.open("/tmp/repo"); git.status(r)`, Description: "open and check status"},
@@ -533,11 +535,11 @@ Credentials are read from GOOGLE_APPLICATION_CREDENTIALS or Application Default 
 			Tags: []string{"git", "vcs", "version control", "clone", "commit", "push", "pull"},
 		},
 		{
-			Name:     "github",
-			Category: "starlark",
-			Summary:  "GitHub API — repos, PRs, issues, releases, workflows",
+			Name:        "github",
+			Category:    "starlark",
+			Summary:     "GitHub API — repos, PRs, issues, releases, workflows",
 			Description: "The github namespace provides GitHub API operations. Set GITHUB_TOKEN for authentication.",
-			Usage:    "github.<method>(args...)",
+			Usage:       "github.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `github.list_repos("org")`, Description: "list org repos"},
 				{Command: `github.list_prs("org/repo")`, Description: "list pull requests"},
@@ -549,11 +551,11 @@ Credentials are read from GOOGLE_APPLICATION_CREDENTIALS or Application Default 
 			Tags: []string{"github", "git", "pr", "pull request", "issue", "workflow", "release"},
 		},
 		{
-			Name:     "k8s",
-			Category: "starlark",
-			Summary:  "Kubernetes — pods, deployments, services, namespaces, events",
+			Name:        "k8s",
+			Category:    "starlark",
+			Summary:     "Kubernetes — pods, deployments, services, namespaces, events",
 			Description: "The k8s namespace provides Kubernetes cluster operations via the in-cluster or kubeconfig credentials.",
-			Usage:    "k8s.<resource>(...)",
+			Usage:       "k8s.<resource>(...)",
 			Examples: []HelpExample{
 				{Command: "k8s.pods()", Description: "list pods in default namespace"},
 				{Command: `k8s.pods(namespace="kube-system")`, Description: "list pods in kube-system"},
@@ -568,11 +570,11 @@ Credentials are read from GOOGLE_APPLICATION_CREDENTIALS or Application Default 
 			Tags:    []string{"k8s", "kubernetes", "pods", "deployments", "services", "kubectl", "helm"},
 		},
 		{
-			Name:     "docker",
-			Category: "starlark",
-			Summary:  "Docker Engine API — containers, images, networks, volumes",
+			Name:        "docker",
+			Category:    "starlark",
+			Summary:     "Docker Engine API — containers, images, networks, volumes",
 			Description: "The docker namespace wraps the Docker Engine API for container management.",
-			Usage:    "docker.<method>(args...)",
+			Usage:       "docker.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: "docker.ps()", Description: "list running containers"},
 				{Command: `docker.inspect("container-id")`, Description: "inspect a container"},
@@ -602,11 +604,11 @@ tamper-evident audit trail. Every container execution is recorded.`,
 			Tags:    []string{"containers", "exec", "docker", "audit", "replay"},
 		},
 		{
-			Name:     "secrets",
-			Category: "starlark",
-			Summary:  "Secrets management — Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager",
+			Name:        "secrets",
+			Category:    "starlark",
+			Summary:     "Secrets management — Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager",
 			Description: "The secrets namespace provides a unified interface to multiple secrets backends.",
-			Usage:    "secrets.<backend>.<method>(args...)",
+			Usage:       "secrets.<backend>.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `secrets.vault.get("secret/myapp/db_password")`, Description: "read from Vault"},
 				{Command: `secrets.aws.get("prod/myapp/api_key")`, Description: "read from AWS Secrets Manager"},
@@ -616,11 +618,11 @@ tamper-evident audit trail. Every container execution is recorded.`,
 			Tags: []string{"secrets", "vault", "aws", "azure", "gcp", "credentials", "password"},
 		},
 		{
-			Name:     "db",
-			Category: "starlark",
-			Summary:  "Database clients — PostgreSQL, MySQL, Redis",
+			Name:        "db",
+			Category:    "starlark",
+			Summary:     "Database clients — PostgreSQL, MySQL, Redis",
 			Description: "The db namespace provides database connection helpers.",
-			Usage:    "db.<engine>.<method>(args...)",
+			Usage:       "db.<engine>.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `db.postgres.query("postgres://user:pw@host/db", "SELECT 1")`, Description: "Postgres query"},
 				{Command: `db.mysql.query("user:pw@tcp(host:3306)/db", "SELECT 1")`, Description: "MySQL query"},
@@ -629,11 +631,11 @@ tamper-evident audit trail. Every container execution is recorded.`,
 			Tags: []string{"db", "database", "postgres", "mysql", "redis", "sql", "query"},
 		},
 		{
-			Name:     "notify",
-			Category: "starlark",
-			Summary:  "Notifications — Slack, webhook, PagerDuty, Teams",
+			Name:        "notify",
+			Category:    "starlark",
+			Summary:     "Notifications — Slack, webhook, PagerDuty, Teams",
 			Description: "The notify namespace sends notifications to various channels.",
-			Usage:    "notify.<channel>.<method>(args...)",
+			Usage:       "notify.<channel>.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `notify.slack.send("https://hooks.slack.com/...", "Deploy complete")`, Description: "Slack notification"},
 				{Command: `notify.webhook.post("https://...", {"text": "alert"})`, Description: "generic webhook"},
@@ -643,11 +645,11 @@ tamper-evident audit trail. Every container execution is recorded.`,
 			Tags: []string{"notify", "slack", "pagerduty", "teams", "webhook", "alert", "notification"},
 		},
 		{
-			Name:     "template",
-			Category: "starlark",
-			Summary:  "Go text/template rendering",
+			Name:        "template",
+			Category:    "starlark",
+			Summary:     "Go text/template rendering",
 			Description: "The template namespace renders Go text/template strings and files.",
-			Usage:    "template.<method>(args...)",
+			Usage:       "template.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: `template.render("Hello {{.Name}}!", {"Name": "World"})`, Description: "render a template string"},
 				{Command: `template.render_file("/etc/nginx/nginx.conf.tmpl", vars)`, Description: "render a template file"},
@@ -804,11 +806,13 @@ Escape sequences are expanded at each prompt display:
   \\[   begin non-printing sequence (for ANSI codes)
   \\]   end non-printing sequence
 
-ANSI colour codes work inside \\[...\\] sequences.`,
+ANSI color codes work inside \\[...\\] sequences.`,
 			Examples: []HelpExample{
 				{Command: `export PROMPT='\u@\h:\w\$ '`, Description: "user@host:dir$ prompt"},
 				{Command: `export PROMPT='\[\033[1;32m\]\u@\h\[\033[0m\]:\w\$ '`, Description: "green user@host"},
 			},
+			// nolint:misspell // "customise"/"colour" kept intentionally alongside their
+			// American spellings so help search matches either variant.
 			Tags: []string{"prompt", "PS1", "PROMPT", "terminal", "customise", "customize", "colour", "color"},
 		},
 	}

@@ -37,7 +37,7 @@ func parseAgentFile(content string) (agentFrontmatter, string, error) {
 
 // createLoadAgent creates the sys.load_agent Starlark builtin.
 // It reads an agent definition file from ~/.adssh/agents/<name>.md,
-// parses its TOML frontmatter and markdown system prompt, initialises an
+// parses its TOML frontmatter and markdown system prompt, initializes an
 // Anthropic API client, and returns a stateful callable that maintains
 // conversation history for the lifetime of the Starlark session.
 func createLoadAgent(env starlark.StringDict) *starlark.Builtin {

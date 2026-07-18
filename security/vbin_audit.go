@@ -13,7 +13,7 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
-// ANSI colour helpers
+// ANSI color helpers
 const (
 	ansiReset     = "\033[0m"
 	ansiRed       = "\033[31m"
@@ -42,8 +42,8 @@ func wrapAt(s string, maxLen int) string {
 	return sb.String()
 }
 
-// colourForEntry returns an ANSI colour for a chain entry based on type/allowed.
-func colourForEntry(e ChainEntry) string {
+// colorForEntry returns an ANSI color for a chain entry based on type/allowed.
+func colorForEntry(e ChainEntry) string {
 	switch e.Type {
 	case "policy":
 		if e.Allowed != nil && !*e.Allowed {
@@ -62,8 +62,10 @@ func colourForEntry(e ChainEntry) string {
 // auditBinary implements the 'audit' virtual binary.
 type auditBinary struct{}
 
-func (auditBinary) Name() string        { return "audit" }
-func (auditBinary) Description() string { return "View, verify, search, and export the HMAC-chain audit ledger" }
+func (auditBinary) Name() string { return "audit" }
+func (auditBinary) Description() string {
+	return "View, verify, search, and export the HMAC-chain audit ledger"
+}
 func (auditBinary) Usage() string {
 	return `audit <subcommand> [options]
 
@@ -152,7 +154,7 @@ func chainLedgerPath() string {
 
 func auditVerify(_ context.Context, hc interp.HandlerContext, ledger string) error {
 	if ledger == "" {
-		fmt.Fprintf(hc.Stderr, "audit verify: chain not initialised\n")
+		fmt.Fprintf(hc.Stderr, "audit verify: chain not initialized\n")
 		return nil
 	}
 	ok, badSeq, err := VerifyChain(ledger)
@@ -170,7 +172,7 @@ func auditVerify(_ context.Context, hc interp.HandlerContext, ledger string) err
 
 func auditTail(_ context.Context, hc interp.HandlerContext, ledger string, n int) error {
 	if ledger == "" {
-		fmt.Fprintf(hc.Stderr, "audit tail: chain not initialised\n")
+		fmt.Fprintf(hc.Stderr, "audit tail: chain not initialized\n")
 		return nil
 	}
 
@@ -193,7 +195,7 @@ func auditTail(_ context.Context, hc interp.HandlerContext, ledger string, n int
 	fmt.Fprintf(hc.Stdout, "%s%s\n", ansiCyan, strings.Repeat("─", 80)+ansiReset)
 
 	for _, e := range entries[start:] {
-		colour := colourForEntry(e)
+		color := colorForEntry(e)
 		ts := e.Timestamp
 		if len(ts) > 23 {
 			ts = ts[:23]
@@ -203,7 +205,7 @@ func auditTail(_ context.Context, hc interp.HandlerContext, ledger string, n int
 			cmd = e.Source
 		}
 		fmt.Fprintf(hc.Stdout, "%s%-6d %-24s %-10s %-8s %s%s\n",
-			colour,
+			color,
 			e.Seq,
 			ts,
 			truncate(e.User, 10),
@@ -216,7 +218,7 @@ func auditTail(_ context.Context, hc interp.HandlerContext, ledger string, n int
 
 func auditSearch(_ context.Context, hc interp.HandlerContext, ledger, keyword string) error {
 	if ledger == "" {
-		fmt.Fprintf(hc.Stderr, "audit search: chain not initialised\n")
+		fmt.Fprintf(hc.Stderr, "audit search: chain not initialized\n")
 		return nil
 	}
 
@@ -242,7 +244,7 @@ func auditSearch(_ context.Context, hc interp.HandlerContext, ledger, keyword st
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			continue
 		}
-		colour := colourForEntry(e)
+		color := colorForEntry(e)
 		ts := e.Timestamp
 		if len(ts) > 23 {
 			ts = ts[:23]
@@ -252,7 +254,7 @@ func auditSearch(_ context.Context, hc interp.HandlerContext, ledger, keyword st
 			cmd = e.Source
 		}
 		fmt.Fprintf(hc.Stdout, "%s[%d] %s  %-8s  %s  %-10s  %s%s\n",
-			colour,
+			color,
 			e.Seq,
 			ts,
 			e.Type,
@@ -272,7 +274,7 @@ func auditSearch(_ context.Context, hc interp.HandlerContext, ledger, keyword st
 
 func auditExport(_ context.Context, hc interp.HandlerContext, ledger, format, since, until string) error {
 	if ledger == "" {
-		fmt.Fprintf(hc.Stderr, "audit export: chain not initialised\n")
+		fmt.Fprintf(hc.Stderr, "audit export: chain not initialized\n")
 		return nil
 	}
 	data, err := ExportChain(ledger, format, since, until)
@@ -280,14 +282,14 @@ func auditExport(_ context.Context, hc interp.HandlerContext, ledger, format, si
 		fmt.Fprintf(hc.Stderr, "audit export: %v\n", err)
 		return nil
 	}
-	hc.Stdout.Write(data)
+	_, _ = hc.Stdout.Write(data) // best-effort terminal write
 	fmt.Fprintln(hc.Stdout)
 	return nil
 }
 
 func auditStats(_ context.Context, hc interp.HandlerContext, ledger string) error {
 	if ledger == "" {
-		fmt.Fprintf(hc.Stderr, "audit stats: chain not initialised\n")
+		fmt.Fprintf(hc.Stderr, "audit stats: chain not initialized\n")
 		return nil
 	}
 

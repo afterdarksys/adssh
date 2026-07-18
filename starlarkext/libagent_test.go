@@ -9,7 +9,7 @@ import (
 	"go.starlark.net/starlark"
 )
 
-// TestParseAgentFile tests all parseAgentFile behaviours in a single function.
+// TestParseAgentFile tests all parseAgentFile behaviors in a single function.
 func TestParseAgentFile(t *testing.T) {
 	t.Run("valid file", func(t *testing.T) {
 		content := "+++\nname = \"test\"\nmodel = \"claude-sonnet-4-6\"\nmcp_server = \"adssh\"\ntools = [\"eval_starlark\"]\n+++\nYou are a test agent."

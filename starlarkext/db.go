@@ -42,18 +42,18 @@ import (
 //	r.close()
 func SetupDatabaseAPI(env starlark.StringDict) {
 	postgresDict := starlark.NewDict(1)
-	postgresDict.SetKey(starlark.String("connect"), starlark.NewBuiltin("connect", dbPostgresConnect))
+	_ = postgresDict.SetKey(starlark.String("connect"), starlark.NewBuiltin("connect", dbPostgresConnect))
 
 	mysqlDict := starlark.NewDict(1)
-	mysqlDict.SetKey(starlark.String("connect"), starlark.NewBuiltin("connect", dbMySQLConnect))
+	_ = mysqlDict.SetKey(starlark.String("connect"), starlark.NewBuiltin("connect", dbMySQLConnect))
 
 	redisDict := starlark.NewDict(1)
-	redisDict.SetKey(starlark.String("connect"), starlark.NewBuiltin("connect", dbRedisConnect))
+	_ = redisDict.SetKey(starlark.String("connect"), starlark.NewBuiltin("connect", dbRedisConnect))
 
 	d := starlark.NewDict(3)
-	d.SetKey(starlark.String("postgres"), postgresDict)
-	d.SetKey(starlark.String("mysql"), mysqlDict)
-	d.SetKey(starlark.String("redis"), redisDict)
+	_ = d.SetKey(starlark.String("postgres"), postgresDict)
+	_ = d.SetKey(starlark.String("mysql"), mysqlDict)
+	_ = d.SetKey(starlark.String("redis"), redisDict)
 	env["db"] = d
 }
 
@@ -120,9 +120,9 @@ func (c *dbConn) builtinQuery(_ *starlark.Thread, b *starlark.Builtin, args star
 		}
 		row := starlark.NewDict(len(cols))
 		for i, col := range cols {
-			row.SetKey(starlark.String(col), sqlValueToStarlark(vals[i]))
+			_ = row.SetKey(starlark.String(col), sqlValueToStarlark(vals[i]))
 		}
-		result.Append(row)
+		_ = result.Append(row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("db.query rows: %v", err)
@@ -427,4 +427,3 @@ func sqlValueToStarlark(v interface{}) starlark.Value {
 		return starlark.String(fmt.Sprintf("%v", val))
 	}
 }
-

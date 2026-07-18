@@ -35,13 +35,13 @@ func GoToStarlark(v interface{}) starlark.Value {
 	case []interface{}:
 		list := starlark.NewList(nil)
 		for _, item := range val {
-			list.Append(GoToStarlark(item))
+			_ = list.Append(GoToStarlark(item))
 		}
 		return list
 	case map[string]interface{}:
 		dict := starlark.NewDict(len(val))
 		for k, v := range val {
-			dict.SetKey(starlark.String(k), GoToStarlark(v))
+			_ = dict.SetKey(starlark.String(k), GoToStarlark(v))
 		}
 		return dict
 	default:
@@ -62,7 +62,9 @@ func builtinYAMLParse(thread *starlark.Thread, b *starlark.Builtin, args starlar
 	// The easiest way is JSON marshal/unmarshal
 	jsonBytes, _ := json.Marshal(out)
 	var cleanOut interface{}
-	json.Unmarshal(jsonBytes, &cleanOut)
+	if err := json.Unmarshal(jsonBytes, &cleanOut); err != nil {
+		return nil, fmt.Errorf("yaml parse error: %v", err)
+	}
 
 	return GoToStarlark(cleanOut), nil
 }

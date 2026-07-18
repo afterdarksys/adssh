@@ -37,30 +37,30 @@ import (
 // instance metadata, etc.)
 func SetupAWSAPI(env starlark.StringDict) {
 	ec2Dict := starlark.NewDict(4)
-	ec2Dict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", awsEC2ListInstances))
-	ec2Dict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", awsEC2StartInstance))
-	ec2Dict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", awsEC2StopInstance))
-	ec2Dict.SetKey(starlark.String("terminate_instance"), starlark.NewBuiltin("terminate_instance", awsEC2TerminateInstance))
+	_ = ec2Dict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", awsEC2ListInstances))
+	_ = ec2Dict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", awsEC2StartInstance))
+	_ = ec2Dict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", awsEC2StopInstance))
+	_ = ec2Dict.SetKey(starlark.String("terminate_instance"), starlark.NewBuiltin("terminate_instance", awsEC2TerminateInstance))
 
 	s3Dict := starlark.NewDict(4)
-	s3Dict.SetKey(starlark.String("list_buckets"), starlark.NewBuiltin("list_buckets", awsS3ListBuckets))
-	s3Dict.SetKey(starlark.String("put_object"), starlark.NewBuiltin("put_object", awsS3PutObject))
-	s3Dict.SetKey(starlark.String("get_object"), starlark.NewBuiltin("get_object", awsS3GetObject))
-	s3Dict.SetKey(starlark.String("delete_object"), starlark.NewBuiltin("delete_object", awsS3DeleteObject))
+	_ = s3Dict.SetKey(starlark.String("list_buckets"), starlark.NewBuiltin("list_buckets", awsS3ListBuckets))
+	_ = s3Dict.SetKey(starlark.String("put_object"), starlark.NewBuiltin("put_object", awsS3PutObject))
+	_ = s3Dict.SetKey(starlark.String("get_object"), starlark.NewBuiltin("get_object", awsS3GetObject))
+	_ = s3Dict.SetKey(starlark.String("delete_object"), starlark.NewBuiltin("delete_object", awsS3DeleteObject))
 
 	ecsDict := starlark.NewDict(2)
-	ecsDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", awsECSListClusters))
-	ecsDict.SetKey(starlark.String("list_services"), starlark.NewBuiltin("list_services", awsECSListServices))
+	_ = ecsDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", awsECSListClusters))
+	_ = ecsDict.SetKey(starlark.String("list_services"), starlark.NewBuiltin("list_services", awsECSListServices))
 
 	lambdaDict := starlark.NewDict(2)
-	lambdaDict.SetKey(starlark.String("list_functions"), starlark.NewBuiltin("list_functions", awsLambdaListFunctions))
-	lambdaDict.SetKey(starlark.String("invoke"), starlark.NewBuiltin("invoke", awsLambdaInvoke))
+	_ = lambdaDict.SetKey(starlark.String("list_functions"), starlark.NewBuiltin("list_functions", awsLambdaListFunctions))
+	_ = lambdaDict.SetKey(starlark.String("invoke"), starlark.NewBuiltin("invoke", awsLambdaInvoke))
 
 	awsDict := starlark.NewDict(4)
-	awsDict.SetKey(starlark.String("ec2"), ec2Dict)
-	awsDict.SetKey(starlark.String("s3"), s3Dict)
-	awsDict.SetKey(starlark.String("ecs"), ecsDict)
-	awsDict.SetKey(starlark.String("lambda"), lambdaDict)
+	_ = awsDict.SetKey(starlark.String("ec2"), ec2Dict)
+	_ = awsDict.SetKey(starlark.String("s3"), s3Dict)
+	_ = awsDict.SetKey(starlark.String("ecs"), ecsDict)
+	_ = awsDict.SetKey(starlark.String("lambda"), lambdaDict)
 
 	env["aws"] = awsDict
 }

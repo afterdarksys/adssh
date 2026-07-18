@@ -1,8 +1,8 @@
 package starlarkext
 
 import (
-	"github.com/afterdarksys/adssh/devops"
 	"fmt"
+	"github.com/afterdarksys/adssh/devops"
 	"go.starlark.net/starlark"
 )
 
@@ -58,10 +58,10 @@ func builtinRegisterMapper(thread *starlark.Thread, b *starlark.Builtin, args st
 
 	mapperFn := func(resource, action string, args map[string]string) (string, error) {
 		newThread := &starlark.Thread{Name: "mapper-" + provider}
-		
+
 		starlarkArgs := starlark.NewDict(len(args))
 		for k, v := range args {
-			starlarkArgs.SetKey(starlark.String(k), starlark.String(v))
+			_ = starlarkArgs.SetKey(starlark.String(k), starlark.String(v))
 		}
 
 		res, err := starlark.Call(newThread, callable, starlark.Tuple{

@@ -94,7 +94,7 @@ var starlarkNamespaceKeys = map[string][]string{
 var mirrorSubcmds = []string{"list", "view", "console"}
 var cmdgenProviders = []string{"docker", "kubectl", "aws"}
 
-// vbinSubcommands maps a vbin name to its recognised first-argument completions.
+// vbinSubcommands maps a vbin name to its recognized first-argument completions.
 var vbinSubcommands = map[string][]string{
 	"stty":    {"sane", "size", "echo", "-echo", "raw", "-raw", "rows", "cols"},
 	"history": {"-c", "-d"},

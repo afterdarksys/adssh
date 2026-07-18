@@ -370,13 +370,11 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 			case "set":
 				if len(args) == 1 {
 					// print all variables (skip __ keys)
-					if globals != nil {
-						for k, v := range globals {
-							if strings.HasPrefix(k, "__") && strings.HasSuffix(k, "__") {
-								continue
-							}
-							fmt.Fprintf(hc.Stdout, "%s=%s\n", k, v.String())
+					for k, v := range globals {
+						if strings.HasPrefix(k, "__") && strings.HasSuffix(k, "__") {
+							continue
 						}
+						fmt.Fprintf(hc.Stdout, "%s=%s\n", k, v.String())
 					}
 					return nil
 				}

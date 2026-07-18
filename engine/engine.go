@@ -87,15 +87,15 @@ func (e *Engine) NewSession(opts SessionOptions) (*Session, error) {
 
 // ErrAccessDenied is the sentinel the platform can match with errors.Is to
 // detect a policy denial. The interceptor currently returns denial via
-// fmt.Errorf strings ("adssh: access denied: ..."); IsAccessDenied recognises
-// those without any behaviour change, and errors.Is against ErrAccessDenied
+// fmt.Errorf strings ("adssh: access denied: ..."); IsAccessDenied recognizes
+// those without any behavior change, and errors.Is against ErrAccessDenied
 // keeps working if the interceptor is later updated to wrap this sentinel.
 var ErrAccessDenied = errors.New("access denied")
 
 // ErrApprovalRequired is the sentinel for a command blocked by a governance
 // gate (four-eyes dual approval or a change-management ticket). As with
 // ErrAccessDenied it is matched by IsApprovalRequired against the current error
-// strings without altering interceptor behaviour.
+// strings without altering interceptor behavior.
 var ErrApprovalRequired = errors.New("approval required")
 
 // IsAccessDenied reports whether err is a policy denial produced by the

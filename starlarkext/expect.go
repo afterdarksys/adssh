@@ -28,7 +28,7 @@ import (
 //	proc.close()
 func SetupExpectAPI(env starlark.StringDict) {
 	d := starlark.NewDict(1)
-	d.SetKey(starlark.String("spawn"), starlark.NewBuiltin("spawn", expectSpawn))
+	_ = d.SetKey(starlark.String("spawn"), starlark.NewBuiltin("spawn", expectSpawn))
 	env["expect"] = d
 }
 
@@ -246,7 +246,7 @@ func (p *expectProc) builtinClose(_ *starlark.Thread, b *starlark.Builtin, args 
 	if !p.closed {
 		p.ptmx.Close()
 		if p.cmd.Process != nil {
-			p.cmd.Process.Kill()
+			_ = p.cmd.Process.Kill() // best-effort: process may have already exited
 		}
 		p.closed = true
 	}

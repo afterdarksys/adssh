@@ -21,26 +21,26 @@ func createExecCmd(globals starlark.StringDict, restricted bool) func(thread *st
 			return nil, err
 		}
 
-	parserFile, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
-	if err != nil {
-		return nil, fmt.Errorf("parse error: %v", err)
-	}
+		parserFile, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
+		if err != nil {
+			return nil, fmt.Errorf("parse error: %v", err)
+		}
 
-	var buf bytes.Buffer
-	runner, _ := interp.New(
-		interp.StdIO(nil, &buf, &buf),
-		interp.CallHandler(security.CallInterceptor(restricted, globals)),
-		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
-		interp.OpenHandler(security.VirtualOpenHandler()),
-	)
+		var buf bytes.Buffer
+		runner, _ := interp.New(
+			interp.StdIO(nil, &buf, &buf),
+			interp.CallHandler(security.CallInterceptor(restricted, globals)),
+			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
+			interp.OpenHandler(security.VirtualOpenHandler()),
+		)
 
-	if err = security.GateProgram(restricted, parserFile); err != nil {
-		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
-	}
-	err = runner.Run(context.Background(), parserFile)
-	if err != nil {
-		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
-	}
+		if err = security.GateProgram(restricted, parserFile); err != nil {
+			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+		}
+		err = runner.Run(context.Background(), parserFile)
+		if err != nil {
+			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+		}
 
 		return starlark.String(buf.String()), nil
 	}
@@ -53,26 +53,26 @@ func createExecJSON(globals starlark.StringDict, restricted bool) func(thread *s
 			return nil, err
 		}
 
-	parserFile, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
-	if err != nil {
-		return nil, fmt.Errorf("parse error: %v", err)
-	}
+		parserFile, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
+		if err != nil {
+			return nil, fmt.Errorf("parse error: %v", err)
+		}
 
-	var buf bytes.Buffer
-	runner, _ := interp.New(
-		interp.StdIO(nil, &buf, &buf),
-		interp.CallHandler(security.CallInterceptor(restricted, globals)),
-		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
-		interp.OpenHandler(security.VirtualOpenHandler()),
-	)
+		var buf bytes.Buffer
+		runner, _ := interp.New(
+			interp.StdIO(nil, &buf, &buf),
+			interp.CallHandler(security.CallInterceptor(restricted, globals)),
+			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
+			interp.OpenHandler(security.VirtualOpenHandler()),
+		)
 
-	if err = security.GateProgram(restricted, parserFile); err != nil {
-		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
-	}
-	err = runner.Run(context.Background(), parserFile)
-	if err != nil {
-		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
-	}
+		if err = security.GateProgram(restricted, parserFile); err != nil {
+			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+		}
+		err = runner.Run(context.Background(), parserFile)
+		if err != nil {
+			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+		}
 
 		var out interface{}
 		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {

@@ -33,17 +33,17 @@ func ExpandAWSAPIExtra(env starlark.StringDict) {
 	}
 
 	cwDict := starlark.NewDict(3)
-	cwDict.SetKey(starlark.String("get_metric"), starlark.NewBuiltin("get_metric", awsCWGetMetric))
-	cwDict.SetKey(starlark.String("list_alarms"), starlark.NewBuiltin("list_alarms", awsCWListAlarms))
-	cwDict.SetKey(starlark.String("get_alarm_state"), starlark.NewBuiltin("get_alarm_state", awsCWGetAlarmState))
-	awsDict.SetKey(starlark.String("cloudwatch"), cwDict)
+	_ = cwDict.SetKey(starlark.String("get_metric"), starlark.NewBuiltin("get_metric", awsCWGetMetric))
+	_ = cwDict.SetKey(starlark.String("list_alarms"), starlark.NewBuiltin("list_alarms", awsCWListAlarms))
+	_ = cwDict.SetKey(starlark.String("get_alarm_state"), starlark.NewBuiltin("get_alarm_state", awsCWGetAlarmState))
+	_ = awsDict.SetKey(starlark.String("cloudwatch"), cwDict)
 
 	r53Dict := starlark.NewDict(4)
-	r53Dict.SetKey(starlark.String("list_zones"), starlark.NewBuiltin("list_zones", awsR53ListZones))
-	r53Dict.SetKey(starlark.String("list_records"), starlark.NewBuiltin("list_records", awsR53ListRecords))
-	r53Dict.SetKey(starlark.String("upsert_record"), starlark.NewBuiltin("upsert_record", awsR53UpsertRecord))
-	r53Dict.SetKey(starlark.String("delete_record"), starlark.NewBuiltin("delete_record", awsR53DeleteRecord))
-	awsDict.SetKey(starlark.String("route53"), r53Dict)
+	_ = r53Dict.SetKey(starlark.String("list_zones"), starlark.NewBuiltin("list_zones", awsR53ListZones))
+	_ = r53Dict.SetKey(starlark.String("list_records"), starlark.NewBuiltin("list_records", awsR53ListRecords))
+	_ = r53Dict.SetKey(starlark.String("upsert_record"), starlark.NewBuiltin("upsert_record", awsR53UpsertRecord))
+	_ = r53Dict.SetKey(starlark.String("delete_record"), starlark.NewBuiltin("delete_record", awsR53DeleteRecord))
+	_ = awsDict.SetKey(starlark.String("route53"), r53Dict)
 }
 
 // ── CloudWatch ────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ func ExpandAWSAPIExtra(env starlark.StringDict) {
 func awsCWGetMetric(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var namespace, metric, stat, region string
 	var dimsDict *starlark.Dict
-	var period int = 300
+	var period = 300
 	namespace = "AWS/EC2"
 	stat = "Average"
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
@@ -262,7 +262,7 @@ func awsR53ListRecords(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 
 func awsR53UpsertRecord(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var zoneID, name, recType string
-	var ttl int = 300
+	var ttl = 300
 	var valuesList *starlark.List
 	recType = "A"
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,

@@ -32,20 +32,20 @@ func ExpandGCPAPI(env starlark.StringDict) {
 	}
 
 	gkeDict := starlark.NewDict(2)
-	gkeDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", gcpGKEListClusters))
-	gkeDict.SetKey(starlark.String("get_cluster"), starlark.NewBuiltin("get_cluster", gcpGKEGetCluster))
-	gcpDict.SetKey(starlark.String("gke"), gkeDict)
+	_ = gkeDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", gcpGKEListClusters))
+	_ = gkeDict.SetKey(starlark.String("get_cluster"), starlark.NewBuiltin("get_cluster", gcpGKEGetCluster))
+	_ = gcpDict.SetKey(starlark.String("gke"), gkeDict)
 
 	pubsubDict := starlark.NewDict(3)
-	pubsubDict.SetKey(starlark.String("list_topics"), starlark.NewBuiltin("list_topics", gcpPubSubListTopics))
-	pubsubDict.SetKey(starlark.String("publish"), starlark.NewBuiltin("publish", gcpPubSubPublish))
-	pubsubDict.SetKey(starlark.String("list_subscriptions"), starlark.NewBuiltin("list_subscriptions", gcpPubSubListSubscriptions))
-	gcpDict.SetKey(starlark.String("pubsub"), pubsubDict)
+	_ = pubsubDict.SetKey(starlark.String("list_topics"), starlark.NewBuiltin("list_topics", gcpPubSubListTopics))
+	_ = pubsubDict.SetKey(starlark.String("publish"), starlark.NewBuiltin("publish", gcpPubSubPublish))
+	_ = pubsubDict.SetKey(starlark.String("list_subscriptions"), starlark.NewBuiltin("list_subscriptions", gcpPubSubListSubscriptions))
+	_ = gcpDict.SetKey(starlark.String("pubsub"), pubsubDict)
 
 	runDict := starlark.NewDict(2)
-	runDict.SetKey(starlark.String("list_services"), starlark.NewBuiltin("list_services", gcpRunListServices))
-	runDict.SetKey(starlark.String("get_service"), starlark.NewBuiltin("get_service", gcpRunGetService))
-	gcpDict.SetKey(starlark.String("run"), runDict)
+	_ = runDict.SetKey(starlark.String("list_services"), starlark.NewBuiltin("list_services", gcpRunListServices))
+	_ = runDict.SetKey(starlark.String("get_service"), starlark.NewBuiltin("get_service", gcpRunGetService))
+	_ = gcpDict.SetKey(starlark.String("run"), runDict)
 }
 
 // ── GKE ───────────────────────────────────────────────────────────────────────
@@ -231,8 +231,8 @@ func gcpRunListServices(_ *starlark.Thread, b *starlark.Builtin, args starlark.T
 
 	var resp struct {
 		Services []struct {
-			Name          string `json:"name"`
-			URI           string `json:"uri"`
+			Name              string `json:"name"`
+			URI               string `json:"uri"`
 			TerminalCondition struct {
 				State string `json:"state"`
 			} `json:"terminalCondition"`
@@ -265,8 +265,8 @@ func gcpRunGetService(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tup
 	}
 
 	var svc struct {
-		Name          string `json:"name"`
-		URI           string `json:"uri"`
+		Name              string `json:"name"`
+		URI               string `json:"uri"`
 		TerminalCondition struct {
 			State string `json:"state"`
 		} `json:"terminalCondition"`
@@ -340,4 +340,3 @@ func gcpGetADCToken(ctx context.Context) (string, error) {
 	}
 	return tok.AccessToken, nil
 }
-

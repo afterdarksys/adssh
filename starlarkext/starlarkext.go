@@ -90,40 +90,40 @@ func SetupExtensions(opts ExtensionOptions) {
 	SetupSecurityAPI(env, restricted)
 	// Crypto
 	cryptoDict := starlark.NewDict(2)
-	cryptoDict.SetKey(starlark.String("md5"), starlark.NewBuiltin("md5", builtinMD5))
-	cryptoDict.SetKey(starlark.String("sha256"), starlark.NewBuiltin("sha256", builtinSHA256))
+	_ = cryptoDict.SetKey(starlark.String("md5"), starlark.NewBuiltin("md5", builtinMD5))
+	_ = cryptoDict.SetKey(starlark.String("sha256"), starlark.NewBuiltin("sha256", builtinSHA256))
 	env["crypto"] = cryptoDict
 
 	// Networking
 	netDict := starlark.NewDict(4)
 	if !restricted {
-		netDict.SetKey(starlark.String("tcp_send"), starlark.NewBuiltin("tcp_send", builtinTCPSend))
-		netDict.SetKey(starlark.String("http_get"), starlark.NewBuiltin("http_get", builtinHTTPGet))
-		netDict.SetKey(starlark.String("dial"), starlark.NewBuiltin("dial", builtinDial))
-		netDict.SetKey(starlark.String("dial_tls"), starlark.NewBuiltin("dial_tls", builtinDialTLS))
+		_ = netDict.SetKey(starlark.String("tcp_send"), starlark.NewBuiltin("tcp_send", builtinTCPSend))
+		_ = netDict.SetKey(starlark.String("http_get"), starlark.NewBuiltin("http_get", builtinHTTPGet))
+		_ = netDict.SetKey(starlark.String("dial"), starlark.NewBuiltin("dial", builtinDial))
+		_ = netDict.SetKey(starlark.String("dial_tls"), starlark.NewBuiltin("dial_tls", builtinDialTLS))
 	}
 	env["net"] = netDict
 
 	// Regex (POSIX/RE2, PCRE)
 	reDict := starlark.NewDict(2)
-	reDict.SetKey(starlark.String("match"), starlark.NewBuiltin("re_match", builtinReMatch))
-	reDict.SetKey(starlark.String("pcre_match"), starlark.NewBuiltin("pcre_match", builtinPcreMatch))
+	_ = reDict.SetKey(starlark.String("match"), starlark.NewBuiltin("re_match", builtinReMatch))
+	_ = reDict.SetKey(starlark.String("pcre_match"), starlark.NewBuiltin("pcre_match", builtinPcreMatch))
 	env["re"] = reDict
 
 	// Sys
 	sysDict := starlark.NewDict(8)
-	sysDict.SetKey(starlark.String("getenv"), starlark.NewBuiltin("getenv", builtinGetEnv))
-	sysDict.SetKey(starlark.String("setenv"), starlark.NewBuiltin("setenv", builtinSetEnv))
-	sysDict.SetKey(starlark.String("load_plugin"), createLoadPlugin(env))
-	sysDict.SetKey(starlark.String("load_agent"), createLoadAgent(env))
+	_ = sysDict.SetKey(starlark.String("getenv"), starlark.NewBuiltin("getenv", builtinGetEnv))
+	_ = sysDict.SetKey(starlark.String("setenv"), starlark.NewBuiltin("setenv", builtinSetEnv))
+	_ = sysDict.SetKey(starlark.String("load_plugin"), createLoadPlugin(env))
+	_ = sysDict.SetKey(starlark.String("load_agent"), createLoadAgent(env))
 	if !restricted {
-		sysDict.SetKey(starlark.String("read_file"), starlark.NewBuiltin("read_file", builtinReadFile))
-		sysDict.SetKey(starlark.String("write_file"), starlark.NewBuiltin("write_file", builtinWriteFile))
-		sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", createExecCmd(env, restricted)))
-		sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", createExecAsync(env, restricted)))
-		sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", createExecJSON(env, restricted)))
-		sysDict.SetKey(starlark.String("register_command"), createRegisterCommand(env))
-		sysDict.SetKey(starlark.String("register_completer"), createRegisterCompleter(env))
+		_ = sysDict.SetKey(starlark.String("read_file"), starlark.NewBuiltin("read_file", builtinReadFile))
+		_ = sysDict.SetKey(starlark.String("write_file"), starlark.NewBuiltin("write_file", builtinWriteFile))
+		_ = sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", createExecCmd(env, restricted)))
+		_ = sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", createExecAsync(env, restricted)))
+		_ = sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", createExecJSON(env, restricted)))
+		_ = sysDict.SetKey(starlark.String("register_command"), createRegisterCommand(env))
+		_ = sysDict.SetKey(starlark.String("register_completer"), createRegisterCompleter(env))
 	}
 	env["sys"] = sysDict
 
@@ -139,23 +139,23 @@ func SetupExtensions(opts ExtensionOptions) {
 
 	// Data
 	dataDict := starlark.NewDict(4)
-	dataDict.SetKey(starlark.String("json_parse"), starlark.NewBuiltin("json_parse", builtinJSONParse))
-	dataDict.SetKey(starlark.String("json_dump"), starlark.NewBuiltin("json_dump", builtinJSONDump))
-	dataDict.SetKey(starlark.String("yaml_parse"), starlark.NewBuiltin("yaml_parse", builtinYAMLParse))
-	dataDict.SetKey(starlark.String("yaml_dump"), starlark.NewBuiltin("yaml_dump", builtinYAMLDump))
+	_ = dataDict.SetKey(starlark.String("json_parse"), starlark.NewBuiltin("json_parse", builtinJSONParse))
+	_ = dataDict.SetKey(starlark.String("json_dump"), starlark.NewBuiltin("json_dump", builtinJSONDump))
+	_ = dataDict.SetKey(starlark.String("yaml_parse"), starlark.NewBuiltin("yaml_parse", builtinYAMLParse))
+	_ = dataDict.SetKey(starlark.String("yaml_dump"), starlark.NewBuiltin("yaml_dump", builtinYAMLDump))
 	env["data"] = dataDict
 
 	// i18n
 	i18nDict := starlark.NewDict(3)
-	i18nDict.SetKey(starlark.String("load"), starlark.NewBuiltin("load", builtinI18nLoad))
-	i18nDict.SetKey(starlark.String("set_lang"), starlark.NewBuiltin("set_lang", builtinI18nSetLang))
-	i18nDict.SetKey(starlark.String("T"), starlark.NewBuiltin("T", builtinI18nT))
+	_ = i18nDict.SetKey(starlark.String("load"), starlark.NewBuiltin("load", builtinI18nLoad))
+	_ = i18nDict.SetKey(starlark.String("set_lang"), starlark.NewBuiltin("set_lang", builtinI18nSetLang))
+	_ = i18nDict.SetKey(starlark.String("T"), starlark.NewBuiltin("T", builtinI18nT))
 	env["i18n"] = i18nDict
 
 	// DevOps / Cloud Engine
 	cloudDict := starlark.NewDict(2)
-	cloudDict.SetKey(starlark.String("gen"), starlark.NewBuiltin("gen", builtinCloudGen))
-	cloudDict.SetKey(starlark.String("register_mapper"), starlark.NewBuiltin("register_mapper", builtinRegisterMapper))
+	_ = cloudDict.SetKey(starlark.String("gen"), starlark.NewBuiltin("gen", builtinCloudGen))
+	_ = cloudDict.SetKey(starlark.String("register_mapper"), starlark.NewBuiltin("register_mapper", builtinRegisterMapper))
 	env["cloud"] = cloudDict
 
 	// Expand cloud namespaces with additional APIs

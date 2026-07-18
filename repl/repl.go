@@ -410,9 +410,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// Ensure history file exists with strict permissions
 	if err := os.MkdirAll(filepath.Dir(historyFile), 0700); err == nil {
 		if _, err := os.Stat(historyFile); os.IsNotExist(err) {
-			os.WriteFile(historyFile, []byte(""), 0600)
-		} else {
-			os.Chmod(historyFile, 0600)
+			if err := os.WriteFile(historyFile, []byte(""), 0600); err != nil {
+				fmt.Fprintf(os.Stderr, "adssh: warning: could not create history file %s: %v\n", historyFile, err)
+			}
+		} else if err := os.Chmod(historyFile, 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: warning: could not set permissions on history file %s: %v\n", historyFile, err)
 		}
 	}
 
@@ -485,11 +487,12 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "mode", &mode); err != nil {
 			return nil, err
 		}
-		if mode == "vi" {
+		switch mode {
+		case "vi":
 			rl.SetVimMode(true)
-		} else if mode == "emacs" {
+		case "emacs":
 			rl.SetVimMode(false)
-		} else {
+		default:
 			return nil, fmt.Errorf("set_keymap: unknown mode '%s'. Use 'vi' or 'emacs'", mode)
 		}
 		return starlark.None, nil

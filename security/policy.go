@@ -54,9 +54,9 @@ func LoadPolicy(path string) error {
 //   - A policy IS loaded and yields a decision document: DENY-BY-DEFAULT. Only an
 //     explicit boolean `allow == true` permits the command. Every other outcome
 //     denies:
-//       * missing `allow` key (author forgot `default allow`)  => DENY (FIX #3)
-//       * `allow` present but not a Go bool (e.g. "yes", 1)     => DENY (FIX #2)
-//       * empty result set / non-object decision document       => DENY
+//   - missing `allow` key (author forgot `default allow`)  => DENY (FIX #3)
+//   - `allow` present but not a Go bool (e.g. "yes", 1)     => DENY (FIX #2)
+//   - empty result set / non-object decision document       => DENY
 //     A genuinely permissive policy must say so explicitly with `default allow =
 //     true`, which yields allow==true here.
 //

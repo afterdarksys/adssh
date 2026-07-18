@@ -27,19 +27,19 @@ import (
 // Credentials: ~/.oci/config (standard OCI CLI config)
 func SetupOCIAPI(env starlark.StringDict) {
 	computeDict := starlark.NewDict(3)
-	computeDict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", ociComputeListInstances))
-	computeDict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", ociComputeStartInstance))
-	computeDict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", ociComputeStopInstance))
+	_ = computeDict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", ociComputeListInstances))
+	_ = computeDict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", ociComputeStartInstance))
+	_ = computeDict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", ociComputeStopInstance))
 
 	storageDict := starlark.NewDict(4)
-	storageDict.SetKey(starlark.String("list_buckets"), starlark.NewBuiltin("list_buckets", ociStorageListBuckets))
-	storageDict.SetKey(starlark.String("get_object"), starlark.NewBuiltin("get_object", ociStorageGetObject))
-	storageDict.SetKey(starlark.String("put_object"), starlark.NewBuiltin("put_object", ociStoragePutObject))
-	storageDict.SetKey(starlark.String("delete_object"), starlark.NewBuiltin("delete_object", ociStorageDeleteObject))
+	_ = storageDict.SetKey(starlark.String("list_buckets"), starlark.NewBuiltin("list_buckets", ociStorageListBuckets))
+	_ = storageDict.SetKey(starlark.String("get_object"), starlark.NewBuiltin("get_object", ociStorageGetObject))
+	_ = storageDict.SetKey(starlark.String("put_object"), starlark.NewBuiltin("put_object", ociStoragePutObject))
+	_ = storageDict.SetKey(starlark.String("delete_object"), starlark.NewBuiltin("delete_object", ociStorageDeleteObject))
 
 	ociDict := starlark.NewDict(2)
-	ociDict.SetKey(starlark.String("compute"), computeDict)
-	ociDict.SetKey(starlark.String("storage"), storageDict)
+	_ = ociDict.SetKey(starlark.String("compute"), computeDict)
+	_ = ociDict.SetKey(starlark.String("storage"), storageDict)
 
 	env["oci"] = ociDict
 }

@@ -45,7 +45,7 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 
 // sourceShellProfiles sources /etc/profile and ~/.profile by running them
 // through the system sh and exporting resulting env vars into the current
-// process. This is the standard POSIX login-shell behaviour.
+// process. This is the standard POSIX login-shell behavior.
 func sourceShellProfiles() {
 	home, _ := os.UserHomeDir()
 

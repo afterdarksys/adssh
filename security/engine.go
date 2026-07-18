@@ -31,13 +31,13 @@ type EngineConfig struct {
 	// prepared query loaded).
 	RequirePolicy bool
 
-	// AuditLogPath, when non-empty, initialises the flat audit logger at that
+	// AuditLogPath, when non-empty, initializes the flat audit logger at that
 	// path. AuditLogURL/AuditLogToken configure the optional remote SIEM sink.
 	AuditLogPath  string
 	AuditLogURL   string
 	AuditLogToken string
 
-	// ChainPath/ChainKeyPath/SessionID initialise the HMAC hash-chain ledger.
+	// ChainPath/ChainKeyPath/SessionID initialize the HMAC hash-chain ledger.
 	// ChainPath empty leaves the chain uninitialised (AppendChain is a no-op).
 	ChainPath    string
 	ChainKeyPath string

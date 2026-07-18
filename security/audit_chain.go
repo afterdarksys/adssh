@@ -16,37 +16,37 @@ import (
 )
 
 // ChainEntry is one line in the audit ledger.
-// It is serialised as a single JSON object per line.
+// It is serialized as a single JSON object per line.
 type ChainEntry struct {
-	Seq       int64   `json:"seq"`
-	Timestamp string  `json:"ts"`                  // RFC3339Nano UTC
-	SessionID string  `json:"session"`
-	User      string  `json:"user"`
-	Hostname  string  `json:"host"`
-	Type      string  `json:"type"`                // "cmd", "policy", "event", "4eyes", "cm"
-	Command   string  `json:"cmd,omitempty"`
-	Source    string  `json:"source,omitempty"`
-	Allowed   *bool   `json:"allowed,omitempty"`
-	Reason    string  `json:"reason,omitempty"`
-	ChangeID  string  `json:"change_id,omitempty"` // CM ticket if set
-	PrevHash  string  `json:"prev_hash"`
-	Hash      string  `json:"hash"`
+	Seq       int64  `json:"seq"`
+	Timestamp string `json:"ts"` // RFC3339Nano UTC
+	SessionID string `json:"session"`
+	User      string `json:"user"`
+	Hostname  string `json:"host"`
+	Type      string `json:"type"` // "cmd", "policy", "event", "4eyes", "cm"
+	Command   string `json:"cmd,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Allowed   *bool  `json:"allowed,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	ChangeID  string `json:"change_id,omitempty"` // CM ticket if set
+	PrevHash  string `json:"prev_hash"`
+	Hash      string `json:"hash"`
 }
 
 // chainEntryForHash is ChainEntry without the Hash field, used for HMAC computation.
 type chainEntryForHash struct {
-	Seq       int64   `json:"seq"`
-	Timestamp string  `json:"ts"`
-	SessionID string  `json:"session"`
-	User      string  `json:"user"`
-	Hostname  string  `json:"host"`
-	Type      string  `json:"type"`
-	Command   string  `json:"cmd,omitempty"`
-	Source    string  `json:"source,omitempty"`
-	Allowed   *bool   `json:"allowed,omitempty"`
-	Reason    string  `json:"reason,omitempty"`
-	ChangeID  string  `json:"change_id,omitempty"`
-	PrevHash  string  `json:"prev_hash"`
+	Seq       int64  `json:"seq"`
+	Timestamp string `json:"ts"`
+	SessionID string `json:"session"`
+	User      string `json:"user"`
+	Hostname  string `json:"host"`
+	Type      string `json:"type"`
+	Command   string `json:"cmd,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Allowed   *bool  `json:"allowed,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	ChangeID  string `json:"change_id,omitempty"`
+	PrevHash  string `json:"prev_hash"`
 }
 
 // InitChain sets the ledger path, loads or creates the HMAC key, and sets the session ID.
@@ -207,8 +207,12 @@ func (e *Engine) AppendChain(entry ChainEntry) {
 		return
 	}
 	defer f.Close()
-	f.Write(data)
-	f.Write([]byte("\n"))
+	if _, err := f.Write(data); err != nil {
+		return
+	}
+	if _, err := f.Write([]byte("\n")); err != nil {
+		return
+	}
 }
 
 // AppendChain appends a new entry to the HMAC chain ledger.
@@ -233,7 +237,7 @@ func (e *Engine) VerifyChain(path string) (ok bool, badSeq int64, err error) {
 	e.chainMu.Unlock()
 
 	if key == nil {
-		return false, -1, fmt.Errorf("chain not initialised")
+		return false, -1, fmt.Errorf("chain not initialized")
 	}
 
 	var prev string

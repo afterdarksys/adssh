@@ -62,7 +62,7 @@ func handleContainerExec() server.ToolHandlerFunc {
 		if pullErr != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("image pull failed: %v", pullErr)), nil
 		}
-		io.Copy(io.Discard, rc)
+		_, _ = io.Copy(io.Discard, rc) // best-effort: draining pull progress stream
 		rc.Close()
 
 		start := time.Now()
@@ -81,7 +81,7 @@ func handleContainerExec() server.ToolHandlerFunc {
 		}
 
 		if err := cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-			cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true}) // best-effort cleanup
 			return mcp.NewToolResultError(fmt.Sprintf("container start error: %v", err)), nil
 		}
 
@@ -90,7 +90,7 @@ func handleContainerExec() server.ToolHandlerFunc {
 		select {
 		case err := <-errCh:
 			if err != nil {
-				cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+				_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true}) // best-effort cleanup
 				return mcp.NewToolResultError(fmt.Sprintf("container wait error: %v", err)), nil
 			}
 		case status := <-statusCh:
@@ -100,17 +100,19 @@ func handleContainerExec() server.ToolHandlerFunc {
 		// Capture logs
 		logReader, err := cli.ContainerLogs(ctx, resp.ID, container.LogsOptions{ShowStdout: true, ShowStderr: true})
 		if err != nil {
-			cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+			_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true}) // best-effort cleanup
 			return mcp.NewToolResultError(fmt.Sprintf("logs error: %v", err)), nil
 		}
 		var stdout, stderr bytes.Buffer
-		stdcopy.StdCopy(&stdout, &stderr, logReader)
+		if _, err := stdcopy.StdCopy(&stdout, &stderr, logReader); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh-mcp: container_exec: log capture incomplete for %s: %v\n", resp.ID, err)
+		}
 		logReader.Close()
 
 		durationMs := time.Since(start).Milliseconds()
 
 		// Remove container
-		cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true}) // best-effort cleanup
 
 		// Write audit record (same JSONL format as starlarkext/containers.go)
 		auditRec := map[string]interface{}{
@@ -126,9 +128,13 @@ func handleContainerExec() server.ToolHandlerFunc {
 		}
 		home, _ := os.UserHomeDir()
 		auditPath := filepath.Join(home, ".adssh", "container_audit.jsonl")
-		os.MkdirAll(filepath.Dir(auditPath), 0700)
+		if err := os.MkdirAll(filepath.Dir(auditPath), 0700); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh-mcp: container_exec: failed to create audit dir: %v\n", err)
+		}
 		if f, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); err == nil {
-			json.NewEncoder(f).Encode(auditRec)
+			if err := json.NewEncoder(f).Encode(auditRec); err != nil {
+				fmt.Fprintf(os.Stderr, "adssh-mcp: container_exec: failed to write audit record: %v\n", err)
+			}
 			f.Close()
 		}
 

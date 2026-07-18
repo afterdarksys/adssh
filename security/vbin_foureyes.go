@@ -23,8 +23,10 @@ import (
 //	4eyes test <command>                                    — dry-run: would this require approval?
 type fourEyesBinary struct{}
 
-func (fourEyesBinary) Name() string        { return "4eyes" }
-func (fourEyesBinary) Description() string { return "4-eyes dual-approval gate — SOX/PCI/FedRAMP compliant command hold" }
+func (fourEyesBinary) Name() string { return "4eyes" }
+func (fourEyesBinary) Description() string {
+	return "4-eyes dual-approval gate — SOX/PCI/FedRAMP compliant command hold"
+}
 func (fourEyesBinary) Usage() string {
 	return "4eyes <add|remove|list|approve|deny|pending|test> [args]"
 }

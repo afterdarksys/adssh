@@ -11,9 +11,11 @@ import (
 
 type grantBinary struct{}
 
-func (grantBinary) Name() string        { return "grant" }
-func (grantBinary) Description() string { return "Role escalation — request or drop a temporary role for the current session" }
-func (grantBinary) Usage() string       { return "grant <request|drop> <role>" }
+func (grantBinary) Name() string { return "grant" }
+func (grantBinary) Description() string {
+	return "Role escalation — request or drop a temporary role for the current session"
+}
+func (grantBinary) Usage() string { return "grant <request|drop> <role>" }
 
 func (grantBinary) Run(ctx context.Context, args []string) error {
 	if len(args) < 3 {

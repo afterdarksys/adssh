@@ -51,46 +51,46 @@ import (
 //	k8s.events.list(ns="default")
 func SetupK8sAPI(env starlark.StringDict) {
 	podsDict := starlark.NewDict(4)
-	podsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sPodsList))
-	podsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sPodsGet))
-	podsDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", k8sPodsDelete))
-	podsDict.SetKey(starlark.String("logs"), starlark.NewBuiltin("logs", k8sPodsLogs))
+	_ = podsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sPodsList))
+	_ = podsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sPodsGet))
+	_ = podsDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", k8sPodsDelete))
+	_ = podsDict.SetKey(starlark.String("logs"), starlark.NewBuiltin("logs", k8sPodsLogs))
 
 	deploymentsDict := starlark.NewDict(4)
-	deploymentsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sDeploymentsList))
-	deploymentsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sDeploymentsGet))
-	deploymentsDict.SetKey(starlark.String("scale"), starlark.NewBuiltin("scale", k8sDeploymentsScale))
-	deploymentsDict.SetKey(starlark.String("restart"), starlark.NewBuiltin("restart", k8sDeploymentsRestart))
+	_ = deploymentsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sDeploymentsList))
+	_ = deploymentsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sDeploymentsGet))
+	_ = deploymentsDict.SetKey(starlark.String("scale"), starlark.NewBuiltin("scale", k8sDeploymentsScale))
+	_ = deploymentsDict.SetKey(starlark.String("restart"), starlark.NewBuiltin("restart", k8sDeploymentsRestart))
 
 	servicesDict := starlark.NewDict(2)
-	servicesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sServicesList))
-	servicesDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sServicesGet))
+	_ = servicesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sServicesList))
+	_ = servicesDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sServicesGet))
 
 	namespacesDict := starlark.NewDict(3)
-	namespacesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sNamespacesList))
-	namespacesDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", k8sNamespacesCreate))
-	namespacesDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", k8sNamespacesDelete))
+	_ = namespacesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sNamespacesList))
+	_ = namespacesDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", k8sNamespacesCreate))
+	_ = namespacesDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", k8sNamespacesDelete))
 
 	configmapsDict := starlark.NewDict(4)
-	configmapsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sConfigMapsList))
-	configmapsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sConfigMapsGet))
-	configmapsDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", k8sConfigMapsCreate))
-	configmapsDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", k8sConfigMapsDelete))
+	_ = configmapsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sConfigMapsList))
+	_ = configmapsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", k8sConfigMapsGet))
+	_ = configmapsDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", k8sConfigMapsCreate))
+	_ = configmapsDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", k8sConfigMapsDelete))
 
 	nodesDict := starlark.NewDict(1)
-	nodesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sNodesList))
+	_ = nodesDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sNodesList))
 
 	eventsDict := starlark.NewDict(1)
-	eventsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sEventsList))
+	_ = eventsDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", k8sEventsList))
 
 	k8sDict := starlark.NewDict(7)
-	k8sDict.SetKey(starlark.String("pods"), podsDict)
-	k8sDict.SetKey(starlark.String("deployments"), deploymentsDict)
-	k8sDict.SetKey(starlark.String("services"), servicesDict)
-	k8sDict.SetKey(starlark.String("namespaces"), namespacesDict)
-	k8sDict.SetKey(starlark.String("configmaps"), configmapsDict)
-	k8sDict.SetKey(starlark.String("nodes"), nodesDict)
-	k8sDict.SetKey(starlark.String("events"), eventsDict)
+	_ = k8sDict.SetKey(starlark.String("pods"), podsDict)
+	_ = k8sDict.SetKey(starlark.String("deployments"), deploymentsDict)
+	_ = k8sDict.SetKey(starlark.String("services"), servicesDict)
+	_ = k8sDict.SetKey(starlark.String("namespaces"), namespacesDict)
+	_ = k8sDict.SetKey(starlark.String("configmaps"), configmapsDict)
+	_ = k8sDict.SetKey(starlark.String("nodes"), nodesDict)
+	_ = k8sDict.SetKey(starlark.String("events"), eventsDict)
 	env["k8s"] = k8sDict
 }
 
@@ -149,7 +149,7 @@ func k8sPodsList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 	}
 	result := starlark.NewList(nil)
 	for _, pod := range list.Items {
-		result.Append(k8sPodToDict(&pod))
+		_ = result.Append(k8sPodToDict(&pod))
 	}
 	return result, nil
 }
@@ -193,7 +193,7 @@ func k8sPodsDelete(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple,
 
 func k8sPodsLogs(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var ns, name, container, kubeconfig string
-	var tail int = 100
+	var tail = 100
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs,
 		"ns?", &ns, "name", &name, "tail?", &tail, "container?", &container, "kubeconfig?", &kubeconfig); err != nil {
 		return nil, err
@@ -224,17 +224,17 @@ func k8sPodsLogs(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, k
 
 func k8sPodToDict(pod *corev1.Pod) *starlark.Dict {
 	d := starlark.NewDict(7)
-	d.SetKey(starlark.String("name"), starlark.String(pod.Name))
-	d.SetKey(starlark.String("namespace"), starlark.String(pod.Namespace))
-	d.SetKey(starlark.String("phase"), starlark.String(string(pod.Status.Phase)))
-	d.SetKey(starlark.String("node"), starlark.String(pod.Spec.NodeName))
-	d.SetKey(starlark.String("ip"), starlark.String(pod.Status.PodIP))
+	_ = d.SetKey(starlark.String("name"), starlark.String(pod.Name))
+	_ = d.SetKey(starlark.String("namespace"), starlark.String(pod.Namespace))
+	_ = d.SetKey(starlark.String("phase"), starlark.String(string(pod.Status.Phase)))
+	_ = d.SetKey(starlark.String("node"), starlark.String(pod.Spec.NodeName))
+	_ = d.SetKey(starlark.String("ip"), starlark.String(pod.Status.PodIP))
 	containers := starlark.NewList(nil)
 	for _, c := range pod.Spec.Containers {
-		containers.Append(starlark.String(c.Name))
+		_ = containers.Append(starlark.String(c.Name))
 	}
-	d.SetKey(starlark.String("containers"), containers)
-	d.SetKey(starlark.String("created_at"), starlark.String(pod.CreationTimestamp.UTC().Format(time.RFC3339)))
+	_ = d.SetKey(starlark.String("containers"), containers)
+	_ = d.SetKey(starlark.String("created_at"), starlark.String(pod.CreationTimestamp.UTC().Format(time.RFC3339)))
 	return d
 }
 
@@ -259,18 +259,18 @@ func k8sDeploymentsList(_ *starlark.Thread, b *starlark.Builtin, args starlark.T
 	result := starlark.NewList(nil)
 	for _, dep := range list.Items {
 		d := starlark.NewDict(7)
-		d.SetKey(starlark.String("name"), starlark.String(dep.Name))
-		d.SetKey(starlark.String("namespace"), starlark.String(dep.Namespace))
+		_ = d.SetKey(starlark.String("name"), starlark.String(dep.Name))
+		_ = d.SetKey(starlark.String("namespace"), starlark.String(dep.Namespace))
 		var desired int32
 		if dep.Spec.Replicas != nil {
 			desired = *dep.Spec.Replicas
 		}
-		d.SetKey(starlark.String("replicas"), starlark.MakeInt64(int64(desired)))
-		d.SetKey(starlark.String("ready"), starlark.MakeInt64(int64(dep.Status.ReadyReplicas)))
-		d.SetKey(starlark.String("available"), starlark.MakeInt64(int64(dep.Status.AvailableReplicas)))
-		d.SetKey(starlark.String("updated"), starlark.MakeInt64(int64(dep.Status.UpdatedReplicas)))
-		d.SetKey(starlark.String("created_at"), starlark.String(dep.CreationTimestamp.UTC().Format(time.RFC3339)))
-		result.Append(d)
+		_ = d.SetKey(starlark.String("replicas"), starlark.MakeInt64(int64(desired)))
+		_ = d.SetKey(starlark.String("ready"), starlark.MakeInt64(int64(dep.Status.ReadyReplicas)))
+		_ = d.SetKey(starlark.String("available"), starlark.MakeInt64(int64(dep.Status.AvailableReplicas)))
+		_ = d.SetKey(starlark.String("updated"), starlark.MakeInt64(int64(dep.Status.UpdatedReplicas)))
+		_ = d.SetKey(starlark.String("created_at"), starlark.String(dep.CreationTimestamp.UTC().Format(time.RFC3339)))
+		_ = result.Append(d)
 	}
 	return result, nil
 }
@@ -292,19 +292,19 @@ func k8sDeploymentsGet(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 		return nil, fmt.Errorf("k8s.deployments.get: %v", err)
 	}
 	d := starlark.NewDict(7)
-	d.SetKey(starlark.String("name"), starlark.String(dep.Name))
-	d.SetKey(starlark.String("namespace"), starlark.String(dep.Namespace))
+	_ = d.SetKey(starlark.String("name"), starlark.String(dep.Name))
+	_ = d.SetKey(starlark.String("namespace"), starlark.String(dep.Namespace))
 	var desired int32
 	if dep.Spec.Replicas != nil {
 		desired = *dep.Spec.Replicas
 	}
-	d.SetKey(starlark.String("replicas"), starlark.MakeInt64(int64(desired)))
-	d.SetKey(starlark.String("ready"), starlark.MakeInt64(int64(dep.Status.ReadyReplicas)))
-	d.SetKey(starlark.String("available"), starlark.MakeInt64(int64(dep.Status.AvailableReplicas)))
-	d.SetKey(starlark.String("updated"), starlark.MakeInt64(int64(dep.Status.UpdatedReplicas)))
+	_ = d.SetKey(starlark.String("replicas"), starlark.MakeInt64(int64(desired)))
+	_ = d.SetKey(starlark.String("ready"), starlark.MakeInt64(int64(dep.Status.ReadyReplicas)))
+	_ = d.SetKey(starlark.String("available"), starlark.MakeInt64(int64(dep.Status.AvailableReplicas)))
+	_ = d.SetKey(starlark.String("updated"), starlark.MakeInt64(int64(dep.Status.UpdatedReplicas)))
 	// First container image
 	if len(dep.Spec.Template.Spec.Containers) > 0 {
-		d.SetKey(starlark.String("image"), starlark.String(dep.Spec.Template.Spec.Containers[0].Image))
+		_ = d.SetKey(starlark.String("image"), starlark.String(dep.Spec.Template.Spec.Containers[0].Image))
 	}
 	return d, nil
 }
@@ -380,7 +380,7 @@ func k8sServicesList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tupl
 	}
 	result := starlark.NewList(nil)
 	for _, svc := range list.Items {
-		result.Append(k8sSvcToDict(&svc))
+		_ = result.Append(k8sSvcToDict(&svc))
 	}
 	return result, nil
 }
@@ -406,19 +406,19 @@ func k8sServicesGet(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple
 
 func k8sSvcToDict(svc *corev1.Service) *starlark.Dict {
 	d := starlark.NewDict(5)
-	d.SetKey(starlark.String("name"), starlark.String(svc.Name))
-	d.SetKey(starlark.String("namespace"), starlark.String(svc.Namespace))
-	d.SetKey(starlark.String("type"), starlark.String(string(svc.Spec.Type)))
-	d.SetKey(starlark.String("cluster_ip"), starlark.String(svc.Spec.ClusterIP))
+	_ = d.SetKey(starlark.String("name"), starlark.String(svc.Name))
+	_ = d.SetKey(starlark.String("namespace"), starlark.String(svc.Namespace))
+	_ = d.SetKey(starlark.String("type"), starlark.String(string(svc.Spec.Type)))
+	_ = d.SetKey(starlark.String("cluster_ip"), starlark.String(svc.Spec.ClusterIP))
 	ports := starlark.NewList(nil)
 	for _, p := range svc.Spec.Ports {
 		pd := starlark.NewDict(3)
-		pd.SetKey(starlark.String("port"), starlark.MakeInt64(int64(p.Port)))
-		pd.SetKey(starlark.String("protocol"), starlark.String(string(p.Protocol)))
-		pd.SetKey(starlark.String("name"), starlark.String(p.Name))
-		ports.Append(pd)
+		_ = pd.SetKey(starlark.String("port"), starlark.MakeInt64(int64(p.Port)))
+		_ = pd.SetKey(starlark.String("protocol"), starlark.String(string(p.Protocol)))
+		_ = pd.SetKey(starlark.String("name"), starlark.String(p.Name))
+		_ = ports.Append(pd)
 	}
-	d.SetKey(starlark.String("ports"), ports)
+	_ = d.SetKey(starlark.String("ports"), ports)
 	return d
 }
 
@@ -439,7 +439,7 @@ func k8sNamespacesList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 	}
 	result := starlark.NewList(nil)
 	for _, ns := range list.Items {
-		result.Append(makeDict("name", ns.Name, "status", string(ns.Status.Phase)))
+		_ = result.Append(makeDict("name", ns.Name, "status", string(ns.Status.Phase)))
 	}
 	return result, nil
 }
@@ -495,7 +495,7 @@ func k8sConfigMapsList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 	}
 	result := starlark.NewList(nil)
 	for _, cm := range list.Items {
-		result.Append(makeDict("name", cm.Name, "namespace", cm.Namespace, "keys", keysOf(cm.Data)))
+		_ = result.Append(makeDict("name", cm.Name, "namespace", cm.Namespace, "keys", keysOf(cm.Data)))
 	}
 	return result, nil
 }
@@ -517,13 +517,13 @@ func k8sConfigMapsGet(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tup
 		return nil, fmt.Errorf("k8s.configmaps.get: %v", err)
 	}
 	d := starlark.NewDict(3)
-	d.SetKey(starlark.String("name"), starlark.String(cm.Name))
-	d.SetKey(starlark.String("namespace"), starlark.String(cm.Namespace))
+	_ = d.SetKey(starlark.String("name"), starlark.String(cm.Name))
+	_ = d.SetKey(starlark.String("namespace"), starlark.String(cm.Namespace))
 	data := starlark.NewDict(len(cm.Data))
 	for k, v := range cm.Data {
-		data.SetKey(starlark.String(k), starlark.String(v))
+		_ = data.SetKey(starlark.String(k), starlark.String(v))
 	}
-	d.SetKey(starlark.String("data"), data)
+	_ = d.SetKey(starlark.String("data"), data)
 	return d, nil
 }
 
@@ -608,12 +608,12 @@ func k8sNodesList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, 
 			}
 		}
 		d := starlark.NewDict(5)
-		d.SetKey(starlark.String("name"), starlark.String(node.Name))
-		d.SetKey(starlark.String("status"), starlark.String(ready))
-		d.SetKey(starlark.String("version"), starlark.String(node.Status.NodeInfo.KubeletVersion))
-		d.SetKey(starlark.String("os"), starlark.String(node.Status.NodeInfo.OSImage))
-		d.SetKey(starlark.String("arch"), starlark.String(node.Status.NodeInfo.Architecture))
-		result.Append(d)
+		_ = d.SetKey(starlark.String("name"), starlark.String(node.Name))
+		_ = d.SetKey(starlark.String("status"), starlark.String(ready))
+		_ = d.SetKey(starlark.String("version"), starlark.String(node.Status.NodeInfo.KubeletVersion))
+		_ = d.SetKey(starlark.String("os"), starlark.String(node.Status.NodeInfo.OSImage))
+		_ = d.SetKey(starlark.String("arch"), starlark.String(node.Status.NodeInfo.Architecture))
+		_ = result.Append(d)
 	}
 	return result, nil
 }
@@ -639,13 +639,13 @@ func k8sEventsList(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple,
 	result := starlark.NewList(nil)
 	for _, ev := range list.Items {
 		d := starlark.NewDict(6)
-		d.SetKey(starlark.String("name"), starlark.String(ev.InvolvedObject.Name))
-		d.SetKey(starlark.String("kind"), starlark.String(ev.InvolvedObject.Kind))
-		d.SetKey(starlark.String("reason"), starlark.String(ev.Reason))
-		d.SetKey(starlark.String("message"), starlark.String(ev.Message))
-		d.SetKey(starlark.String("type"), starlark.String(ev.Type))
-		d.SetKey(starlark.String("count"), starlark.MakeInt64(int64(ev.Count)))
-		result.Append(d)
+		_ = d.SetKey(starlark.String("name"), starlark.String(ev.InvolvedObject.Name))
+		_ = d.SetKey(starlark.String("kind"), starlark.String(ev.InvolvedObject.Kind))
+		_ = d.SetKey(starlark.String("reason"), starlark.String(ev.Reason))
+		_ = d.SetKey(starlark.String("message"), starlark.String(ev.Message))
+		_ = d.SetKey(starlark.String("type"), starlark.String(ev.Type))
+		_ = d.SetKey(starlark.String("count"), starlark.MakeInt64(int64(ev.Count)))
+		_ = result.Append(d)
 	}
 	return result, nil
 }

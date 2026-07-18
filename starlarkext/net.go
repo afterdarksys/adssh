@@ -59,7 +59,7 @@ func builtinTCPSend(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 	}
 
 	// Read response
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // best-effort: a failed deadline surfaces on the read itself
 	resp, _ := io.ReadAll(conn)
 	return starlark.String(string(resp)), nil
 }
@@ -80,7 +80,7 @@ func builtinDial(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tup
 
 func builtinDialTLS(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var addr string
-	var skipVerify bool = false
+	var skipVerify bool
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr, "skip_verify?", &skipVerify); err != nil {
 		return nil, err
 	}

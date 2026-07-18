@@ -41,9 +41,9 @@ func parseSyslogFacility(s string) syslog.Priority {
 	}
 }
 
-// InitAuditLog initialises the audit logger at the given path and sets up remote SIEM.
+// InitAuditLog initializes the audit logger at the given path and sets up remote SIEM.
 func (e *Engine) InitAuditLog(path, url, token string) {
-	// Initialise syslog writer if ADSSH_SYSLOG is set.
+	// Initialize syslog writer if ADSSH_SYSLOG is set.
 	if syslogEnv := os.Getenv("ADSSH_SYSLOG"); syslogEnv != "" {
 		facility := parseSyslogFacility(syslogEnv)
 		w, err := syslog.New(facility|syslog.LOG_INFO, "adssh")
@@ -123,7 +123,12 @@ func (e *Engine) dispatchAuditEvent(payload map[string]interface{}) {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		client := &http.Client{Timeout: 5 * time.Second}
-		client.Do(req)
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: audit webhook POST to %s failed: %v\n", url, err)
+			return
+		}
+		resp.Body.Close()
 	}()
 }
 
@@ -156,10 +161,12 @@ func (e *Engine) LogEvent(event string) {
 		e.auditLogger.Println(event)
 	}
 	if e.syslogWriter != nil {
+		// Best-effort: syslog is a secondary sink. The flat audit logger and
+		// hash chain (below) are the authoritative record regardless of outcome.
 		if isSyslogWarning(event) {
-			e.syslogWriter.Warning(event)
+			_ = e.syslogWriter.Warning(event)
 		} else {
-			e.syslogWriter.Info(event)
+			_ = e.syslogWriter.Info(event)
 		}
 	}
 	e.AppendChain(ChainEntry{

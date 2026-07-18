@@ -45,35 +45,35 @@ func ExpandAWSAPI(env starlark.StringDict) {
 	}
 
 	rdsDict := starlark.NewDict(4)
-	rdsDict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", awsRDSListInstances))
-	rdsDict.SetKey(starlark.String("describe_instance"), starlark.NewBuiltin("describe_instance", awsRDSDescribeInstance))
-	rdsDict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", awsRDSStartInstance))
-	rdsDict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", awsRDSStopInstance))
-	awsDict.SetKey(starlark.String("rds"), rdsDict)
+	_ = rdsDict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", awsRDSListInstances))
+	_ = rdsDict.SetKey(starlark.String("describe_instance"), starlark.NewBuiltin("describe_instance", awsRDSDescribeInstance))
+	_ = rdsDict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", awsRDSStartInstance))
+	_ = rdsDict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", awsRDSStopInstance))
+	_ = awsDict.SetKey(starlark.String("rds"), rdsDict)
 
 	eksDict := starlark.NewDict(2)
-	eksDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", awsEKSListClusters))
-	eksDict.SetKey(starlark.String("describe_cluster"), starlark.NewBuiltin("describe_cluster", awsEKSDescribeCluster))
-	awsDict.SetKey(starlark.String("eks"), eksDict)
+	_ = eksDict.SetKey(starlark.String("list_clusters"), starlark.NewBuiltin("list_clusters", awsEKSListClusters))
+	_ = eksDict.SetKey(starlark.String("describe_cluster"), starlark.NewBuiltin("describe_cluster", awsEKSDescribeCluster))
+	_ = awsDict.SetKey(starlark.String("eks"), eksDict)
 
 	iamDict := starlark.NewDict(3)
-	iamDict.SetKey(starlark.String("list_users"), starlark.NewBuiltin("list_users", awsIAMListUsers))
-	iamDict.SetKey(starlark.String("list_roles"), starlark.NewBuiltin("list_roles", awsIAMListRoles))
-	iamDict.SetKey(starlark.String("get_caller_identity"), starlark.NewBuiltin("get_caller_identity", awsIAMGetCallerIdentity))
-	awsDict.SetKey(starlark.String("iam"), iamDict)
+	_ = iamDict.SetKey(starlark.String("list_users"), starlark.NewBuiltin("list_users", awsIAMListUsers))
+	_ = iamDict.SetKey(starlark.String("list_roles"), starlark.NewBuiltin("list_roles", awsIAMListRoles))
+	_ = iamDict.SetKey(starlark.String("get_caller_identity"), starlark.NewBuiltin("get_caller_identity", awsIAMGetCallerIdentity))
+	_ = awsDict.SetKey(starlark.String("iam"), iamDict)
 
 	sqsDict := starlark.NewDict(4)
-	sqsDict.SetKey(starlark.String("list_queues"), starlark.NewBuiltin("list_queues", awsSQSListQueues))
-	sqsDict.SetKey(starlark.String("send_message"), starlark.NewBuiltin("send_message", awsSQSSendMessage))
-	sqsDict.SetKey(starlark.String("receive_messages"), starlark.NewBuiltin("receive_messages", awsSQSReceiveMessages))
-	sqsDict.SetKey(starlark.String("delete_message"), starlark.NewBuiltin("delete_message", awsSQSDeleteMessage))
-	awsDict.SetKey(starlark.String("sqs"), sqsDict)
+	_ = sqsDict.SetKey(starlark.String("list_queues"), starlark.NewBuiltin("list_queues", awsSQSListQueues))
+	_ = sqsDict.SetKey(starlark.String("send_message"), starlark.NewBuiltin("send_message", awsSQSSendMessage))
+	_ = sqsDict.SetKey(starlark.String("receive_messages"), starlark.NewBuiltin("receive_messages", awsSQSReceiveMessages))
+	_ = sqsDict.SetKey(starlark.String("delete_message"), starlark.NewBuiltin("delete_message", awsSQSDeleteMessage))
+	_ = awsDict.SetKey(starlark.String("sqs"), sqsDict)
 
 	ecrDict := starlark.NewDict(3)
-	ecrDict.SetKey(starlark.String("list_repos"), starlark.NewBuiltin("list_repos", awsECRListRepos))
-	ecrDict.SetKey(starlark.String("get_login_token"), starlark.NewBuiltin("get_login_token", awsECRGetLoginToken))
-	ecrDict.SetKey(starlark.String("describe_images"), starlark.NewBuiltin("describe_images", awsECRDescribeImages))
-	awsDict.SetKey(starlark.String("ecr"), ecrDict)
+	_ = ecrDict.SetKey(starlark.String("list_repos"), starlark.NewBuiltin("list_repos", awsECRListRepos))
+	_ = ecrDict.SetKey(starlark.String("get_login_token"), starlark.NewBuiltin("get_login_token", awsECRGetLoginToken))
+	_ = ecrDict.SetKey(starlark.String("describe_images"), starlark.NewBuiltin("describe_images", awsECRDescribeImages))
+	_ = awsDict.SetKey(starlark.String("ecr"), ecrDict)
 }
 
 // ── RDS ───────────────────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ func awsRDSListInstances(_ *starlark.Thread, b *starlark.Builtin, args starlark.
 	}
 	result := starlark.NewList(nil)
 	for _, db := range out.DBInstances {
-		result.Append(rdsInstanceToDict(db))
+		_ = result.Append(rdsInstanceToDict(db))
 	}
 	return result, nil
 }
@@ -220,7 +220,7 @@ func awsIAMListUsers(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tupl
 	}
 	result := starlark.NewList(nil)
 	for _, u := range out.Users {
-		result.Append(makeDict("name", strDeref(u.UserName), "arn", strDeref(u.Arn), "id", strDeref(u.UserId)))
+		_ = result.Append(makeDict("name", strDeref(u.UserName), "arn", strDeref(u.Arn), "id", strDeref(u.UserId)))
 	}
 	return result, nil
 }
@@ -236,7 +236,7 @@ func awsIAMListRoles(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tupl
 	}
 	result := starlark.NewList(nil)
 	for _, r := range out.Roles {
-		result.Append(makeDict("name", strDeref(r.RoleName), "arn", strDeref(r.Arn), "id", strDeref(r.RoleId)))
+		_ = result.Append(makeDict("name", strDeref(r.RoleName), "arn", strDeref(r.Arn), "id", strDeref(r.RoleId)))
 	}
 	return result, nil
 }
@@ -300,7 +300,7 @@ func awsSQSSendMessage(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tu
 
 func awsSQSReceiveMessages(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var url, region string
-	var max int = 10
+	var max = 10
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "url", &url, "max?", &max, "region?", &region); err != nil {
 		return nil, err
 	}
@@ -317,7 +317,7 @@ func awsSQSReceiveMessages(_ *starlark.Thread, b *starlark.Builtin, args starlar
 	}
 	result := starlark.NewList(nil)
 	for _, m := range out.Messages {
-		result.Append(makeDict("id", strDeref(m.MessageId), "body", strDeref(m.Body), "handle", strDeref(m.ReceiptHandle)))
+		_ = result.Append(makeDict("id", strDeref(m.MessageId), "body", strDeref(m.Body), "handle", strDeref(m.ReceiptHandle)))
 	}
 	return result, nil
 }
@@ -357,7 +357,7 @@ func awsECRListRepos(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tupl
 	}
 	result := starlark.NewList(nil)
 	for _, r := range out.Repositories {
-		result.Append(makeDict("name", strDeref(r.RepositoryName), "uri", strDeref(r.RepositoryUri), "arn", strDeref(r.RepositoryArn)))
+		_ = result.Append(makeDict("name", strDeref(r.RepositoryName), "uri", strDeref(r.RepositoryUri), "arn", strDeref(r.RepositoryArn)))
 	}
 	return result, nil
 }
@@ -377,7 +377,7 @@ func awsECRGetLoginToken(_ *starlark.Thread, b *starlark.Builtin, args starlark.
 	}
 	result := starlark.NewList(nil)
 	for _, d := range out.AuthorizationData {
-		result.Append(makeDict("token", strDeref(d.AuthorizationToken), "endpoint", strDeref(d.ProxyEndpoint)))
+		_ = result.Append(makeDict("token", strDeref(d.AuthorizationToken), "endpoint", strDeref(d.ProxyEndpoint)))
 	}
 	return result, nil
 }
@@ -401,7 +401,7 @@ func awsECRDescribeImages(_ *starlark.Thread, b *starlark.Builtin, args starlark
 	for _, img := range out.ImageDetails {
 		tags := make([]string, len(img.ImageTags))
 		copy(tags, img.ImageTags)
-		result.Append(makeDict("digest", strDeref(img.ImageDigest), "tags", tags, "size", img.ImageSizeInBytes))
+		_ = result.Append(makeDict("digest", strDeref(img.ImageDigest), "tags", tags, "size", img.ImageSizeInBytes))
 	}
 	return result, nil
 }

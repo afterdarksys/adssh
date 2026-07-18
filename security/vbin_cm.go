@@ -12,8 +12,10 @@ import (
 // cmBinary implements the "cm" virtual binary for change-management operations.
 type cmBinary struct{}
 
-func (cmBinary) Name() string        { return "cm" }
-func (cmBinary) Description() string { return "Change management — associate session with an approved change ticket" }
+func (cmBinary) Name() string { return "cm" }
+func (cmBinary) Description() string {
+	return "Change management — associate session with an approved change ticket"
+}
 func (cmBinary) Usage() string {
 	return "cm <set|check|clear|status|require|providers> [args]"
 }

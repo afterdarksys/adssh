@@ -46,30 +46,30 @@ import (
 //	secrets.gcp.create(project="my-project", name="MY_SECRET", value="...")
 func SetupSecretsAPI(env starlark.StringDict) {
 	vaultDict := starlark.NewDict(4)
-	vaultDict.SetKey(starlark.String("read"), starlark.NewBuiltin("read", secretsVaultRead))
-	vaultDict.SetKey(starlark.String("write"), starlark.NewBuiltin("write", secretsVaultWrite))
-	vaultDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", secretsVaultList))
-	vaultDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", secretsVaultDelete))
+	_ = vaultDict.SetKey(starlark.String("read"), starlark.NewBuiltin("read", secretsVaultRead))
+	_ = vaultDict.SetKey(starlark.String("write"), starlark.NewBuiltin("write", secretsVaultWrite))
+	_ = vaultDict.SetKey(starlark.String("list"), starlark.NewBuiltin("list", secretsVaultList))
+	_ = vaultDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", secretsVaultDelete))
 
 	awsDict := starlark.NewDict(3)
-	awsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", secretsAWSGet))
-	awsDict.SetKey(starlark.String("put"), starlark.NewBuiltin("put", secretsAWSPut))
-	awsDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", secretsAWSDelete))
+	_ = awsDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", secretsAWSGet))
+	_ = awsDict.SetKey(starlark.String("put"), starlark.NewBuiltin("put", secretsAWSPut))
+	_ = awsDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", secretsAWSDelete))
 
 	azDict := starlark.NewDict(3)
-	azDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", secretsAzGet))
-	azDict.SetKey(starlark.String("set"), starlark.NewBuiltin("set", secretsAzSet))
-	azDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", secretsAzDelete))
+	_ = azDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", secretsAzGet))
+	_ = azDict.SetKey(starlark.String("set"), starlark.NewBuiltin("set", secretsAzSet))
+	_ = azDict.SetKey(starlark.String("delete"), starlark.NewBuiltin("delete", secretsAzDelete))
 
 	gcpDict := starlark.NewDict(2)
-	gcpDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", secretsGCPGet))
-	gcpDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", secretsGCPCreate))
+	_ = gcpDict.SetKey(starlark.String("get"), starlark.NewBuiltin("get", secretsGCPGet))
+	_ = gcpDict.SetKey(starlark.String("create"), starlark.NewBuiltin("create", secretsGCPCreate))
 
 	d := starlark.NewDict(4)
-	d.SetKey(starlark.String("vault"), vaultDict)
-	d.SetKey(starlark.String("aws"), awsDict)
-	d.SetKey(starlark.String("az"), azDict)
-	d.SetKey(starlark.String("gcp"), gcpDict)
+	_ = d.SetKey(starlark.String("vault"), vaultDict)
+	_ = d.SetKey(starlark.String("aws"), awsDict)
+	_ = d.SetKey(starlark.String("az"), azDict)
+	_ = d.SetKey(starlark.String("gcp"), gcpDict)
 	env["secrets"] = d
 }
 
@@ -349,7 +349,7 @@ func secretsGCPCreate(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tup
 	ctx := context.Background()
 	parent := fmt.Sprintf("projects/%s", project)
 	// Create the secret (may already exist — ignore error)
-	svc.Projects.Secrets.Create(parent, &gsmv1.Secret{
+	_, _ = svc.Projects.Secrets.Create(parent, &gsmv1.Secret{
 		Replication: &gsmv1.Replication{Automatic: &gsmv1.Automatic{}},
 	}).SecretId(name).Context(ctx).Do()
 

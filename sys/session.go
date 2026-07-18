@@ -26,7 +26,7 @@ func (b *OutputBroadcaster) Write(p []byte) (n int, err error) {
 	defer b.mu.Unlock()
 	for _, w := range b.writers {
 		// Ignore write errors to secondary listeners so we don't crash the main session
-		w.Write(p)
+		_, _ = w.Write(p) // best-effort
 	}
 	return len(p), nil
 }
@@ -55,8 +55,8 @@ type Session struct {
 	PTYMaster  *os.File
 	Out        *OutputBroadcaster
 
-	ctx        context.Context
-	cancel     context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func (s *Session) CancelCommand() {

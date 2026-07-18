@@ -203,8 +203,8 @@ func main() {
 				}
 				return starlark.None, nil
 			})
-			sysDict.SetKey(starlark.String("enable_ssh"), enableSSH)
-			sysDict.SetKey(starlark.String("disable_ssh"), disableSSH)
+			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSH)
+			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSH)
 		}
 	}
 

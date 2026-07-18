@@ -123,7 +123,7 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 				fmt.Fprintf(errOut, "Command error: %v\n", err)
 			}
 		}
-		
+
 		fmt.Fprintln(out, "\nPress Enter to return to menu...")
 		scanner.Scan()
 	}

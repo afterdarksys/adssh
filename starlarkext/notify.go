@@ -30,9 +30,9 @@ import (
 //	dedup_key = notify.pagerduty(summary="...", severity="warning", routing_key="...")
 func SetupNotifyAPI(env starlark.StringDict) {
 	d := starlark.NewDict(3)
-	d.SetKey(starlark.String("slack"), starlark.NewBuiltin("slack", notifySlack))
-	d.SetKey(starlark.String("webhook"), starlark.NewBuiltin("webhook", notifyWebhook))
-	d.SetKey(starlark.String("pagerduty"), starlark.NewBuiltin("pagerduty", notifyPagerDuty))
+	_ = d.SetKey(starlark.String("slack"), starlark.NewBuiltin("slack", notifySlack))
+	_ = d.SetKey(starlark.String("webhook"), starlark.NewBuiltin("webhook", notifyWebhook))
+	_ = d.SetKey(starlark.String("pagerduty"), starlark.NewBuiltin("pagerduty", notifyPagerDuty))
 	env["notify"] = d
 }
 
@@ -164,7 +164,9 @@ func notifyPagerDuty(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tupl
 		DedupKey string `json:"dedup_key"`
 		Message  string `json:"message"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("notify.pagerduty: decode response: %v", err)
+	}
 	if resp.StatusCode != http.StatusAccepted {
 		return nil, fmt.Errorf("notify.pagerduty: %s: %s", result.Status, result.Message)
 	}

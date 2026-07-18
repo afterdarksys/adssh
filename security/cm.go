@@ -79,10 +79,10 @@ func fetchServiceNow(id string) (*CMTicket, error) {
 
 	var envelope struct {
 		Result []struct {
-			Number      string `json:"number"`
-			ShortDesc   string `json:"short_description"`
-			State       string `json:"state"`
-			AssignedTo  struct {
+			Number     string `json:"number"`
+			ShortDesc  string `json:"short_description"`
+			State      string `json:"state"`
+			AssignedTo struct {
 				DisplayValue string `json:"display_value"`
 			} `json:"assigned_to"`
 			StartDate string `json:"start_date"`

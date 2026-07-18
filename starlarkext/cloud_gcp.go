@@ -28,19 +28,19 @@ import (
 // Credentials (~/.config/gcloud/application_default_credentials.json).
 func SetupGCPAPI(env starlark.StringDict) {
 	computeDict := starlark.NewDict(3)
-	computeDict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", gcpComputeListInstances))
-	computeDict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", gcpComputeStartInstance))
-	computeDict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", gcpComputeStopInstance))
+	_ = computeDict.SetKey(starlark.String("list_instances"), starlark.NewBuiltin("list_instances", gcpComputeListInstances))
+	_ = computeDict.SetKey(starlark.String("start_instance"), starlark.NewBuiltin("start_instance", gcpComputeStartInstance))
+	_ = computeDict.SetKey(starlark.String("stop_instance"), starlark.NewBuiltin("stop_instance", gcpComputeStopInstance))
 
 	storageDict := starlark.NewDict(4)
-	storageDict.SetKey(starlark.String("list_buckets"), starlark.NewBuiltin("list_buckets", gcpStorageListBuckets))
-	storageDict.SetKey(starlark.String("get_object"), starlark.NewBuiltin("get_object", gcpStorageGetObject))
-	storageDict.SetKey(starlark.String("put_object"), starlark.NewBuiltin("put_object", gcpStoragePutObject))
-	storageDict.SetKey(starlark.String("delete_object"), starlark.NewBuiltin("delete_object", gcpStorageDeleteObject))
+	_ = storageDict.SetKey(starlark.String("list_buckets"), starlark.NewBuiltin("list_buckets", gcpStorageListBuckets))
+	_ = storageDict.SetKey(starlark.String("get_object"), starlark.NewBuiltin("get_object", gcpStorageGetObject))
+	_ = storageDict.SetKey(starlark.String("put_object"), starlark.NewBuiltin("put_object", gcpStoragePutObject))
+	_ = storageDict.SetKey(starlark.String("delete_object"), starlark.NewBuiltin("delete_object", gcpStorageDeleteObject))
 
 	gcpDict := starlark.NewDict(2)
-	gcpDict.SetKey(starlark.String("compute"), computeDict)
-	gcpDict.SetKey(starlark.String("storage"), storageDict)
+	_ = gcpDict.SetKey(starlark.String("compute"), computeDict)
+	_ = gcpDict.SetKey(starlark.String("storage"), storageDict)
 
 	env["gcp"] = gcpDict
 }

@@ -48,14 +48,14 @@ func RunPackage(ctx context.Context, args []string) error {
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 	// Route output directly to the PTY foreground if running under mvdan/sh?
 	// But as a virtual binary returned by interceptor, mvdan/sh will wire it?
-	// Actually, the interceptor expects an error return, but wait: 
-	// How does a virtual binary output to the shell? 
+	// Actually, the interceptor expects an error return, but wait:
+	// How does a virtual binary output to the shell?
 	// The interceptor executes the command in place of the runner.
 	// But `interp.ExecHandler` expects the handler to DO the IO wiring!
 	// Let's wire to os.Stdout/os.Stderr for now. (Or we can just execute via mvdan/sh)
 	// Wait, we can just return a generated string and have the interceptor parse it?
 	// For simplicity, we just run exec.Command and return its output as an error if it fails.
-	
+
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
 		fmt.Print(string(out))

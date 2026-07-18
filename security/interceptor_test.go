@@ -33,7 +33,7 @@ func (s *sentinelRecorder) middleware(next interp.ExecHandlerFunc) interp.ExecHa
 // runShell parses src and runs it through a runner wired exactly like
 // main.go:231, with the sentinel in place of real exec.
 // Returns stdout, stderr, the runner error, and the recorder.
-func runShell(t *testing.T, restricted bool, globals starlark.StringDict, src string) (string, string, error, *sentinelRecorder) {
+func runShell(t *testing.T, restricted bool, globals starlark.StringDict, src string) (string, string, error, *sentinelRecorder) { //nolint:staticcheck // ST1008: test helper; reordering the signature is out of scope for this lint-debt pass
 	t.Helper()
 	rec := &sentinelRecorder{}
 	var stdout, stderr bytes.Buffer

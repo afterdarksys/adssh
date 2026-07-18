@@ -57,13 +57,13 @@ func (c *StarlarkConn) AttrNames() []string {
 }
 
 func (c *StarlarkConn) builtinRead(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var n int = 1024 // Default buffer size
+	var n = 1024 // Default buffer size
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "n?", &n); err != nil {
 		return nil, err
 	}
 
 	buf := make([]byte, n)
-	c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // best-effort: a failed deadline surfaces on the read itself
 	readBytes, err := c.Conn.Read(buf)
 	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("read error: %v", err)
@@ -73,7 +73,7 @@ func (c *StarlarkConn) builtinRead(thread *starlark.Thread, b *starlark.Builtin,
 }
 
 func (c *StarlarkConn) builtinReadAll(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // best-effort: a failed deadline surfaces on the read itself
 	data, err := io.ReadAll(c.Conn)
 	if err != nil {
 		return nil, fmt.Errorf("read_all error: %v", err)
@@ -87,7 +87,7 @@ func (c *StarlarkConn) builtinWrite(thread *starlark.Thread, b *starlark.Builtin
 		return nil, err
 	}
 
-	c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // best-effort: a failed deadline surfaces on the write itself
 	wroteBytes, err := c.Conn.Write([]byte(data))
 	if err != nil {
 		return nil, fmt.Errorf("write error: %v", err)

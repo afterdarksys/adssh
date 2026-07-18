@@ -110,8 +110,8 @@ func TestChainNeg_ForgedAppendDetected(t *testing.T) {
 		Hostname:  last.Hostname,
 		Type:      "cmd",
 		Command:   "forged-privilege-escalation",
-		PrevHash:  last.Hash,                       // links correctly...
-		Hash:      strings.Repeat("0", 64),         // ...but the hash is fabricated
+		PrevHash:  last.Hash,               // links correctly...
+		Hash:      strings.Repeat("0", 64), // ...but the hash is fabricated
 	}
 	lines = append(lines, marshalEntry(t, forged))
 	writeChainLines(t, ledger, lines)

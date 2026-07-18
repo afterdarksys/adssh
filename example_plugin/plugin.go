@@ -20,7 +20,7 @@ func (p *ExamplePlugin) Init(globals starlark.StringDict) error {
 	dict := starlark.NewDict(1)
 
 	// A high-performance native function exposed to Starlark
-	dict.SetKey(starlark.String("fibonacci"), starlark.NewBuiltin("fibonacci", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	_ = dict.SetKey(starlark.String("fibonacci"), starlark.NewBuiltin("fibonacci", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var n int
 		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "n", &n); err != nil {
 			return nil, err
@@ -33,7 +33,7 @@ func (p *ExamplePlugin) Init(globals starlark.StringDict) error {
 	// Inject into the global plugins registry to bypass Starlark parse-time static checks
 	if pluginsVal, ok := globals["plugins"]; ok {
 		if pluginsDict, ok := pluginsVal.(*starlark.Dict); ok {
-			pluginsDict.SetKey(starlark.String("math_accel"), dict)
+			_ = pluginsDict.SetKey(starlark.String("math_accel"), dict)
 		}
 	}
 	return nil

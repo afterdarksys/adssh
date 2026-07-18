@@ -17,8 +17,8 @@ import (
 //	template.render_file(path="/etc/adssh/tmpl.txt", data={})      → string
 func SetupTemplateAPI(env starlark.StringDict) {
 	d := starlark.NewDict(2)
-	d.SetKey(starlark.String("render"), starlark.NewBuiltin("render", templateRender))
-	d.SetKey(starlark.String("render_file"), starlark.NewBuiltin("render_file", templateRenderFile))
+	_ = d.SetKey(starlark.String("render"), starlark.NewBuiltin("render", templateRender))
+	_ = d.SetKey(starlark.String("render_file"), starlark.NewBuiltin("render_file", templateRenderFile))
 	env["template"] = d
 }
 

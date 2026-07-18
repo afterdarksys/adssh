@@ -1,7 +1,11 @@
 # golangci-lint configuration (v2 schema).
 # Deliberately modest: correctness-focused linters only, no style nits that
-# would drown the existing ~17k LOC in noise. The CI lint job runs this with
-# continue-on-error while the codebase is brought up to a clean baseline.
+# would drown the existing ~17k LOC in noise. errcheck/misspell/ineffassign are
+# blocking in CI (see .github/workflows/ci.yml); staticcheck's SA1019
+# (deprecation) diagnostics are advisory only — see the exclude-rule below —
+# because this repo intentionally keeps deprecated shims (e.g. security.LogCommand,
+# starlark.Eval/ExecFile, OPA v0 rego) until the Engine facade migration lands.
+# That migration is tracked separately; don't let it block unrelated CI runs.
 version: "2"
 
 run:
@@ -31,11 +35,27 @@ linters:
     paths:
       - vendor
       - third_party
+      # Locale/translation data may intentionally contain en-GB spellings;
+      # correcting them would corrupt translations.
+      - i18n
+      # e2e/ is out of scope for this lint-debt pass (tracked separately,
+      # same as the SA1019 exclude-rule below); don't let pre-existing
+      # findings there block the newly-blocking errcheck/misspell/ineffassign gate.
+      - e2e
     # Pragmatic presets: silence the extremely common (and low-value) unchecked
     # errors on fmt.Fprint*/(*bytes.Buffer).Write and similar.
     presets:
       - common-false-positives
       - std-error-handling
+    rules:
+      # SA1019 (deprecation) is advisory debt tracked separately (kept shims:
+      # security.LogCommand/EvaluatePolicy/LoadPolicy/ListVBins/BashInterceptor,
+      # starlark.Eval/ExecFile, interp.IsExitStatus, starlarkext.CustomCompleters;
+      # third-party: OPA v0 rego, cloud.google.com/go/pubsub v1, option.WithCredentialsFile,
+      # go-github Repositories.List). It must never block CI.
+      - linters:
+          - staticcheck
+        text: "^SA1019:"
 
 formatters:
   enable:

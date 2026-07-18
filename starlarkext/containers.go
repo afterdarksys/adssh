@@ -35,11 +35,11 @@ import (
 //	containers.clean()          # remove any dangling ephemeral containers
 func SetupContainersAPI(env starlark.StringDict) {
 	d := starlark.NewDict(5)
-	d.SetKey(starlark.String("exec"), starlark.NewBuiltin("exec", containersExec))
-	d.SetKey(starlark.String("list"), starlark.NewBuiltin("list", containersList))
-	d.SetKey(starlark.String("audit"), starlark.NewBuiltin("audit", containersAudit))
-	d.SetKey(starlark.String("replay"), starlark.NewBuiltin("replay", containersReplay))
-	d.SetKey(starlark.String("clean"), starlark.NewBuiltin("clean", containersClean))
+	_ = d.SetKey(starlark.String("exec"), starlark.NewBuiltin("exec", containersExec))
+	_ = d.SetKey(starlark.String("list"), starlark.NewBuiltin("list", containersList))
+	_ = d.SetKey(starlark.String("audit"), starlark.NewBuiltin("audit", containersAudit))
+	_ = d.SetKey(starlark.String("replay"), starlark.NewBuiltin("replay", containersReplay))
+	_ = d.SetKey(starlark.String("clean"), starlark.NewBuiltin("clean", containersClean))
 	env["containers"] = d
 }
 
@@ -134,7 +134,7 @@ func runContainer(ctx context.Context, sessionID, image string, cmd []string, en
 	if err != nil {
 		return ContainerAuditRecord{}, fmt.Errorf("containers.exec pull %s: %v", image, err)
 	}
-	io.Copy(io.Discard, rc)
+	_, _ = io.Copy(io.Discard, rc) // best-effort: draining pull progress stream
 	rc.Close()
 
 	// Build env slice
@@ -160,7 +160,9 @@ func runContainer(ctx context.Context, sessionID, image string, cmd []string, en
 	}
 	containerID := resp.ID
 
-	defer cli.ContainerRemove(context.Background(), containerID, container.RemoveOptions{Force: true})
+	defer func() {
+		_ = cli.ContainerRemove(context.Background(), containerID, container.RemoveOptions{Force: true})
+	}() // best-effort cleanup
 
 	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		return ContainerAuditRecord{}, fmt.Errorf("containers.exec start: %v", err)
@@ -179,7 +181,9 @@ func runContainer(ctx context.Context, sessionID, image string, cmd []string, en
 	defer logRC.Close()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
-	stdcopy.StdCopy(&stdoutBuf, &stderrBuf, logRC)
+	if _, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, logRC); err != nil {
+		fmt.Fprintf(os.Stderr, "containers.exec: log capture incomplete for %s: %v\n", containerID, err)
+	}
 
 	// Wait for exit
 	statusCh, errCh := cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
@@ -205,7 +209,9 @@ func runContainer(ctx context.Context, sessionID, image string, cmd []string, en
 		DurationMs: time.Since(start).Milliseconds(),
 		ReplayOf:   replayOf,
 	}
-	writeAuditRecord(rec)
+	if err := writeAuditRecord(rec); err != nil {
+		fmt.Fprintf(os.Stderr, "containers.exec: failed to write audit record: %v\n", err)
+	}
 	return rec, nil
 }
 
@@ -355,7 +361,7 @@ func containersClean(thread *starlark.Thread, b *starlark.Builtin, args starlark
 		if c.Labels["adssh.managed"] != "true" {
 			continue
 		}
-		cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true})
+		_ = cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true}) // best-effort cleanup
 		removed = append(removed, starlark.String(c.ID[:12]))
 	}
 	return starlark.NewList(removed), nil

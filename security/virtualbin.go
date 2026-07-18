@@ -89,7 +89,9 @@ func (yqBinary) Run(ctx context.Context, args []string) error {
 	// round-trip through JSON to normalize for gojq.
 	jsonBytes, _ := json.Marshal(raw)
 	var input interface{}
-	json.Unmarshal(jsonBytes, &input)
+	if err := json.Unmarshal(jsonBytes, &input); err != nil {
+		return fmt.Errorf("yq: invalid data: %v", err)
+	}
 
 	iter := filter.Run(input)
 	for {
@@ -110,9 +112,11 @@ func (yqBinary) Run(ctx context.Context, args []string) error {
 
 type httpBinary struct{}
 
-func (httpBinary) Name() string        { return "http" }
-func (httpBinary) Description() string { return "Simple HTTP client — GET a URL and print the response" }
-func (httpBinary) Usage() string       { return "http <url>" }
+func (httpBinary) Name() string { return "http" }
+func (httpBinary) Description() string {
+	return "Simple HTTP client — GET a URL and print the response"
+}
+func (httpBinary) Usage() string { return "http <url>" }
 
 func (httpBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
@@ -134,9 +138,11 @@ func (httpBinary) Run(ctx context.Context, args []string) error {
 
 type darkscanBinary struct{}
 
-func (darkscanBinary) Name() string        { return "darkscan" }
-func (darkscanBinary) Description() string { return "Malware scanner — submit a file to the DarkAPI scanner" }
-func (darkscanBinary) Usage() string       { return "darkscan <file>" }
+func (darkscanBinary) Name() string { return "darkscan" }
+func (darkscanBinary) Description() string {
+	return "Malware scanner — submit a file to the DarkAPI scanner"
+}
+func (darkscanBinary) Usage() string { return "darkscan <file>" }
 
 func (darkscanBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
@@ -154,9 +160,11 @@ func (darkscanBinary) Run(ctx context.Context, args []string) error {
 
 type memforensicsBinary struct{}
 
-func (memforensicsBinary) Name() string        { return "memforensics" }
-func (memforensicsBinary) Description() string { return "Memory forensics — scan a process for secrets and injections" }
-func (memforensicsBinary) Usage() string       { return "memforensics <pid>" }
+func (memforensicsBinary) Name() string { return "memforensics" }
+func (memforensicsBinary) Description() string {
+	return "Memory forensics — scan a process for secrets and injections"
+}
+func (memforensicsBinary) Usage() string { return "memforensics <pid>" }
 
 func (memforensicsBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)

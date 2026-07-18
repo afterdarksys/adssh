@@ -46,8 +46,10 @@ func termWidth() int {
 
 type helpBinary struct{}
 
-func (helpBinary) Name() string        { return "help" }
-func (helpBinary) Description() string { return "Built-in help system — topics, search, and examples" }
+func (helpBinary) Name() string { return "help" }
+func (helpBinary) Description() string {
+	return "Built-in help system — topics, search, and examples"
+}
 func (helpBinary) Usage() string {
 	return "help [<topic> | search <kw> | list [cat] | categories | examples <topic>]"
 }
