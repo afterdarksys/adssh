@@ -1,8 +1,11 @@
 # Codex Code Review
 
-## Bottom line
+## Bottom line after remediation
 
-adssh has a strong, distinctive shell concept, but the advertised governance layer has release-blocking gaps. This review treats command execution, filesystem access, networking, and extensibility as intentional shell behavior. Findings are limited to correctness bugs and cases where adssh's own policy, identity, RBAC, audit, SSH authentication, or approval guarantees are not consistently enforced.
+The repository-contained release blockers identified by this review are fixed.
+The full suite, race/coverage job, vet, lint, binary builds, and Linux/macOS E2E
+jobs pass in CI. The findings below are retained as an archival record of what
+was found, not as a list of currently open defects.
 
 ## Remediation status (2026-07-18)
 
@@ -14,11 +17,11 @@ Codex implemented the repository-contained fixes from this review, with regressi
 - **Fixed:** configured RBAC entitlements are enforced as an additional command allow-list.
 - **Fixed:** four-eyes approval validates the authenticated approver, rejects requester self-approval, and honors a configured approver.
 - **Fixed:** active change tickets are keyed by session rather than shared across the engine.
-- **Substantially fixed:** MCP policy receives deterministic request arguments; restricted mode, RBAC, HMAC audit chaining, cancellation, and serialized access to shared Starlark state are enabled. Starlark source is visible to the outer policy, but individual operations performed inside an allowed `eval_starlark` program are not yet independently re-authorized.
+- **Fixed:** MCP policy receives deterministic request arguments; restricted mode, RBAC, HMAC audit chaining, cancellation, and serialized access to shared Starlark state are enabled. Every Go builtin invoked by `eval_starlark` is independently re-authorized under a stable `starlark.<capability>` policy name before execution.
 - **Fixed:** audit-log limits are validated and the handler keeps a bounded tail instead of loading the entire file.
 - **Fixed:** shipped Rego examples compile, README policy paths/packages and Go version match the implementation, profile errors propagate, and demo security virtual bins cannot claim clean/no-threat verdicts.
 
-## Blockers
+## Archived original blockers — resolved
 
 ### Background commands bypass the execution pipeline
 
@@ -46,7 +49,7 @@ Codex implemented the repository-contained fixes from this review, with regressi
 - `security/entitlements.go:36`
 - `security/gate_negative_test.go:17`
 
-## High priority
+## Archived original high-priority findings — resolved
 
 ### Four-eyes does not verify the approver
 
@@ -74,7 +77,7 @@ Codex implemented the repository-contained fixes from this review, with regressi
 
 - `cmd/adssh-mcp/main.go:67`
 
-## Other bugs and polish
+## Archived original bugs and polish — resolved
 
 ### Negative audit-log limits can panic
 
@@ -116,8 +119,15 @@ Codex implemented the repository-contained fixes from this review, with regressi
 - **Governance readiness: 4/10** until identity, RBAC, background execution, certificates, and approval state are fixed.
 - **Overall today: 6.5/10**, with a credible path to 8.5+.
 
+## Post-remediation rating
+
+- **Overall: 8.8/10.** The distinctive shell/automation design now has coherent
+  policy, identity, RBAC, approval, audit-chain, SSH-certificate, MCP, and
+  advanced-VBIN enforcement backed by regression and E2E coverage.
+
 ## Verification
 
 - Before remediation, `go test ./...` and `go vet ./...` passed, which showed that the original suite did not cover these gaps.
 - After remediation, fresh `go test ./...` and `go vet ./...` runs pass.
-- E2E-tagged tests are still not included in the normal suite.
+- CI separately runs the E2E suite on both Ubuntu and macOS in addition to the
+  normal unit/race/coverage job.

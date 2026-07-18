@@ -49,3 +49,8 @@ func fib(n int) int {
 
 // Export the plugin struct exactly as expected by the Go plugin loader
 var Plugin ExamplePlugin
+
+// main is intentionally empty. Go plugins must use package main, and providing
+// an entry point also keeps ordinary repository-wide builds (`go build ./...`)
+// valid; plugin builds made with -buildmode=plugin ignore this function.
+func main() {}

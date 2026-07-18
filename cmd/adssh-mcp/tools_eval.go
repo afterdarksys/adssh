@@ -22,13 +22,18 @@ func handleEvalStarlark(globals starlark.StringDict) server.ToolHandlerFunc {
 			return mcp.NewToolResultError("missing required parameter: code"), nil
 		}
 
+		evalGlobals := globals
+		if sec, ok := ctx.Value(mcpSecurityEngineContextKey{}).(*security.Engine); ok && sec != nil {
+			evalGlobals = governStarlarkGlobals(sec, globals)
+		}
+
 		// New thread per evaluation (from starlarkext/exec.go pattern)
 		thread := &starlark.Thread{Name: "mcp-eval"}
 		var buf bytes.Buffer
 		thread.Print = func(_ *starlark.Thread, msg string) { buf.WriteString(msg + "\n") }
 
 		// ExecFile supports both multi-statement code and single expressions
-		val, err := starlark.ExecFile(thread, "<mcp>", code, globals)
+		val, err := starlark.ExecFile(thread, "<mcp>", code, evalGlobals)
 		if err != nil {
 			security.LogCommand("MCP:eval_starlark", code)
 			return mcp.NewToolResultError(fmt.Sprintf("starlark error: %v", err)), nil

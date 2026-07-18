@@ -9,7 +9,6 @@ import (
 
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
-	"github.com/afterdarksys/adssh/security"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -124,21 +123,11 @@ func serializedHandler(mu *sync.Mutex, handler server.ToolHandlerFunc) server.To
 func policyGate(eng *engine.Engine, toolName string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
 	sec := eng.Security()
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		pctx := security.BuildPolicyContext(toolName, policyArgs(req), "")
-		allowed, reason, policyErr := sec.EvaluatePolicy(pctx)
-		if policyErr != nil {
-			sec.LogPolicyDecision(pctx.User, toolName, false, fmt.Sprintf("error: %v", policyErr))
-			return mcp.NewToolResultError(fmt.Sprintf("policy evaluation error: %v", policyErr)), nil
+		args := append([]string{toolName}, policyArgs(req)...)
+		if err := sec.AuthorizeCommand(args, ""); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
-		if !allowed {
-			sec.LogPolicyDecision(pctx.User, toolName, false, reason)
-			if reason != "" {
-				return mcp.NewToolResultError(fmt.Sprintf("access denied: %s", reason)), nil
-			}
-			return mcp.NewToolResultError(fmt.Sprintf("access denied for '%s' by policy", toolName)), nil
-		}
-		sec.LogPolicyDecision(pctx.User, toolName, true, "")
-		return handler(ctx, req)
+		return handler(context.WithValue(ctx, mcpSecurityEngineContextKey{}, sec), req)
 	}
 }
 

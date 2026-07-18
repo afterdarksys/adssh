@@ -19,6 +19,9 @@ func TestLeaseHelperProcess(t *testing.T) {
 	if os.Getenv("TOKEN") != "super-secret" {
 		os.Exit(3)
 	}
+	if _, inherited := os.LookupEnv("ADSSH_LEASE_SOURCE"); inherited {
+		os.Exit(4)
+	}
 	os.Exit(0)
 }
 

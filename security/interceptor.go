@@ -170,6 +170,14 @@ func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) e
 	return nil
 }
 
+// AuthorizeCommand applies the complete command gate used by shell execution:
+// Rego, configured entitlements, change management, four-eyes approval,
+// restricted-mode checks, and audit logging. Non-shell frontends such as MCP
+// use this method so they cannot accidentally implement only a subset.
+func (e *Engine) AuthorizeCommand(args []string, sessionID string) error {
+	return e.gateCommand(e.restricted, args, sessionID)
+}
+
 // callHandler is the AUTHORIZATION GATE for every simple command mvdan.cc/sh
 // routes through Runner.call — normal external commands, virtual binaries, custom
 // Starlark commands, AND mvdan's native builtins (alias/set/unset/cd/read/type/

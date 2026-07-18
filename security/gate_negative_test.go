@@ -126,9 +126,8 @@ func writeNegEntitlements(t *testing.T, yaml string) string {
 // E.4: the RBAC IsAuthorized enforcement helper rejects unauthorized
 // user/command combinations and fails closed when no entitlements are loaded.
 //
-// NOTE (see report): IsAuthorized is NOT invoked anywhere in the interceptor
-// chain — only Rego policy gates exec — so this is a unit-level negative test of
-// the enforcement function, plus its fail-closed default-deny posture.
+// The production shell and MCP gates both invoke this enforcement helper; this
+// test independently locks down its fail-closed default-deny posture.
 func TestGateNeg_Entitlements_UnauthorizedRejected(t *testing.T) {
 	path := writeNegEntitlements(t, `groups:
   ops:

@@ -82,10 +82,15 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	leaseCtx, cancel := context.WithTimeout(ctx, ttl)
 	defer cancel()
 	secretValue := string(secret)
+	var unsetEnv []string
+	if kind, name, found := strings.Cut(source, ":"); found && kind == "env" {
+		unsetEnv = []string{name}
+	}
 	result, err := engineFromContext(ctx).runGovernedCommand(leaseCtx, SessionIDFromContext(ctx), governedCommand{
-		Args: args[delimiter+1:],
-		Dir:  hc.Dir,
-		Env:  map[string]string{destination: secretValue},
+		Args:     args[delimiter+1:],
+		Dir:      hc.Dir,
+		Env:      map[string]string{destination: secretValue},
+		UnsetEnv: unsetEnv,
 	}, nil)
 	result.Stdout = redactSecret(result.Stdout, secret)
 	result.Stderr = redactSecret(result.Stderr, secret)

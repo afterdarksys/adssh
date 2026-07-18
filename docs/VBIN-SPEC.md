@@ -231,6 +231,9 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `par` | `security/vbin_par.go` | Bounded worker pool with deterministic output and per-child governance |
 | `evidence` | `security/vbin_evidence.go` | Full-chain-verified, filtered audit evidence bundles |
 | `lease` | `security/vbin_lease.go` | TTL-bounded command environment secrets with output redaction |
+| `stty` | `security/vbin_stty.go` | Terminal mode controls |
+| `proc` | `security/vbin_proc.go` | Linux `/proc` filesystem accessor — `proc get|set <path> [value]` |
+| `package` | `security/vbin_package.go` | Cross-distro package manager wrapper — `package install|remove|update|list <pkg>` |
 
 ### Governed child execution
 
@@ -266,13 +269,16 @@ published atomically with mode `0600`.
 
 `lease` accepts only `env:NAME` or a private regular `file:path`, injects the
 value into one child environment, applies a maximum 24-hour TTL, and redacts the
-exact secret from captured stdout/stderr. It is a command-scoping primitive, not
-a replacement for a vault: Go cannot guarantee that every immutable in-memory
-string copy is immediately zeroed, and a child can deliberately exfiltrate a
-credential through transformed output or external side effects.
-| `stty` | `security/vbin_stty.go` | Terminal mode controls |
-| `proc` | `security/vbin_proc.go` | Linux `/proc` filesystem accessor — `proc get|set <path> [value]` |
-| `package` | `security/vbin_package.go` | Cross-distro package manager wrapper — `package install|remove|update|list <pkg>` |
+exact secret from captured stdout/stderr. For `env:NAME`, the source variable is
+removed from the child environment so only the requested destination name is
+present. It is a command-scoping primitive, not a replacement for a vault. The
+owned source byte buffer is zeroed after the
+child exits, but Go and the operating system necessarily create immutable
+environment copies that cannot be synchronously erased by the parent process.
+This is an explicit runtime boundary rather than an unfinished guarantee. A
+child can also deliberately exfiltrate a credential through transformed output
+or external side effects, so policy must restrict which commands may receive a
+lease.
 
 ---
 

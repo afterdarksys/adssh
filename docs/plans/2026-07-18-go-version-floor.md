@@ -1,6 +1,6 @@
 # Finding — go.mod requires go 1.26.0 (adoption barrier for embedders)
 
-**Logged:** 2026-07-18. **Status:** decision needed before/at v0.9.0 freeze.
+**Logged:** 2026-07-18. **Status:** resolved — Option C retained; modern lint is a hard gate.
 
 ## What
 `go.mod` has `go 1.26.0` (a hard floor — no `toolchain` fallback line). Native build on the
@@ -13,10 +13,9 @@ all of which `require go >= 1.26.0` (k8s 1.36 client line).
 1. **Embeddable-library goal:** a library requiring go 1.26.0 is a real adoption barrier — the
    commercial platform must run a bleeding-edge toolchain just to import adssh. For an embedded
    dependency the go floor should be conservative (as low as the code actually needs).
-2. **Blocking lint impossible:** golangci-lint has no release built against go 1.26, so it refuses
-   to load a 1.26-targeted module ("Go version used to build golangci-lint is lower than the
-   targeted Go version"). This failed CI's lint twice and is why the lint job is currently
-   ADVISORY (continue-on-error) despite the errcheck/misspell backlog being fully cleaned.
+2. **Historical lint constraint (resolved):** older golangci-lint releases were built with a Go
+   version below 1.26 and could not load the module. Current golangci-lint and its Node 24 GitHub
+   Action support the project toolchain, so lint is now a blocking CI gate.
 
 ## Options
 - **A. Keep go 1.26 + latest k8s.** Consumers need go 1.26; lint stays advisory until golangci-lint
@@ -32,6 +31,8 @@ all of which `require go >= 1.26.0` (k8s 1.36 client line).
 ## DECISION (2026-07-18, Ryan): Option C — keep go 1.26, move forward.
 The dev machine and the deployment targets differ; the real deploy environments (RHEL and
 others) ship the right Go version, so go 1.26 is not a barrier in practice for this product's
-context. Ship v0.9.0 on go 1.26; lint stays advisory (continue-on-error) until golangci-lint
-ships a 1.26 build. The k8s downgrade (Option B) is NOT pursued — revisit only if a consumer
-actually hits the floor. No further action for the freeze.
+context. Ship v0.9.0 on go 1.26. The k8s downgrade (Option B) is NOT pursued — revisit only if a
+consumer actually hits the floor.
+
+**Follow-up completed (2026-07-18):** golangci-lint now supports this Go floor. CI uses the Node
+24 action and lint is enforced without `continue-on-error`.

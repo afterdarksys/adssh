@@ -15,6 +15,7 @@ type governedCommand struct {
 	Args      []string
 	Dir       string
 	Env       map[string]string
+	UnsetEnv  []string
 	Stdin     io.Reader
 	MaxOutput int
 }
@@ -47,7 +48,7 @@ func executeExternalCommand(ctx context.Context, command governedCommand) (comma
 	cmd := exec.CommandContext(ctx, command.Args[0], command.Args[1:]...)
 	cmd.Dir = command.Dir
 	cmd.Stdin = command.Stdin
-	cmd.Env = overlayEnvironment(os.Environ(), command.Env)
+	cmd.Env = overlayEnvironment(os.Environ(), command.Env, command.UnsetEnv)
 
 	limit := command.MaxOutput
 	if limit <= 0 {
@@ -90,14 +91,21 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 
 func (b *limitedBuffer) Bytes() []byte { return append([]byte(nil), b.buffer.Bytes()...) }
 
-func overlayEnvironment(base []string, overlay map[string]string) []string {
-	if len(overlay) == 0 {
+func overlayEnvironment(base []string, overlay map[string]string, unset []string) []string {
+	if len(overlay) == 0 && len(unset) == 0 {
 		return append([]string(nil), base...)
+	}
+	removed := make(map[string]struct{}, len(overlay)+len(unset))
+	for key := range overlay {
+		removed[key] = struct{}{}
+	}
+	for _, key := range unset {
+		removed[key] = struct{}{}
 	}
 	out := make([]string, 0, len(base)+len(overlay))
 	for _, entry := range base {
 		key, _, _ := strings.Cut(entry, "=")
-		if _, replaced := overlay[key]; !replaced {
+		if _, remove := removed[key]; !remove {
 			out = append(out, entry)
 		}
 	}

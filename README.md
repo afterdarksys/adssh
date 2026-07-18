@@ -198,6 +198,14 @@ adssh-mcp          # starts the MCP server
 
 Tools exposed: `eval_starlark`, `run_shell`, `list_sessions`, `cloud_query`, `container_exec`, `audit_log`.
 
+Every MCP request passes through the complete Rego, entitlement, change-management,
+four-eyes, restricted-mode, and audit gate with deterministic tool arguments.
+Within `eval_starlark`, each Go builtin passes through that gate again immediately
+before it is called, using an operation name such as
+`starlark.docker.images.pull` and canonical `arg0=...`/`keyword=...` policy
+arguments. Allowing `eval_starlark` therefore does not implicitly allow its
+cloud, container, database, filesystem, networking, or plugin operations.
+
 ## Configuration
 
 ```bash
@@ -227,6 +235,10 @@ plugins["myplugin"].do_something()
 ```
 
 Plugins implement the `AdsshPlugin` Go interface. See `example_plugin/` for a template.
+
+```bash
+go build -buildmode=plugin -o myplugin.so ./example_plugin
+```
 
 ## License
 
