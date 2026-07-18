@@ -107,18 +107,20 @@ func TestGateNeg_PolicyDenyBeatsCustomCommand(t *testing.T) {
 	}
 }
 
-// A.3: deny-all policy + shell builtins the interceptor implements.
+// A.3: deny-all policy + shell keywords/builtins the interceptor implements.
 //
-// SECURITY-FINDING (see report): mvdan.cc/sh implements alias/set/export/unset/
-// read/type/dirs/pushd/popd/disown/unalias as NATIVE builtins and executes them
-// WITHOUT ever calling the exec handler. Because BashInterceptor is wired only as
-// an exec handler, these builtins bypass the ENTIRE interceptor chain — Rego
-// policy, CM, four-eyes and the audit LogCommand at the top of execHandler never
-// run for them, and the interceptor's own builtin switch is dead code in this
-// path. This test PINS that reality: under a deny-all policy, alias/set/export
-// are NOT blocked (no "access denied"), proving the enforcement bypass. They also
-// do not exec external programs, so at least nothing falls through to real exec.
-func TestGateNeg_MvdanBuiltinsBypassPolicy(t *testing.T) {
+// FIXED IN THIS COMMIT (finding #1): mvdan.cc/sh implements alias/set/unset/read/
+// type/dirs/pushd/popd/disown/unalias as NATIVE builtins routed through
+// Runner.call, and export/readonly/declare/local/typeset/nameref as DeclClause
+// KEYWORDS routed through neither the call nor the exec handler. Previously
+// BashInterceptor was wired only as an exec handler, so ALL of these bypassed the
+// authorization gate (Rego policy, CM, four-eyes, audit). The gate now lives in a
+// mvdan CallHandler (covers the builtins) plus an AST pre-scan, GateProgram, run
+// before Runner.Run (covers the DeclClause keywords like `export`). This test
+// PINS the fixed behavior as a HARD assertion: under a deny-all policy every one
+// of alias/set/export MUST be blocked with "access denied", and none may fall
+// through to real exec.
+func TestGateNeg_MvdanBuiltinsGatedByPolicy(t *testing.T) {
 	resetPolicy()
 	t.Cleanup(resetPolicy)
 
@@ -127,18 +129,12 @@ func TestGateNeg_MvdanBuiltinsBypassPolicy(t *testing.T) {
 	}
 
 	for _, src := range []string{"alias negfoo=negbar", "set x=1", "export NEGVAR=1"} {
-		stdout, _, runErr, rec := runShell(t, false, starlark.StringDict{}, src)
-		if runErr != nil && strings.Contains(runErr.Error(), "access denied") {
-			// If a future refactor routes builtins through the interceptor, the
-			// deny would take effect here — a SECURITY IMPROVEMENT. Flag it so
-			// the finding in the report gets updated rather than silently stale.
-			t.Logf("NOTE: %q is now policy-gated (access denied) — builtins reach the interceptor; update the SECURITY-FINDING in the report", src)
-			continue
+		_, _, runErr, rec := runShell(t, false, starlark.StringDict{}, src)
+		if runErr == nil || !strings.Contains(runErr.Error(), "access denied") {
+			t.Errorf("SECURITY: builtin/keyword %q bypassed deny-all policy (err=%v) — must be policy-gated", src, runErr)
 		}
-		// Current (bypass) behavior: not blocked by policy.
-		t.Logf("SECURITY-FINDING confirmed: builtin %q bypassed deny-all policy (err=%v, stdout=%q)", src, runErr, stdout)
 		if len(rec.calls) != 0 {
-			t.Errorf("builtin %q fell through to real exec: %v", src, rec.calls)
+			t.Errorf("builtin/keyword %q fell through to real exec: %v", src, rec.calls)
 		}
 	}
 }
@@ -280,29 +276,27 @@ func TestPolicyNeg_MalformedSource_FailsClosed(t *testing.T) {
 }
 
 // C.2: a non-boolean `allow` value must NOT be treated as allow=true by
-// coincidence... but it currently IS. EvaluatePolicy seeds allowed=true and only
-// overrides it when `allow` is a real bool, so a non-boolean `allow` is ignored
-// and the default (allow) stands.
+// coincidence — it must fail closed.
 //
-// SECURITY-FINDING (see report): EvaluatePolicy does not coerce or reject a
-// non-boolean `allow`; it silently keeps the allow-by-default value. A policy
-// that yields `allow = "yes"` / `allow = 1` (or any non-bool) FAILS OPEN.
-func TestPolicyNeg_NonBooleanAllow_FailsOpen(t *testing.T) {
+// FIXED IN THIS COMMIT (finding #2): EvaluatePolicy now rejects a non-boolean
+// `allow` (e.g. `allow = "yes"` / `allow = 1`) and DENIES, instead of silently
+// keeping an allow-by-default value. This test PINS the fixed fail-closed
+// behavior as a HARD assertion.
+func TestPolicyNeg_NonBooleanAllow_FailsClosed(t *testing.T) {
 	eng, err := NewEngine(EngineConfig{PolicySource: []byte(`package adssh.authz
 allow = "yes" { input.command == "anything" }`)})
 	if err != nil {
 		t.Fatalf("NewEngine: %v", err)
 	}
-	allowed, _, err := eng.EvaluatePolicy(PolicyContext{Command: "anything"})
+	allowed, reason, err := eng.EvaluatePolicy(PolicyContext{Command: "anything"})
 	if err != nil {
 		t.Fatalf("EvaluatePolicy: %v", err)
 	}
-	// Pin the CURRENT (fail-open) behavior. If EvaluatePolicy is hardened to
-	// reject/deny non-boolean allow, this assertion flips — update the report.
-	if !allowed {
-		t.Log("NOTE: non-boolean `allow` is now treated as deny — EvaluatePolicy was hardened; update the SECURITY-FINDING in the report")
-	} else {
-		t.Log("SECURITY-FINDING confirmed: non-boolean `allow` (\"yes\") is treated as ALLOW (fail-open)")
+	if allowed {
+		t.Error("SECURITY: non-boolean `allow` (\"yes\") was treated as ALLOW — must fail closed (deny)")
+	}
+	if !strings.Contains(reason, "non-boolean allow") {
+		t.Errorf("expected deny reason to mention non-boolean allow, got %q", reason)
 	}
 }
 
@@ -348,10 +342,12 @@ deny_reason = "cosmetic" { input.command == "reasoncmd" }`
 // `default allow = false` currently evaluates to ALLOW, because EvaluatePolicy
 // defaults allowed=true when the result set carries no `allow` boolean.
 //
-// SECURITY-FINDING (see report): deny-by-default is NOT the contract. Without an
-// explicit `default allow = false`, an unmatched command is ALLOWED. A policy
-// author who forgets the default line gets fail-open behavior.
-func TestPolicyNeg_NoDefaultNoMatch_FailsOpen(t *testing.T) {
+// FIXED IN THIS COMMIT (finding #3): deny-by-default IS now the contract when a
+// policy is loaded. A loaded policy whose result carries no `allow` key (e.g. the
+// author wrote a matching rule but forgot `default allow = false`, and the rule
+// does not fire for this command) DENIES. This test PINS the fixed fail-closed
+// behavior as a HARD assertion, both at EvaluatePolicy and through the interceptor.
+func TestPolicyNeg_NoDefaultNoMatch_FailsClosed(t *testing.T) {
 	resetPolicy()
 	t.Cleanup(resetPolicy)
 
@@ -367,22 +363,19 @@ allow = true { input.command == "onlythis" }`
 		t.Fatalf("EvaluatePolicy: %v", err)
 	}
 	if allowed {
-		t.Log("SECURITY-FINDING confirmed: no `default allow=false` + no matching rule => ALLOW (deny-by-default not honored)")
-	} else {
-		t.Log("NOTE: unmatched command now denied — deny-by-default appears to be enforced; update the report")
+		t.Error("SECURITY: loaded policy + no matching rule + no `default allow` => ALLOW; deny-by-default must be honored")
 	}
 
-	// Pin current behavior through the interceptor: the unmatched command runs.
+	// Through the interceptor the unmatched command must be blocked and never exec.
 	if err := LoadPolicy(writePolicy(t, rego)); err != nil {
 		t.Fatal(err)
 	}
 	_, _, runErr, rec := runShell(t, false, starlark.StringDict{}, "somethingelse arg")
-	if runErr == nil && len(rec.calls) == 1 {
-		// current (fail-open) behavior
-		return
+	if runErr == nil || !strings.Contains(runErr.Error(), "access denied") {
+		t.Errorf("SECURITY: unmatched command was not denied by deny-by-default, err=%v", runErr)
 	}
-	if runErr != nil {
-		t.Logf("interceptor blocked unmatched command (deny-by-default enforced): %v", runErr)
+	if len(rec.calls) != 0 {
+		t.Errorf("SECURITY: unmatched command fell through to real exec: %v", rec.calls)
 	}
 }
 

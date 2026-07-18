@@ -104,9 +104,14 @@ func createExecAsync(globals starlark.StringDict, restricted bool) func(thread *
 		}
 
 		runner, _ := interp.New(
+			interp.CallHandler(security.CallInterceptor(restricted, globals)),
 			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
 			interp.OpenHandler(security.VirtualOpenHandler()),
 		)
+
+		if err := security.GateProgram(restricted, parserFile); err != nil {
+			return nil, err
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		waitChan := make(chan error, 1)

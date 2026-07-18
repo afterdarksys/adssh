@@ -29,10 +29,14 @@ func createExecCmd(globals starlark.StringDict, restricted bool) func(thread *st
 	var buf bytes.Buffer
 	runner, _ := interp.New(
 		interp.StdIO(nil, &buf, &buf),
+		interp.CallHandler(security.CallInterceptor(restricted, globals)),
 		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 
+	if err = security.GateProgram(restricted, parserFile); err != nil {
+		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+	}
 	err = runner.Run(context.Background(), parserFile)
 	if err != nil {
 		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
@@ -57,10 +61,14 @@ func createExecJSON(globals starlark.StringDict, restricted bool) func(thread *s
 	var buf bytes.Buffer
 	runner, _ := interp.New(
 		interp.StdIO(nil, &buf, &buf),
+		interp.CallHandler(security.CallInterceptor(restricted, globals)),
 		interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 
+	if err = security.GateProgram(restricted, parserFile); err != nil {
+		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+	}
 	err = runner.Run(context.Background(), parserFile)
 	if err != nil {
 		return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())

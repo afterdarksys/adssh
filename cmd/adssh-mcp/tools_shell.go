@@ -36,11 +36,19 @@ func handleRunShell(globals starlark.StringDict) server.ToolHandlerFunc {
 		var stdout, stderr bytes.Buffer
 		runner, err := interp.New(
 			interp.StdIO(nil, &stdout, &stderr),
+			interp.CallHandler(security.CallInterceptor(false, globals)),
 			interp.ExecHandlers(security.BashInterceptor(false, globals)),
 			interp.OpenHandler(security.VirtualOpenHandler()),
 		)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("runner init error: %v", err)), nil
+		}
+
+		// DeclClause keywords (export/readonly/declare/...) bypass the call and
+		// exec handlers; gate them via the AST pre-scan before running.
+		if err := security.GateProgram(false, parserFile); err != nil {
+			security.LogCommand("MCP:run_shell", cmd)
+			return mcp.NewToolResultError(fmt.Sprintf("exec error: %v", err)), nil
 		}
 
 		exitCode := 0

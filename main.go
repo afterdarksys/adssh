@@ -281,6 +281,9 @@ func evalOnce(sess *engine.Session, src string) error {
 	if parseErr != nil {
 		return fmt.Errorf("parse error: %v", parseErr)
 	}
+	if err := sess.GateProgram(f); err != nil {
+		return fmt.Errorf("command error: %v", err)
+	}
 	if err := sess.Runner.Run(context.Background(), f); err != nil {
 		return fmt.Errorf("command error: %v", err)
 	}

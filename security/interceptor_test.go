@@ -39,6 +39,7 @@ func runShell(t *testing.T, restricted bool, globals starlark.StringDict, src st
 	var stdout, stderr bytes.Buffer
 	r, err := interp.New(
 		interp.StdIO(strings.NewReader(""), &stdout, &stderr),
+		interp.CallHandler(CallInterceptor(restricted, globals)),
 		interp.ExecHandlers(BashInterceptor(restricted, globals), rec.middleware),
 	)
 	if err != nil {
@@ -48,7 +49,13 @@ func runShell(t *testing.T, restricted bool, globals starlark.StringDict, src st
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	runErr := r.Run(context.Background(), file)
+	// Mirror the production runner sites: DeclClause keywords (export/readonly/
+	// declare/...) bypass mvdan's call and exec handlers, so gate them via the
+	// AST pre-scan before running. A gate denial aborts the program.
+	runErr := GateProgram(restricted, file)
+	if runErr == nil {
+		runErr = r.Run(context.Background(), file)
+	}
 	return stdout.String(), stderr.String(), runErr, rec
 }
 

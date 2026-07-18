@@ -44,12 +44,29 @@ func LoadPolicy(path string) error {
 }
 
 // EvaluatePolicy evaluates the loaded Rego policy against the given context.
-// Returns (true, "", nil) if no policy is loaded.
-// Returns (false, "", err) on evaluation error — fail closed on errors (T-01-02).
+//
+// FAIL-CLOSED CONTRACT (rule 8 of SECURITY-RULES.md — on any ambiguity, deny):
+//   - No policy loaded at all (preparedQuery == nil) => ALLOW. This is the
+//     documented allow-by-default posture for a shell started without a policy;
+//     strictness is opted into separately via EngineConfig.RequirePolicy, which
+//     refuses to construct an engine with no policy. (TestEvaluatePolicy_NoPolicyLoaded)
+//   - A policy IS loaded but evaluation errors => DENY (fail closed, T-01-02).
+//   - A policy IS loaded and yields a decision document: DENY-BY-DEFAULT. Only an
+//     explicit boolean `allow == true` permits the command. Every other outcome
+//     denies:
+//       * missing `allow` key (author forgot `default allow`)  => DENY (FIX #3)
+//       * `allow` present but not a Go bool (e.g. "yes", 1)     => DENY (FIX #2)
+//       * empty result set / non-object decision document       => DENY
+//     A genuinely permissive policy must say so explicitly with `default allow =
+//     true`, which yields allow==true here.
+//
+// deny_reason is surfaced whenever the policy sets it, including alongside
+// allow==true (it is an advisory message; the boolean `allow` is authoritative).
 func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 	e.policyMu.RLock()
 	defer e.policyMu.RUnlock()
 
+	// No policy loaded => allow-by-default (see contract above).
 	if e.preparedQuery == nil {
 		return true, "", nil
 	}
@@ -69,24 +86,42 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 		return false, "", fmt.Errorf("policy evaluation failed: %w", err)
 	}
 
+	// From here a policy IS loaded, so the posture is DENY-BY-DEFAULT: any
+	// outcome that is not an explicit boolean allow==true is a denial.
+
+	// A loaded policy that produces no result at all yields no decision — deny.
+	// (data.adssh.authz on a real package is normally a defined object, so this
+	// is the defensive "no decision" case, not the allow-all case; an allow-all
+	// policy carries `default allow = true` and produces allow==true below.)
 	if len(results) == 0 {
-		return true, "", nil
+		return false, "policy: no decision (empty result set)", nil
 	}
 
-	// Extract allow and deny_reason from data.adssh.authz result set
+	// The decision document must be an object (the adssh.authz package). Anything
+	// else is malformed — deny.
 	resultMap, ok := results[0].Expressions[0].Value.(map[string]interface{})
 	if !ok {
-		return true, "", nil
+		return false, "policy: malformed decision document", nil
 	}
 
-	allowed := true
-	if v, ok := resultMap["allow"].(bool); ok {
-		allowed = v
-	}
-
+	// deny_reason is advisory; extract it up front so denials can surface it.
 	denyReason := ""
 	if v, ok := resultMap["deny_reason"].(string); ok {
 		denyReason = v
+	}
+
+	allowVal, present := resultMap["allow"]
+	if !present {
+		// FIX #3: a loaded policy with no `allow` decision denies by default.
+		if denyReason == "" {
+			denyReason = "policy: deny by default (no allow decision)"
+		}
+		return false, denyReason, nil
+	}
+	allowed, isBool := allowVal.(bool)
+	if !isBool {
+		// FIX #2: a non-boolean `allow` must never be ignored — fail closed.
+		return false, "policy: non-boolean allow", nil
 	}
 
 	return allowed, denyReason, nil

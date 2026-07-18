@@ -502,6 +502,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		interp.StdIO(in, out, errOut),
 		// Job control handler runs first, then the session-aware security
 		// interceptor (which uses this session's own directory stack).
+		interp.CallHandler(security.CallInterceptorSession(sessState)),
 		interp.ExecHandlers(jobControlHandler(out), security.BashInterceptorSession(sessState)),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
@@ -624,6 +625,8 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				pf, err := syntax.NewParser().Parse(strings.NewReader(src), path)
 				if err != nil {
 					fmt.Fprintf(errOut, "source: parse: %v\n", err)
+				} else if gErr := security.GateProgramSession(sessState, pf); gErr != nil {
+					fmt.Fprintf(errOut, "source: %v\n", gErr)
 				} else {
 					runner.Run(context.Background(), pf) //nolint:errcheck
 				}
@@ -731,7 +734,12 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			callHook(globals, "__preexec__", starlark.Tuple{starlark.String(line)})
 
 			commandRunning.Store(true)
-			runErr := runner.Run(ctx, parserFile)
+			// DeclClause keywords (export/readonly/declare/...) bypass the call
+			// and exec handlers, so gate them via the AST pre-scan before running.
+			runErr := security.GateProgramSession(sessState, parserFile)
+			if runErr == nil {
+				runErr = runner.Run(ctx, parserFile)
+			}
 			commandRunning.Store(false)
 
 			// 4e. $? / exit code tracking
@@ -766,7 +774,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// 4n. Run EXIT trap.
 	if trapExit != "" {
 		if pf, err := syntax.NewParser().Parse(strings.NewReader(trapExit), "trap"); err == nil {
-			runner.Run(context.Background(), pf) //nolint:errcheck
+			if gErr := security.GateProgramSession(sessState, pf); gErr != nil {
+				fmt.Fprintf(errOut, "trap: %v\n", gErr)
+			} else {
+				runner.Run(context.Background(), pf) //nolint:errcheck
+			}
 		}
 	}
 }

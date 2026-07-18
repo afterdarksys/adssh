@@ -21,6 +21,7 @@ import (
 
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // Session owns all per-session state that used to live in process globals or in
@@ -137,11 +138,16 @@ func NewSession(opts SessionOptions) (*Session, error) {
 	}
 
 	// Session-aware security interceptor, then any caller middleware (sentinel).
+	// The call handler is the authorization gate (runs for every command,
+	// including builtins); the exec handler is dispatch-only.
 	var interceptor func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc
+	var callGate interp.CallHandlerFunc
 	if opts.Engine != nil {
 		interceptor = opts.Engine.BashInterceptorSession(state)
+		callGate = opts.Engine.CallInterceptorSession(state)
 	} else {
 		interceptor = security.BashInterceptorSession(state)
+		callGate = security.CallInterceptorSession(state)
 	}
 	handlers := make([]func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc, 0, 1+len(opts.ExecMiddleware))
 	handlers = append(handlers, interceptor)
@@ -150,6 +156,7 @@ func NewSession(opts SessionOptions) (*Session, error) {
 	runner, err := interp.New(
 		interp.Dir(dir),
 		interp.StdIO(in, out, errW),
+		interp.CallHandler(callGate),
 		interp.ExecHandlers(handlers...),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
@@ -171,4 +178,18 @@ func NewSession(opts SessionOptions) (*Session, error) {
 		HistoryFile: opts.HistoryFile,
 		engine:      opts.Engine,
 	}, nil
+}
+
+// GateProgram runs the DeclClause-keyword authorization pre-scan (export/
+// readonly/declare/local/typeset/nameref) against this session's engine before
+// the parsed program is handed to Runner.Run. Those keywords bypass mvdan's call
+// and exec handlers, so callers that run programs through Session.Runner MUST
+// call this first and refuse to run when it returns an error — otherwise
+// `export FOO=1` under a deny-all policy would execute ungated. It mirrors the
+// engine/default-engine branching used to build this session's call handler.
+func (s *Session) GateProgram(node syntax.Node) error {
+	if s.engine != nil {
+		return s.engine.GateProgram(s.Restricted, node)
+	}
+	return security.GateProgram(s.Restricted, node)
 }

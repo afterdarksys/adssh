@@ -14,6 +14,7 @@ import (
 
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // SessionState carries the per-session context the interceptor needs so that
@@ -69,12 +70,223 @@ func (e *Engine) BashInterceptorSession(sess *SessionState) func(next interp.Exe
 	return e.execHandler(sess.Restricted, sess.Globals, sess.Dirs)
 }
 
+// CallInterceptor returns the shell CALL handler for the process-global default
+// engine, honoring the caller-supplied restricted flag.
+//
+// The call handler is the AUTHORIZATION GATE. Unlike an exec handler (which
+// mvdan.cc/sh invokes only for commands it does NOT implement itself), mvdan's
+// call handler fires for EVERY simple command it routes through Runner.call —
+// including its native builtins (alias, set, unset, cd, read, type, pushd, popd,
+// dirs, disown, ...) — before dispatching them. Wiring the gate here closes the
+// hole where builtins bypassed policy/CM/four-eyes/audit entirely. See
+// (*Engine).callHandler for the exact coverage and the documented residual gaps.
+func CallInterceptor(restricted bool, globals starlark.StringDict) interp.CallHandlerFunc {
+	return defaultEngine.callHandler(restricted, globals)
+}
+
+// CallInterceptorSession returns the shell CALL handler (authorization gate) for
+// the process-global default engine bound to a specific session's state.
+func CallInterceptorSession(sess *SessionState) interp.CallHandlerFunc {
+	return defaultEngine.callHandler(sess.Restricted, sess.Globals)
+}
+
+// CallInterceptor returns the shell CALL handler (authorization gate) for this
+// engine, using the engine's own restricted flag.
+func (e *Engine) CallInterceptor(globals starlark.StringDict) interp.CallHandlerFunc {
+	return e.callHandler(e.restricted, globals)
+}
+
+// CallInterceptorSession returns the shell CALL handler (authorization gate) for
+// this engine bound to a specific session's state. All gates run against engine
+// e; restricted and globals come from sess so many sessions can share one engine.
+func (e *Engine) CallInterceptorSession(sess *SessionState) interp.CallHandlerFunc {
+	return e.callHandler(sess.Restricted, sess.Globals)
+}
+
+// gateCommand is the shared AUTHORIZATION GATE for a single resolved command
+// (args[0] = command name, args[1:] = arguments). It runs, in order: audit
+// LogCommand, Rego policy evaluation (fail closed), change-management check,
+// four-eyes dual-approval gate, then restricted-mode command-name checks.
+// It returns nil to authorize the command or a non-nil error to DENY it.
+//
+// Both callHandler (for every simple command mvdan routes through Runner.call)
+// and GateProgram (for DeclClause keywords mvdan routes through NEITHER handler)
+// call this exactly once per command, so every command is authorized and audited
+// EXACTLY ONCE and always fails closed (rule 8 of SECURITY-RULES.md).
+func (e *Engine) gateCommand(restricted bool, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+
+	cmd := strings.Join(args, " ")
+	e.LogCommand("BASH", cmd)
+
+	// 0. Rego policy evaluation (primary authorization) — fail closed.
+	pctx := BuildPolicyContext(args[0], args[1:], "")
+	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
+	if policyErr != nil {
+		return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
+	}
+	if !allowed {
+		e.LogPolicyDecision(pctx.User, cmd, false, reason)
+		if reason != "" {
+			return fmt.Errorf("adssh: access denied: %s", reason)
+		}
+		return fmt.Errorf("adssh: access denied for '%s' by policy", args[0])
+	}
+	e.LogPolicyDecision(pctx.User, cmd, true, "")
+
+	// 0a. Change management ticket check.
+	if err := e.CMSessionCheck(args[0], args[1:]); err != nil {
+		return err
+	}
+
+	// 0b. 4-eyes dual-approval gate.
+	if err := e.CheckFourEyes(cmd, args, nil); err != nil {
+		return err
+	}
+
+	// 0c. Restricted-mode command-name checks. These must also apply to builtins
+	// (e.g. cd), which the exec handler never sees, and to DeclClause keywords
+	// (e.g. export) which reach this gate only via GateProgram — so they are
+	// enforced here at the single choke point.
+	if restricted {
+		if strings.Contains(args[0], "/") {
+			return fmt.Errorf("adssh: restricted: cannot specify '/' in command names")
+		}
+		if args[0] == "cd" || args[0] == "export" {
+			return fmt.Errorf("adssh: restricted: %s is not allowed", args[0])
+		}
+	}
+
+	return nil
+}
+
+// callHandler is the AUTHORIZATION GATE for every simple command mvdan.cc/sh
+// routes through Runner.call — normal external commands, virtual binaries, custom
+// Starlark commands, AND mvdan's native builtins (alias/set/unset/cd/read/type/
+// pushd/popd/dirs/disown/...). Returning a non-nil error aborts the command in the
+// Runner (it never reaches dispatch/exec), so this is the single point at which
+// such a command is authorized and audited — the exec handler (execHandler) no
+// longer duplicates any of this, so every command is authorized+audited EXACTLY
+// ONCE (an external command reaches this call handler once and then the exec
+// handler only for dispatch).
+//
+// COVERAGE GAP CLOSED — DeclClause keywords: `export`, `readonly`, `declare`,
+// `local`, `typeset`, `nameref` are parsed as syntax.DeclClause and executed
+// directly in Runner.cmd; mvdan.cc/sh v3.13.1 routes them through NEITHER the
+// call handler NOR the exec handler (verified empirically against the vendored
+// source: interp/runner.go Runner.cmd handles *syntax.DeclClause inline and never
+// calls Runner.call). The call handler alone therefore cannot see `export FOO=1`.
+// This is closed by GateProgram (below), an AST pre-scan run before Runner.Run at
+// every runner site, which runs gateCommand on every DeclClause keyword so they
+// are policy/CM/four-eyes-gated, audited, and restricted-mode-blocked exactly
+// like ordinary builtins. Fixed in this commit — no silent gap remains.
+//
+// RESIDUAL GAP (documented, not a fail-open): `command <ext>` and `exec <ext>`
+// re-dispatch their target straight to Runner.exec (the exec handler) without a
+// second Runner.call, so the target is authorized here under the wrapper name
+// ("command"/"exec"), not under the target's own name. In restricted mode the
+// exec handler's '/'-path check still blocks `command /bin/x` / `exec /bin/x`.
+// (`eval` re-parses through Runner.call, so eval'd commands ARE gated
+// individually.) This is a naming-granularity limitation, not a bypass: the
+// wrapper itself is still policy-gated and audited on every invocation.
+func (e *Engine) callHandler(restricted bool, globals starlark.StringDict) interp.CallHandlerFunc {
+	return func(ctx context.Context, args []string) ([]string, error) {
+		if len(args) == 0 {
+			return args, nil
+		}
+		if err := e.gateCommand(restricted, args); err != nil {
+			return nil, err
+		}
+		return args, nil
+	}
+}
+
+// GateProgram is the AUTHORIZATION GATE pre-scan for shell keywords that
+// mvdan.cc/sh executes WITHOUT routing through the call or exec handler — namely
+// the DeclClause keywords export/readonly/declare/local/typeset/nameref (see the
+// COVERAGE GAP note on callHandler). It must be called on the parsed program at
+// every runner site BEFORE Runner.Run; if it returns a non-nil error the program
+// must not run. It walks the whole AST and runs gateCommand on every DeclClause
+// keyword, so a deny-all policy blocks `export FOO=1` and it is written to the
+// audit chain exactly like any other denied command.
+//
+// It gates ONLY DeclClause nodes; ordinary simple commands (CallExpr) are left to
+// the call handler at execution time, so no command is gated or audited twice.
+// The scan gates every DeclClause reachable in the AST (including inside untaken
+// branches), which is intentionally conservative — fail closed — and documented.
+func GateProgram(restricted bool, node syntax.Node) error {
+	return defaultEngine.GateProgram(restricted, node)
+}
+
+// GateProgramSession runs the DeclClause-keyword authorization pre-scan for the
+// process-global default engine bound to a specific session's state.
+func GateProgramSession(sess *SessionState, node syntax.Node) error {
+	return defaultEngine.GateProgram(sess.Restricted, node)
+}
+
+// GateProgram runs the DeclClause-keyword authorization pre-scan against this
+// engine. See the package-level GateProgram for the full contract.
+func (e *Engine) GateProgram(restricted bool, node syntax.Node) error {
+	if node == nil {
+		return nil
+	}
+	var gateErr error
+	syntax.Walk(node, func(n syntax.Node) bool {
+		if gateErr != nil {
+			return false
+		}
+		decl, ok := n.(*syntax.DeclClause)
+		if !ok {
+			return true
+		}
+		args := declArgs(decl)
+		if len(args) == 0 {
+			return true
+		}
+		if err := e.gateCommand(restricted, args); err != nil {
+			gateErr = err
+			return false
+		}
+		return true
+	})
+	return gateErr
+}
+
+// declArgs reconstructs a command-style argument vector from a DeclClause so it
+// can be fed to gateCommand: args[0] is the keyword ("export", "readonly", ...)
+// and each remaining element is an assignment/flag ("FOO=1", "-p", ...). Values
+// are printed from the source AST, so they are not variable-expanded — which is
+// fine for authorization, since the gate decides on the keyword (args[0]).
+func declArgs(decl *syntax.DeclClause) []string {
+	if decl == nil || decl.Variant == nil {
+		return nil
+	}
+	args := []string{decl.Variant.Value}
+	printer := syntax.NewPrinter()
+	for _, a := range decl.Args {
+		if a == nil {
+			continue
+		}
+		var buf strings.Builder
+		if err := printer.Print(&buf, a); err == nil && buf.Len() > 0 {
+			args = append(args, buf.String())
+		} else if a.Name != nil {
+			args = append(args, a.Name.Value)
+		}
+	}
+	return args
+}
+
 // execHandler is the shared implementation behind the BashInterceptor* entry
-// points. All authorization gates and logging run against engine e; restricted,
-// globals and dirs are parameterized so the deprecated package/method shims can
-// pass the caller's flag plus the process-global stack while the session form
-// passes per-session state. When dirs is nil the process-global directory stack
-// is used.
+// points. It is now DISPATCH-ONLY: the authorization gate (policy/CM/four-eyes/
+// audit) lives in callHandler, which runs before the Runner dispatches any
+// command, so execHandler must NOT re-authorize or re-audit (that would double-
+// count external commands). restricted, globals and dirs are parameterized so the
+// deprecated package/method shims can pass the caller's flag plus the process-
+// global stack while the session form passes per-session state. When dirs is nil
+// the process-global directory stack is used.
 func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs *sys.DirStackState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	ds := dirs
 	if ds == nil {
@@ -95,33 +307,12 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 				}
 			}
 
-			cmd := strings.Join(args, " ")
-			e.LogCommand("BASH", cmd)
-
-			// 0. Rego policy evaluation (primary authorization)
-			pctx := BuildPolicyContext(args[0], args[1:], "")
-			allowed, reason, policyErr := e.EvaluatePolicy(pctx)
-			if policyErr != nil {
-				return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
-			}
-			if !allowed {
-				e.LogPolicyDecision(pctx.User, cmd, false, reason)
-				if reason != "" {
-					return fmt.Errorf("adssh: access denied: %s", reason)
-				}
-				return fmt.Errorf("adssh: access denied for '%s' by policy", args[0])
-			}
-			e.LogPolicyDecision(pctx.User, cmd, true, "")
-
-			// 0a. Change management ticket check
-			if err := e.CMSessionCheck(args[0], args[1:]); err != nil {
-				return err
-			}
-
-			// 0b. 4-eyes dual-approval gate
-			if err := e.CheckFourEyes(cmd, args, nil); err != nil {
-				return err
-			}
+			// AUTHORIZATION GATE MOVED: policy eval, CM check, four-eyes and the
+			// audit LogCommand/LogPolicyDecision now run in callHandler (which
+			// fires for every command, including builtins) BEFORE the Runner
+			// dispatches to this exec handler. Re-running them here would double-
+			// authorize and double-audit external commands, so this handler is
+			// dispatch-only from this point on.
 
 			// 1. Custom Starlark commands registered via register_command()
 			if globals != nil {

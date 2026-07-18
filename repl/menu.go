@@ -54,6 +54,7 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 	runner, err := interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
+		interp.CallHandler(security.CallInterceptorSession(sessState)),
 		interp.ExecHandlers(security.BashInterceptorSession(sessState)),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
@@ -115,7 +116,9 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 		}
 
 		ctx := context.Background()
-		if err := runner.Run(ctx, parserFile); err != nil {
+		if gErr := security.GateProgramSession(sessState, parserFile); gErr != nil {
+			fmt.Fprintf(errOut, "Command error: %v\n", gErr)
+		} else if err := runner.Run(ctx, parserFile); err != nil {
 			if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
 				fmt.Fprintf(errOut, "Command error: %v\n", err)
 			}
