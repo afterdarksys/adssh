@@ -36,12 +36,32 @@ stay audited, not implementing them.
   test proving the inner command is policy-checked.
 - **Brace/param expansion, `trap`**: already present; add coverage.
 
-## Signals — partial, bounded by one controlling terminal
+## Signals & per-session job control — MORE achievable than first stated (corrected 2026-07-18)
 
-Already have SIGTSTP self-suspension, SIGCHLD, SIGHUP, `trap` + `__traps__`. Full support ties
-into TODO(session) #3. Achievable: per-session trap tables, per-session job table. NOT
-achievable in-process: independent real POSIX job control for N SSH sessions (needs process/PTY
-separation). Document the boundary; don't fake it.
+Earlier note said "N-session job control needs process separation" — that was too strong. The
+PTY substrate already exists: `github.com/creack/pty v1.1.24` is a dep and `sys/ssh.go` gives
+every SSH connection its own PTY pair via `pty.Open()`. `sys/job.go:56` already sets
+`Setpgid=true` (per-child process group). The reason it's still process-global is a BUG, not a
+physics limit:
+- `sys/job.go:239` `SetForegroundProcessGroup` calls `tcsetpgrp` on `os.Stdin.Fd()` (the adssh
+  process's controlling terminal) instead of the session's PTY slave fd — so `fg`/`bg` from any
+  session drive the wrong terminal. Thread the session PTY fd through → per-session fg/bg.
+- `sys/signals.go:13-17` is a process-global `signal.Ignore`/`signal.Notify(SIGCHLD)` with one
+  global job table. Keep one process-level SIGCHLD reaper but DEMUX to the right session's job
+  table via a global PID→session map (PID/PGID known at NewJob).
+
+Kernel already delivers Ctrl-C/Ctrl-Z to the foreground pgrp ON that session's PTY (VINTR/VSUSP
+in termios_*.go:54,59), so remote interactive signals are per-PTY for free once the child is in
+its own pgrp on that PTY.
+
+Irreducible: the adssh PROCESS has one real controlling terminal, so the locally-launched
+single-operator SIGTSTP-suspends-adssh case (repl.go:447) is inherently singular — fine, because
+remote sessions don't use the process's controlling terminal.
+
+So TODO(session) #3 becomes: (1) thread session PTY fd through job control instead of
+os.Stdin.Fd(); (2) per-session job tables; (3) single SIGCHLD reaper demuxing by PID. All
+in-process, enabled by the creack/pty already shipped. Deserves its own focused pass + tests,
+separate from the mechanical per-session-state moves (i18n lang, history).
 
 ## Starlark enhancement — library additions, same chokepoint
 
