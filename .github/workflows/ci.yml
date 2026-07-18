@@ -46,10 +46,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Coverage ratchet: catches regressions, not aspirations. Baseline measured
-      # 2026-07-17 at 9.7% total (security 23%, engine 53%, parser 100%; the big
-      # starlarkext/repl/sys surfaces are mostly e2e-covered, not unit-covered).
+      # 2026-07-17: 9.7% on macOS, 7.4% on this Linux runner (per-OS files shift
+      # the denominator). security 23%, engine 53%, parser 100%; the big
+      # starlarkext/repl/sys surfaces are mostly e2e-covered, not unit-covered.
       # Raise via repo variable vars.COVERAGE_THRESHOLD as unit coverage grows.
-      COVERAGE_THRESHOLD: ${{ vars.COVERAGE_THRESHOLD || '8' }}
+      COVERAGE_THRESHOLD: ${{ vars.COVERAGE_THRESHOLD || '7' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
