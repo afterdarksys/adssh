@@ -96,13 +96,22 @@ var cmdgenProviders = []string{"docker", "kubectl", "aws"}
 
 // vbinSubcommands maps a vbin name to its recognized first-argument completions.
 var vbinSubcommands = map[string][]string{
-	"stty":    {"sane", "size", "echo", "-echo", "raw", "-raw", "rows", "cols"},
-	"history": {"-c", "-d"},
-	"fc":      {"-l", "-e"},
-	"mirror":  {"list", "view", "console"},
-	"cmdgen":  {"docker", "kubectl", "aws"},
-	"set":     {"-e", "+e", "-u", "+u", "-x", "+x", "-o", "+o"},
-	"help":    {"list", "search", "categories", "examples"},
+	"stty":     {"sane", "size", "echo", "-echo", "raw", "-raw", "rows", "cols"},
+	"history":  {"-c", "-d"},
+	"fc":       {"-l", "-e"},
+	"mirror":   {"list", "view", "console"},
+	"cmdgen":   {"docker", "kubectl", "aws"},
+	"set":      {"-e", "+e", "-u", "+u", "-x", "+x", "-o", "+o"},
+	"help":     {"list", "search", "categories", "examples"},
+	"pick":     {"--query", "--index", "--json", "--non-interactive"},
+	"nav":      {"--hidden", "--json", "--select", "--non-interactive"},
+	"from":     {"json", "jsonl", "csv"},
+	"to":       {"json", "jsonl", "csv", "table"},
+	"why":      {"--json", "--"},
+	"runbook":  {"list", "show", "run"},
+	"par":      {"--jobs", "--"},
+	"evidence": {"--session", "--change", "--since", "--until", "--out"},
+	"lease":    {"--from", "--as", "--ttl", "--"},
 }
 
 // Do implements readline.AutoCompleter.

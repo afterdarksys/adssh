@@ -6,10 +6,15 @@ import "fmt"
 // and whether one is validly set. Returns an error message if blocked.
 // If not in strict mode and no pattern matches, returns nil (no-op).
 func (e *Engine) CMSessionCheck(cmd string, args []string) error {
+	return e.CMSessionCheckForSession("", cmd, args)
+}
+
+// CMSessionCheckForSession validates only the ticket associated with sessionID.
+func (e *Engine) CMSessionCheckForSession(sessionID, cmd string, args []string) error {
 	if !CMRequiredForCommand(cmd) {
 		return nil
 	}
-	ticket, _ := e.GetActiveCMTicket()
+	ticket, _ := e.GetActiveCMTicketForSession(sessionID)
 	if ticket == nil {
 		if CMStrictMode() {
 			return fmt.Errorf("cm: command %q requires an active change ticket (run: cm set <ticket-id>)", cmd)

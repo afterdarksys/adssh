@@ -19,7 +19,7 @@ import (
 // Uses the same runner construction as starlarkext/exec.go: separate stdout/stderr
 // buffers, BashInterceptor for policy enforcement on subcommands, VirtualOpenHandler.
 // Returns structured output with exit_code, stdout, stderr.
-func handleRunShell(globals starlark.StringDict) server.ToolHandlerFunc {
+func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cmd, err := req.RequireString("command")
 		if err != nil {
@@ -36,8 +36,8 @@ func handleRunShell(globals starlark.StringDict) server.ToolHandlerFunc {
 		var stdout, stderr bytes.Buffer
 		runner, err := interp.New(
 			interp.StdIO(nil, &stdout, &stderr),
-			interp.CallHandler(security.CallInterceptor(false, globals)),
-			interp.ExecHandlers(security.BashInterceptor(false, globals)),
+			interp.CallHandler(security.CallInterceptor(restricted, globals)),
+			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
 			interp.OpenHandler(security.VirtualOpenHandler()),
 		)
 		if err != nil {
@@ -46,13 +46,13 @@ func handleRunShell(globals starlark.StringDict) server.ToolHandlerFunc {
 
 		// DeclClause keywords (export/readonly/declare/...) bypass the call and
 		// exec handlers; gate them via the AST pre-scan before running.
-		if err := security.GateProgram(false, parserFile); err != nil {
+		if err := security.GateProgram(restricted, parserFile); err != nil {
 			security.LogCommand("MCP:run_shell", cmd)
 			return mcp.NewToolResultError(fmt.Sprintf("exec error: %v", err)), nil
 		}
 
 		exitCode := 0
-		if err := runner.Run(context.Background(), parserFile); err != nil {
+		if err := runner.Run(ctx, parserFile); err != nil {
 			if status, ok := interp.IsExitStatus(err); ok {
 				exitCode = int(status)
 			} else {

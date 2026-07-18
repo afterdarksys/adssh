@@ -150,12 +150,11 @@ func evalStarlark(thread *starlark.Thread, src string, globals starlark.StringDi
 	return 0
 }
 
-// isBackgroundLine returns true and the stripped command if line ends with '&'.
+// isBackgroundLine intentionally leaves '&' syntax in the shell program.
+// mvdan's runner handles background execution while preserving the configured
+// call/exec interceptors, policy gate, restricted checks, and audit trail. The
+// old direct /bin/sh launcher bypassed all of those controls.
 func isBackgroundLine(line string) (string, bool) {
-	trimmed := strings.TrimRight(line, " \t")
-	if strings.HasSuffix(trimmed, "&") {
-		return strings.TrimRight(trimmed[:len(trimmed)-1], " \t"), true
-	}
 	return "", false
 }
 

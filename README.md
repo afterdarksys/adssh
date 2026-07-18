@@ -20,7 +20,7 @@ adssh --doctor      # check policy, audit, history, SSH, and host-tool readiness
 adssh               # launch
 ```
 
-Requires Go 1.21+.
+Requires Go 1.26+.
 
 ## 5-minute tour
 
@@ -116,12 +116,44 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `package` | Cross-platform package manager |
 | `proc` | `/proc` filesystem reader/writer (Linux) |
 | `grant` | Temporary role escalation |
-| `darkscan` | Malware scanner |
-| `memforensics` | Process memory forensics |
+| `pick` | Charm-powered fuzzy selector for arguments, stdin, or JSON choices |
+| `nav` | Interactive three-column file navigator with previews |
+| `from` / `where` / `select` / `to` | JSONL structured-data pipeline |
+| `why` | Side-effect-free policy/RBAC/CM/four-eyes explanation |
+| `runbook` | Typed Starlark runbooks with governed argv-only steps |
+| `par` | Bounded parallel execution with per-child authorization |
+| `evidence` | Verified, filtered HMAC-chain evidence bundles |
+| `lease` | TTL-bounded command-scoped secrets from environment or private files |
+| `darkscan` | Simulated malware-scanner demo (no security verdict) |
+| `memforensics` | Simulated memory-forensics demo (no process inspection) |
+
+### Advanced VBIN workflows
+
+```bash
+# Fuzzy terminal selection and navigation
+printf 'dev\nstaging\nproduction\n' | pick --query prod
+nav ~/src
+
+# Structured pipelines remain ordinary POSIX byte streams (JSONL internally)
+cat services.json | from json | where 'row["cpu"] > 50' | select name,cpu | to table
+
+# Explain governance without executing or opening an approval request
+why -- kubectl delete namespace production
+
+# Typed Starlark procedures: every step is an argv list and is re-authorized
+ADSSH_RUNBOOK_DIR=examples/runbooks runbook run diagnose --param path=. --dry-run
+
+# Parallel child commands are individually policy/RBAC/CM/four-eyes checked
+par --jobs 4 api worker scheduler -- printf '%s\n' '{}'
+
+# Export verified audit evidence, or lease a secret to one command only
+evidence --session "$SESSION_ID" --out evidence.json
+lease --from env:DEPLOY_TOKEN --as TOKEN --ttl 5m -- deploy --token-env TOKEN
+```
 
 ## Security
 
-- **OPA/Rego policies** — every command is evaluated against a policy before execution. Write rules in `~/.adssh/default.rego`.
+- **OPA/Rego policies** — every command is evaluated against a policy before execution. Write rules in `~/.adssh/policy.rego`.
 - **RBAC entitlements** — YAML-based per-user/group command ACL.
 - **Audit log** — every command logged to `~/.adssh/audit.log` (configurable).
 - **Restricted mode** — `adssh -r` disables path traversal, cd, export.
@@ -129,9 +161,9 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 
 Example policy (allow everything except `rm -rf`):
 ```rego
-package adssh
+package adssh.authz
 
-default allow = true
+default allow = false
 
 deny {
     input.command == "rm"

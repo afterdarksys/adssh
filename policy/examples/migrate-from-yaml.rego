@@ -17,6 +17,8 @@
 
 package adssh.authz
 
+import future.keywords.in
+
 default allow = false
 default deny_reason = "command not in allowlist"
 

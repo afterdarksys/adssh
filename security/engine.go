@@ -83,17 +83,18 @@ type Engine struct {
 	chainSession  string
 	auditChangeID string
 
-	// active change-management ticket
-	cmMu           sync.Mutex
-	activeCMTicket *CMTicket
-	activeCMID     string
+	// active change-management tickets, keyed by authenticated session ID.
+	// The empty key is retained for legacy single-session package APIs.
+	cmMu      sync.Mutex
+	cmTickets map[string]cmTicketState
 
 	// four-eyes base directory ("" => derive from HOME via FourEyesDir())
 	fourEyesDir string
 
 	// entitlements (RBAC)
-	entitlementsMu sync.RWMutex
-	entitlements   EntitlementsConfig
+	entitlementsMu     sync.RWMutex
+	entitlements       EntitlementsConfig
+	entitlementsLoaded bool
 
 	// virtual binary registry
 	vbinMu sync.RWMutex
@@ -114,7 +115,8 @@ var defaultEngine = newDefaultEngine()
 // an empty vbin registry that init() Register calls fill in.
 func newDefaultEngine() *Engine {
 	return &Engine{
-		vbins: map[string]VirtualBinary{},
+		vbins:     map[string]VirtualBinary{},
+		cmTickets: map[string]cmTicketState{},
 	}
 }
 
@@ -152,6 +154,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		restricted:  cfg.Restricted,
 		fourEyesDir: cfg.FourEyesDir,
 		vbins:       map[string]VirtualBinary{},
+		cmTickets:   map[string]cmTicketState{},
 	}
 
 	// Seed the vbin registry from the package default (built by init()).

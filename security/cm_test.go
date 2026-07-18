@@ -99,6 +99,26 @@ func TestCMSessionCheck_StrictBlocks(t *testing.T) {
 	}
 }
 
+func TestChangeTicketStateIsIsolatedBySession(t *testing.T) {
+	eng, err := NewEngine(EngineConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket := &CMTicket{ID: "CHG-A", State: "approved"}
+	eng.SetActiveCMTicketForSession("session-a", ticket, ticket.ID)
+
+	if got, id := eng.GetActiveCMTicketForSession("session-a"); got != ticket || id != ticket.ID {
+		t.Fatalf("session A ticket = (%v, %q), want its configured ticket", got, id)
+	}
+	if got, id := eng.GetActiveCMTicketForSession("session-b"); got != nil || id != "" {
+		t.Fatalf("session B inherited session A ticket: (%v, %q)", got, id)
+	}
+	eng.ClearActiveCMTicketForSession("session-b")
+	if got, _ := eng.GetActiveCMTicketForSession("session-a"); got == nil {
+		t.Fatal("clearing session B removed session A ticket")
+	}
+}
+
 func TestFetchCMTicket_Generic(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -226,11 +226,11 @@ commands are allowed.
 The policy context includes: user, command, args, hostname, session_id,
 principals (roles), and environment variables.
 
-Policy files are loaded at startup via ADSSH_POLICY_FILE or by calling
+Policy files are loaded at startup via ADSSH_POLICY or by calling
 LoadPolicy() from Starlark. Decisions are recorded in the audit log.`,
 			Usage: "ADSSH_POLICY_FILE=/path/to/policy.rego adssh",
 			Examples: []HelpExample{
-				{Command: `package adssh
+				{Command: `package adssh.authz
 default allow = false
 allow { input.command != "rm" }`, Description: "deny the rm command"},
 				{Command: `allow { input.principals[_] == "admin" }`, Description: "allow admins only"},

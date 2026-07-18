@@ -188,8 +188,13 @@ func NewSession(opts SessionOptions) (*Session, error) {
 // `export FOO=1` under a deny-all policy would execute ungated. It mirrors the
 // engine/default-engine branching used to build this session's call handler.
 func (s *Session) GateProgram(node syntax.Node) error {
-	if s.engine != nil {
-		return s.engine.GateProgram(s.Restricted, node)
+	state := &security.SessionState{
+		Restricted: s.Restricted,
+		Globals:    s.Globals,
+		Dirs:       s.Dirs,
 	}
-	return security.GateProgram(s.Restricted, node)
+	if s.engine != nil {
+		return s.engine.GateProgramSession(state, node)
+	}
+	return security.GateProgramSession(state, node)
 }

@@ -3,6 +3,8 @@
 # Copy to ~/.adssh/policy.rego to activate.
 package adssh.authz
 
+import future.keywords.in
+
 default allow = false
 default deny_reason = "only members of the ops group may run commands"
 

@@ -211,8 +211,8 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `jq` | `security/virtualbin.go` | JSON processor using `gojq` — reads stdin, applies a jq filter, writes JSON to stdout |
 | `yq` | `security/virtualbin.go` | YAML processor — same as `jq` but reads YAML input and writes YAML output |
 | `http` | `security/virtualbin.go` | Simple HTTP GET client — fetches a URL and writes the response body to stdout |
-| `darkscan` | `security/virtualbin.go` | Malware scanner stub — submits a file path to the DarkAPI scanner |
-| `memforensics` | `security/virtualbin.go` | Memory forensics stub — scans a PID for secrets and injections |
+| `darkscan` | `security/virtualbin.go` | Simulated malware-scanner demo — does not upload or scan files and returns no verdict |
+| `memforensics` | `security/virtualbin.go` | Simulated memory-forensics demo — does not attach to or inspect processes |
 | `vbins` | `security/vbin_vbins.go` | Discovery — lists all registered VBINs with their descriptions |
 | `help` | `security/vbin_help.go` | Shell help system |
 | `history` | `security/vbin_history.go` | Interactive command history |
@@ -223,6 +223,53 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `grant` | `security/grants.go` | Temporary role escalation |
 | `4eyes` | `security/vbin_foureyes.go` | Four-eyes approval workflow |
 | `cm` | `security/vbin_cm.go` | Change-management workflow |
+| `pick` | `security/vbin_pick.go` | Charm-powered fuzzy selector for arguments, stdin lines, and JSON choices |
+| `nav` | `security/vbin_nav.go` | Three-column file navigator with parent/current/preview panes |
+| `from`, `where`, `select`, `to` | `security/vbin_structured.go` | JSONL structured pipeline with JSON/CSV adapters and Starlark predicates |
+| `why` | `security/vbin_why.go` | Side-effect-free explanation of every governance stage |
+| `runbook` | `security/vbin_runbook.go` | Typed Starlark procedures whose argv-only steps are independently governed |
+| `par` | `security/vbin_par.go` | Bounded worker pool with deterministic output and per-child governance |
+| `evidence` | `security/vbin_evidence.go` | Full-chain-verified, filtered audit evidence bundles |
+| `lease` | `security/vbin_lease.go` | TTL-bounded command environment secrets with output redaction |
+
+### Governed child execution
+
+`runbook`, `par`, and `lease` use the shared runtime in `security/vbin_runtime.go`.
+Each child argv is passed through the same Rego, entitlement, change-management,
+four-eyes, restricted-mode, and audit gate used by an ordinary shell command.
+The runtime does not construct `/bin/sh -c` strings. Output capture is bounded;
+`par` renders buffers in input order even when work completes out of order.
+
+### Structured pipeline contract
+
+`from` normalizes JSON arrays/objects, JSONL, or header-based CSV into one JSON
+value per line. `where` evaluates a Starlark expression with the current value
+available as `row`; the expression must return a boolean. `select` projects
+comma-separated dotted fields. `to` emits JSON, JSONL, CSV, or a terminal table.
+Record size, input size, and record count are bounded. This preserves POSIX pipe
+compatibility while providing a predictable structured-data layer.
+
+### Runbook contract
+
+Runbooks are permission-checked `.star` files containing `description`, `params`,
+and a non-empty `steps` list. Parameters support `string`, `int`, `float`, and
+`bool`. Every step uses a string argv list—shell program strings are deliberately
+unsupported. Runbooks are loaded from `ADSSH_RUNBOOK_DIR`, or the XDG adssh
+configuration directory's `runbooks/` child by default.
+
+### Evidence and lease boundaries
+
+`evidence` verifies the complete configured HMAC ledger before applying session,
+change, or time filters. Returned entries retain their original chain hashes;
+the bundle also contains its chain head and a SHA-256 digest. Output files are
+published atomically with mode `0600`.
+
+`lease` accepts only `env:NAME` or a private regular `file:path`, injects the
+value into one child environment, applies a maximum 24-hour TTL, and redacts the
+exact secret from captured stdout/stderr. It is a command-scoping primitive, not
+a replacement for a vault: Go cannot guarantee that every immutable in-memory
+string copy is immediately zeroed, and a child can deliberately exfiltrate a
+credential through transformed output or external side effects.
 | `stty` | `security/vbin_stty.go` | Terminal mode controls |
 | `proc` | `security/vbin_proc.go` | Linux `/proc` filesystem accessor — `proc get|set <path> [value]` |
 | `package` | `security/vbin_package.go` | Cross-distro package manager wrapper — `package install|remove|update|list <pkg>` |

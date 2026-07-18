@@ -30,7 +30,14 @@ func (e *Engine) LoadEntitlements(path string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse entitlements: %v", err)
 	}
+	e.entitlementsLoaded = true
 	return nil
+}
+
+func (e *Engine) hasEntitlements() bool {
+	e.entitlementsMu.RLock()
+	defer e.entitlementsMu.RUnlock()
+	return e.entitlementsLoaded
 }
 
 // IsAuthorized checks if the user or their principals are authorized to run a virtual binary or custom command.

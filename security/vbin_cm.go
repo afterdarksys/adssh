@@ -54,7 +54,7 @@ func (cmBinary) Run(ctx context.Context, args []string) error {
 }
 
 // cmSet fetches the ticket by ID, validates it, and stores it as active.
-func cmSet(_ context.Context, hc interp.HandlerContext, args []string) error {
+func cmSet(ctx context.Context, hc interp.HandlerContext, args []string) error {
 	if len(args) < 3 {
 		return fmt.Errorf("cm set: missing ticket-id\nUsage: cm set <ticket-id>")
 	}
@@ -72,7 +72,7 @@ func cmSet(_ context.Context, hc interp.HandlerContext, args []string) error {
 		return fmt.Errorf("cm: ticket %s is not valid for use (state: %s)", ticket.ID, ticket.State)
 	}
 
-	SetActiveCMTicket(ticket, id)
+	engineFromContext(ctx).SetActiveCMTicketForSession(SessionIDFromContext(ctx), ticket, id)
 
 	stateColour := ansiGreen
 	stateSymbol := "✓"
@@ -104,7 +104,7 @@ func cmSet(_ context.Context, hc interp.HandlerContext, args []string) error {
 }
 
 // cmCheck checks the status of a ticket (by ID or active).
-func cmCheck(_ context.Context, hc interp.HandlerContext, args []string) error {
+func cmCheck(ctx context.Context, hc interp.HandlerContext, args []string) error {
 	var id string
 	var ticket *CMTicket
 
@@ -118,7 +118,7 @@ func cmCheck(_ context.Context, hc interp.HandlerContext, args []string) error {
 		}
 	} else {
 		var activeID string
-		ticket, activeID = GetActiveCMTicket()
+		ticket, activeID = engineFromContext(ctx).GetActiveCMTicketForSession(SessionIDFromContext(ctx))
 		if ticket == nil {
 			fmt.Fprintf(hc.Stdout, "%s⚠%s No active change ticket set.\n", ansiYellow, ansiReset)
 			fmt.Fprintln(hc.Stdout, "Run: cm set <ticket-id>")
@@ -156,9 +156,10 @@ func cmCheck(_ context.Context, hc interp.HandlerContext, args []string) error {
 }
 
 // cmClear removes the active CM ticket from the session.
-func cmClear(_ context.Context, hc interp.HandlerContext) error {
-	_, id := GetActiveCMTicket()
-	ClearActiveCMTicket()
+func cmClear(ctx context.Context, hc interp.HandlerContext) error {
+	sessionID := SessionIDFromContext(ctx)
+	_, id := engineFromContext(ctx).GetActiveCMTicketForSession(sessionID)
+	engineFromContext(ctx).ClearActiveCMTicketForSession(sessionID)
 	if id != "" {
 		fmt.Fprintf(hc.Stdout, "%s✓%s Cleared active ticket %s\n", ansiGreen, ansiReset, id)
 	} else {
@@ -168,8 +169,8 @@ func cmClear(_ context.Context, hc interp.HandlerContext) error {
 }
 
 // cmStatus prints the currently active ticket, or "no ticket set".
-func cmStatus(_ context.Context, hc interp.HandlerContext) error {
-	ticket, id := GetActiveCMTicket()
+func cmStatus(ctx context.Context, hc interp.HandlerContext) error {
+	ticket, id := engineFromContext(ctx).GetActiveCMTicketForSession(SessionIDFromContext(ctx))
 	if ticket == nil {
 		fmt.Fprintf(hc.Stdout, "%s⚠%s No change ticket set.\n", ansiYellow, ansiReset)
 		fmt.Fprintln(hc.Stdout, "Run: cm set <ticket-id>")

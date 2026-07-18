@@ -140,7 +140,7 @@ type darkscanBinary struct{}
 
 func (darkscanBinary) Name() string { return "darkscan" }
 func (darkscanBinary) Description() string {
-	return "Malware scanner — submit a file to the DarkAPI scanner"
+	return "Demo malware scanner — simulated output only"
 }
 func (darkscanBinary) Usage() string { return "darkscan <file>" }
 
@@ -150,9 +150,9 @@ func (darkscanBinary) Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("darkscan: missing file argument")
 	}
 
-	fmt.Fprintf(hc.Stdout, "Submitting %s to DarkAPI Malware Scanner...\n", args[1])
-	fmt.Fprintf(hc.Stdout, "[*] Simulated Hash: 8b1a9953c4611296a827abf8c47804d7e6c49c6b\n")
-	fmt.Fprintf(hc.Stdout, "[+] Result: CLEAN (Score: 0.00)\n")
+	fmt.Fprintln(hc.Stdout, "SIMULATED — NO SECURITY VERDICT")
+	fmt.Fprintf(hc.Stdout, "Demo input: %s\n", args[1])
+	fmt.Fprintln(hc.Stdout, "No file was uploaded or scanned.")
 	return nil
 }
 
@@ -162,7 +162,7 @@ type memforensicsBinary struct{}
 
 func (memforensicsBinary) Name() string { return "memforensics" }
 func (memforensicsBinary) Description() string {
-	return "Memory forensics — scan a process for secrets and injections"
+	return "Demo memory forensics — simulated output only"
 }
 func (memforensicsBinary) Usage() string { return "memforensics <pid>" }
 
@@ -172,9 +172,9 @@ func (memforensicsBinary) Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("memforensics: missing pid argument")
 	}
 
-	fmt.Fprintf(hc.Stdout, "Attaching to process %s for memory forensics...\n", args[1])
-	fmt.Fprintf(hc.Stdout, "[*] Scanning memory regions for secrets and injections via ads-memory-forensics...\n")
-	fmt.Fprintf(hc.Stdout, "[-] No threats detected.\n")
+	fmt.Fprintln(hc.Stdout, "SIMULATED — NO SECURITY VERDICT")
+	fmt.Fprintf(hc.Stdout, "Demo process ID: %s\n", args[1])
+	fmt.Fprintln(hc.Stdout, "No process was attached to or inspected.")
 	return nil
 }
 
