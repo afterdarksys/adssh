@@ -63,6 +63,17 @@ os.Stdin.Fd(); (2) per-session job tables; (3) single SIGCHLD reaper demuxing by
 in-process, enabled by the creack/pty already shipped. Deserves its own focused pass + tests,
 separate from the mechanical per-session-state moves (i18n lang, history).
 
+### golang.org/x/term (already indirect at v0.42.0 — promote to direct, use surgically)
+Three concrete uses, no new module-graph cost:
+- `term.IsTerminal(fd)` — replace the `SaveTermios(fd)`-err-check tty test added in the Linux
+  build fix (job.go); idiomatic + cross-platform.
+- `term.ReadPassword(fd)` — the `read` builtin (interceptor.go) has NO `-s` silent mode today,
+  so `read -s password` echoes the secret. Real missing feature; also the right primitive for
+  secret prompts (ties to operator-DX #2 redaction).
+- `term.GetSize(fd)` — portable SSH window-size, cleaner than hand-rolled parseDims (ssh.go).
+DO NOT let x/term replace termios_darwin.go/termios_linux.go: those set VINTR/VSUSP/VMIN/VTIME
+control chars for job control that term.MakeRaw (fixed raw transform) can't express.
+
 ## Starlark enhancement — library additions, same chokepoint
 
 Starlark won't grow `<<<` syntax, but capabilities map to builtins, all routed through the
