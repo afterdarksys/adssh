@@ -82,3 +82,14 @@ Engine policy/audit path:
 - process substitution → `sys.capture()` / temp-fd helper.
 - signals → `sys.on_signal(sig, callback)` bridging the trap table.
 - network → policy-gated `net.dial()` (exists) + new `net.dial_udp()`; both gated like SEC-1.
+
+## go-acl (POSIX ACLs) — NEW dependency, compliance/hardening item
+Not currently a dep (unlike creack/pty and x/term). Worth adding for two on-brand uses;
+NOT core to the freeze.
+- `--doctor` hardening check: sensitive files (chain HMAC key, SSH host key, authorized_keys,
+  ledger) are protected by mode bits only (audit_chain.go:88-91, ssh.go:46). A permissive POSIX
+  ACL entry can grant access `ls -l` won't show. Doctor asserts "no ACL beyond owner" on those.
+- `getfacl`/`setfacl` as virtual binaries: ACL inspect/manage routed through policy+audit like
+  the other in-process reimplementations, instead of shelling out unaudited.
+- HOLD: feeding file ACLs into PolicyContext for Rego — OS already enforces ACLs on open, so
+  it's explain/pre-flight value only; not worth the policy-input complexity yet.
