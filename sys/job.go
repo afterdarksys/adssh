@@ -239,7 +239,7 @@ func SetForegroundProcessGroup(pgid int) error {
 	fd := int(os.Stdin.Fd())
 
 	// Ensure we are actually attached to a terminal
-	if _, err := unix.IoctlGetTermios(fd, unix.TIOCGETA); err != nil {
+	if _, err := SaveTermios(fd); err != nil {
 		// Not a terminal, silently skip job control
 		return nil
 	}
