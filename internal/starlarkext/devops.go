@@ -2,7 +2,7 @@ package starlarkext
 
 import (
 	"fmt"
-	"github.com/afterdarksys/adssh/devops"
+	"github.com/afterdarksys/adssh/internal/devops"
 	"go.starlark.net/starlark"
 )
 

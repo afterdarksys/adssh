@@ -14,13 +14,13 @@ import (
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/syntax"
 
-	"github.com/afterdarksys/adssh/config"
+	"github.com/afterdarksys/adssh/internal/config"
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/parser"
-	"github.com/afterdarksys/adssh/repl"
+	"github.com/afterdarksys/adssh/internal/repl"
 	"github.com/afterdarksys/adssh/security"
-	"github.com/afterdarksys/adssh/starlarkext"
-	"github.com/afterdarksys/adssh/sys"
+	"github.com/afterdarksys/adssh/internal/starlarkext"
+	"github.com/afterdarksys/adssh/internal/sys"
 )
 
 func init() {

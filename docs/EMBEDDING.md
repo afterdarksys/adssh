@@ -15,8 +15,11 @@ This guide covers the stable embedding surface:
 6. [Mount the SSH server and MCP handlers](#6-mounting-ssh-and-mcp)
 
 The import path is `github.com/afterdarksys/adssh/engine`. The `engine` package
-is the intended boundary; `security/`, `sys/`, `starlarkext/` and `repl/` are
-lower-level and may change between minor versions.
+is the intended boundary. `security/` is also public and may be reached through
+`eng.Security()` for operations the `engine` facade does not yet re-expose.
+Everything else (`sys/`, `starlarkext/`, `repl/`, `sysmgmt/`, `devops/`, `i18n/`,
+`config/`) lives under `internal/` as of the v0.9.0 API freeze and is not part of
+the embedding surface at all — it cannot be imported from outside this module.
 
 ---
 
@@ -256,44 +259,20 @@ sharing one engine across tenants.
 
 ## 6. Mounting SSH and MCP
 
-The binary mounts the same building blocks a host can mount.
+The `adssh` binary mounts its own SSH server internally; the MCP server is the
+one building block of this kind that a host can mount directly today.
 
 ### SSH server
 
-`sys.EnableSSH` starts the built-in pubkey-only SSH server. The starter callback
-runs once per accepted connection; build a fresh session (or REPL) per connection
-inside it.
-
-```go
-import "github.com/afterdarksys/adssh/sys"
-
-// The SSH server and the Starlark exec builtins still resolve the process-global
-// default engine. Point the default at your engine once at startup so those
-// paths authorize through the same policy/audit/chain as your sessions.
-security.SetDefaultEngine(eng.Security())
-
-starter := func(sessionID, user string, principals []string,
-	in io.ReadCloser, out, errOut io.Writer) {
-
-	menu := eng.Security().GetMenuForUser(user, principals)
-	if menu != "" {
-		repl.StartMenu(menu, /* globals */ nil, false, in, out, errOut)
-		return
-	}
-	repl.Start(/* globals */ nil, false, "", in, out, errOut)
-}
-
-if err := sys.EnableSSH(":2222", "/etc/adssh/host_key", "/etc/adssh/authorized_keys", starter); err != nil {
-	log.Fatal(err)
-}
-```
-
-> Note: `repl.Start`/`repl.StartMenu` and the Starlark exec builtins currently
-> resolve the process default engine rather than taking an `*engine.Engine`
-> directly (tracked as `TODO(engine-facade)`). `security.SetDefaultEngine` keeps
-> them consistent with your engine for single-tenant hosts. Multi-tenant hosts
-> that need per-connection engines should not share the process default; wire the
-> connection's own `engine.Session` instead.
+The built-in pubkey-only SSH server (previously `sys.EnableSSH`) and the REPL
+starters (`repl.Start`/`repl.StartMenu`) live under `internal/` as of the
+v0.9.0 API freeze and are not part of the public embedding surface — a host
+in another module cannot import them. Mounting an SSH-accessible shell is
+currently only supported by running the `adssh` binary itself (with
+`ADSSH_SERVE`/`-s`, see `internal/config/env.go` and `main.go`); there is no public
+`engine`-level API for it yet. If your host needs to embed SSH mounting
+directly, treat that as a feature request against the `engine` facade rather
+than reaching into `internal/sys`.
 
 ### MCP server
 
@@ -321,8 +300,11 @@ return dispatch()
 ## API stability
 
 The `engine` package is the versioned boundary. Until `v1.0.0` its exported
-surface changes only by deliberate decision. Lower-level packages (`security/`,
-`sys/`, `starlarkext/`, `repl/`) are consumed by `engine` and the binaries and may
-change; prefer the `engine`/`Session` methods, and reach through `eng.Security()`
-only for the security-core operations (`EvaluatePolicy`, `VerifyChain`,
-`ExportChain`, `LogEvent`) that the facade does not yet re-expose.
+surface changes only by deliberate decision. `security/` is also public and may
+change independently; prefer the `engine`/`Session` methods, and reach through
+`eng.Security()` only for the security-core operations (`EvaluatePolicy`,
+`VerifyChain`, `ExportChain`, `LogEvent`) that the facade does not yet
+re-expose. `sys/`, `starlarkext/`, `repl/`, `sysmgmt/`, `devops/`, `i18n/` and
+`config/` are internal implementation packages under `internal/` as of the
+v0.9.0 API freeze — they are consumed by `engine` and the binaries but are not
+importable, and not part of, the embedding surface.

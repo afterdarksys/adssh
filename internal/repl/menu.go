@@ -11,8 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/afterdarksys/adssh/security"
-	"github.com/afterdarksys/adssh/starlarkext"
-	"github.com/afterdarksys/adssh/sys"
+	"github.com/afterdarksys/adssh/internal/starlarkext"
+	"github.com/afterdarksys/adssh/internal/sys"
 
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"

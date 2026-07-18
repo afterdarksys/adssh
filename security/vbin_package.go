@@ -2,7 +2,7 @@ package security
 
 import (
 	"context"
-	"github.com/afterdarksys/adssh/sysmgmt"
+	"github.com/afterdarksys/adssh/internal/sysmgmt"
 )
 
 // package — cross-platform package manager

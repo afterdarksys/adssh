@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/afterdarksys/adssh/config"
+	"github.com/afterdarksys/adssh/internal/config"
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/security"
 

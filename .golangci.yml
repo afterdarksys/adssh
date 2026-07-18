@@ -37,7 +37,7 @@ linters:
       - third_party
       # Locale/translation data may intentionally contain en-GB spellings;
       # correcting them would corrupt translations.
-      - i18n
+      - internal/i18n
       # e2e/ is out of scope for this lint-debt pass (tracked separately,
       # same as the SA1019 exclude-rule below); don't let pre-existing
       # findings there block the newly-blocking errcheck/misspell/ineffassign gate.

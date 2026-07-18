@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/afterdarksys/adssh/sys"
+	"github.com/afterdarksys/adssh/internal/sys"
 
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"

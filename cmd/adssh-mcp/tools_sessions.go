@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/afterdarksys/adssh/security"
-	"github.com/afterdarksys/adssh/sys"
+	"github.com/afterdarksys/adssh/internal/sys"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"

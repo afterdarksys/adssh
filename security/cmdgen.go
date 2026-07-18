@@ -3,7 +3,7 @@ package security
 import (
 	"context"
 	"fmt"
-	"github.com/afterdarksys/adssh/devops"
+	"github.com/afterdarksys/adssh/internal/devops"
 	"strings"
 
 	"mvdan.cc/sh/v3/interp"

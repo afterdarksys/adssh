@@ -7,10 +7,10 @@ import (
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
 
-	"github.com/afterdarksys/adssh/config"
+	"github.com/afterdarksys/adssh/internal/config"
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/security"
-	"github.com/afterdarksys/adssh/starlarkext"
+	"github.com/afterdarksys/adssh/internal/starlarkext"
 )
 
 func init() {

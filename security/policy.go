@@ -7,7 +7,7 @@ import (
 	osuser "os/user"
 	"time"
 
-	"github.com/afterdarksys/adssh/sys"
+	"github.com/afterdarksys/adssh/internal/sys"
 
 	"github.com/open-policy-agent/opa/rego"
 )

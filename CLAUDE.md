@@ -28,7 +28,7 @@ make clean        # rm -f adssh adssh-mcp
 Single test / package:
 ```bash
 go test ./security/...              # e.g. security/policy_test.go
-go test ./starlarkext/...           # e.g. starlarkext/libagent_test.go
+go test ./internal/starlarkext/...  # e.g. internal/starlarkext/libagent_test.go
 go test ./security/... -run TestName -v
 ```
 
@@ -48,9 +48,9 @@ file, starts the SSH server, or drops into the interactive REPL — all four pat
 **Dual-mode dispatch.** `parser.DetermineMode` is a line-level heuristic (not a full parser) that
 decides whether a line of input should be evaluated as Starlark or handed to the shell interpreter
 (`mvdan.cc/sh/v3`). `!`/`$ ` forces shell; `def`/`for`/`if`/`print(`/assignment-looking lines go to
-Starlark; everything else defaults to shell. The REPL (`repl/repl.go`) uses this to decide, per input
+Starlark; everything else defaults to shell. The REPL (`internal/repl/repl.go`) uses this to decide, per input
 chunk, whether to call `starlark.Eval`/`ExecFile` against the shared globals or hand the line to the
-`mvdan.cc/sh/v3` interpreter. `repl/menu.go` provides a restricted, menu-driven REPL variant used for
+`mvdan.cc/sh/v3` interpreter. `internal/repl/menu.go` provides a restricted, menu-driven REPL variant used for
 SSH sessions mapped to a menu by `security.GetMenuForUser`.
 
 **Every shell command is intercepted.** All shell execution — REPL, `-c`, scripts, SSH sessions —
@@ -69,11 +69,11 @@ dual-approval gate (`security.CheckFourEyes`), (4) custom commands registered fr
 `mirror`, `cmdgen`, `package`, `proc`, `grant`, `darkscan`, `memforensics`, ...) that run in-process
 instead of shelling out. Each implements the `security.VirtualBinary` interface (`Name`,
 `Description`, `Usage`, `Run`) and self-registers via `security.Register` from an `init()`; the
-registry is package-global in `security/` (`vbin_*.go` files), with `sysmgmt/` and `starlarkext/`
+registry is package-global in `security/` (`vbin_*.go` files), with `internal/sysmgmt/` and `internal/starlarkext/`
 supplying some of the underlying implementations (e.g. `/proc` access, package management, container
 exec). See `docs/VBIN-SPEC.md` for the contract new virtual binaries must follow.
 
-**Starlark standard library (`starlarkext/`).** `SetupExtensions` is the single place that assembles
+**Starlark standard library (`internal/starlarkext/`).** `SetupExtensions` is the single place that assembles
 the Starlark globals: cloud provider namespaces (`aws`, `gcp`, `azure`, `oci`), `k8s`, `secrets`
 (Vault/AWS SM/Azure KV/GCP SM), database clients, notifications (Slack/webhook/PagerDuty), Docker
 Engine API access, git/GitHub (`git`, `github`), ephemeral audited container exec (`containers`),
@@ -92,7 +92,7 @@ tamper-evident hash chain (`audit.go`, `audit_chain.go`), change-management gati
 `policy/` (`default.rego` plus `policy/examples/`) and are evaluated against a `PolicyContext`
 (user, groups, command, args, session) built by `security.BuildPolicyContext`.
 
-**`sys/`** owns OS-level session concerns that `security/` and `repl/` build on: the SSH server
+**`internal/sys/`** owns OS-level session concerns that `security/` and `internal/repl/` build on: the SSH server
 (`ssh.go`, using host keys + `authorized_keys` for pubkey-only auth), session tracking
 (`session.go`), job control (`job.go`), terminal/ioctl handling (per-OS in `termios_linux.go` /
 `termios_darwin.go`), signal setup, and the `pushd`/`popd` directory stack.
@@ -104,13 +104,13 @@ wrapped in `policyGate`, which runs the exact same `security.EvaluatePolicy` use
 shell before dispatching to a handler — so MCP-driven commands are subject to the same Rego policy as
 a human at the terminal.
 
-**`config/`** handles environment/config loading: `env.go` reads `ADSSH_*` vars into `AppConfig` with
+**`internal/config/`** handles environment/config loading: `env.go` reads `ADSSH_*` vars into `AppConfig` with
 XDG-aware path defaults (`xdg.go`), and `profile.go` loads the Starlark login profile
 (`~/.adsshprofile`) and RC script (`~/.adsshrc`) into the shared globals dict at startup.
 
 ## Configuration
 
-Behavior is driven by `ADSSH_*` environment variables (see `config/env.go` for the full list and
+Behavior is driven by `ADSSH_*` environment variables (see `internal/config/env.go` for the full list and
 defaults), including `ADSSH_RESTRICTED`, `ADSSH_SERVE`, `ADSSH_POLICY`, `ADSSH_ENTITLEMENTS`,
 `ADSSH_AUDIT_LOG`, `ADSSH_HISTORY`, `ADSSH_HOST_KEY`, `ADSSH_AUTHORIZED_KEYS`, `ADSSH_PROFILE`, and
 `ADSSH_RC`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
