@@ -45,11 +45,11 @@ jobs:
     name: Test (race + coverage)
     runs-on: ubuntu-latest
     env:
-      # Starting coverage ratchet. Override with a repo/org variable
-      # (vars.COVERAGE_THRESHOLD) as the suite grows. NOTE: the current baseline
-      # is ~2% (only security/ and starlarkext/ have unit tests), so 25% is an
-      # aspirational target — lower this or add tests before making it a hard gate.
-      COVERAGE_THRESHOLD: ${{ vars.COVERAGE_THRESHOLD || '25' }}
+      # Coverage ratchet: catches regressions, not aspirations. Baseline measured
+      # 2026-07-17 at 9.7% total (security 23%, engine 53%, parser 100%; the big
+      # starlarkext/repl/sys surfaces are mostly e2e-covered, not unit-covered).
+      # Raise via repo variable vars.COVERAGE_THRESHOLD as unit coverage grows.
+      COVERAGE_THRESHOLD: ${{ vars.COVERAGE_THRESHOLD || '8' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -101,5 +101,5 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.1.6
+          version: latest
           args: --timeout=5m
