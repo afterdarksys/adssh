@@ -1,6 +1,7 @@
 package sys
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -51,28 +52,95 @@ func loadOrGenerateHostKey(keyPath string) (ssh.Signer, error) {
 	return ssh.ParsePrivateKey(privateKeyPEM)
 }
 
-// loadAuthorizedKeys reads public keys from authKeysPath.
-// Returns nil, nil if the file does not exist.
-func loadAuthorizedKeys(authKeysPath string) (map[string]bool, error) {
+type authorizedKeySet struct {
+	userKeys    map[string]bool
+	authorities map[string]bool
+}
+
+func (k authorizedKeySet) empty() bool {
+	return len(k.userKeys) == 0 && len(k.authorities) == 0
+}
+
+// loadAuthorizedKeys reads direct user keys and explicitly marked certificate
+// authorities from an OpenSSH authorized_keys file.
+func loadAuthorizedKeys(authKeysPath string) (authorizedKeySet, error) {
+	keys := authorizedKeySet{
+		userKeys:    make(map[string]bool),
+		authorities: make(map[string]bool),
+	}
 
 	data, err := os.ReadFile(authKeysPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return keys, nil
 		}
-		return nil, fmt.Errorf("failed to read %s: %v", authKeysPath, err)
+		return keys, fmt.Errorf("failed to read %s: %v", authKeysPath, err)
 	}
 
-	authorizedKeys := make(map[string]bool)
-	for len(data) > 0 {
-		pubKey, _, _, rest, err := ssh.ParseAuthorizedKey(data)
-		if err != nil {
-			break
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
-		authorizedKeys[string(pubKey.Marshal())] = true
-		data = rest
+		pubKey, _, options, _, err := ssh.ParseAuthorizedKey([]byte(line))
+		if err != nil {
+			return keys, fmt.Errorf("failed to parse %s line %d: %v", authKeysPath, lineNumber, err)
+		}
+		isAuthority := false
+		for _, option := range options {
+			if option == "cert-authority" {
+				isAuthority = true
+				continue
+			}
+			return keys, fmt.Errorf("unsupported authorized_keys option %q on line %d", option, lineNumber)
+		}
+		if isAuthority {
+			keys.authorities[string(pubKey.Marshal())] = true
+		} else {
+			keys.userKeys[string(pubKey.Marshal())] = true
+		}
 	}
-	return authorizedKeys, nil
+	if err := scanner.Err(); err != nil {
+		return keys, fmt.Errorf("failed to scan %s: %v", authKeysPath, err)
+	}
+	return keys, nil
+}
+
+func publicKeyCallback(keys authorizedKeySet) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+	checker := &ssh.CertChecker{
+		IsUserAuthority: func(key ssh.PublicKey) bool {
+			return keys.authorities[string(key.Marshal())]
+		},
+		UserKeyFallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if !keys.userKeys[string(key.Marshal())] {
+				return nil, fmt.Errorf("unauthorized key from %s", conn.RemoteAddr())
+			}
+			return &ssh.Permissions{}, nil
+		},
+	}
+
+	return func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		if cert, ok := key.(*ssh.Certificate); ok {
+			if cert.Key == nil || cert.SignatureKey == nil || cert.Signature == nil {
+				return nil, fmt.Errorf("ssh: malformed user certificate")
+			}
+		}
+		permissions, err := checker.Authenticate(conn, key)
+		if err != nil {
+			return nil, err
+		}
+		if permissions.Extensions == nil {
+			permissions.Extensions = make(map[string]string)
+		}
+		permissions.Extensions["pubkey-fp"] = ssh.FingerprintSHA256(key)
+		if cert, ok := key.(*ssh.Certificate); ok {
+			permissions.Extensions["principals"] = strings.Join(cert.ValidPrincipals, ",")
+		}
+		return permissions, nil
+	}
 }
 
 var (
@@ -107,7 +175,7 @@ func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionSta
 	if err != nil {
 		return fmt.Errorf("failed to load authorized keys: %v", err)
 	}
-	if len(authorizedKeys) == 0 {
+	if authorizedKeys.empty() {
 		return fmt.Errorf(
 			"no authorized keys found in %s\n"+
 				"add your public key to allow SSH access:\n"+
@@ -116,27 +184,7 @@ func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionSta
 		)
 	}
 
-	config := &ssh.ServerConfig{
-		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			perms := &ssh.Permissions{
-				Extensions: map[string]string{
-					"pubkey-fp": ssh.FingerprintSHA256(key),
-				},
-			}
-
-			if cert, ok := key.(*ssh.Certificate); ok {
-				perms.Extensions["principals"] = strings.Join(cert.ValidPrincipals, ",")
-				if authorizedKeys[string(cert.SignatureKey.Marshal())] {
-					return perms, nil
-				}
-			}
-
-			if authorizedKeys[string(key.Marshal())] {
-				return perms, nil
-			}
-			return nil, fmt.Errorf("unauthorized key from %s", conn.RemoteAddr())
-		},
-	}
+	config := &ssh.ServerConfig{PublicKeyCallback: publicKeyCallback(authorizedKeys)}
 
 	signer, err := loadOrGenerateHostKey(hostKeyPath)
 	if err != nil {

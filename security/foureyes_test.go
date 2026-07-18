@@ -1,6 +1,7 @@
 package security
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,6 +170,42 @@ func TestFourEyes_ApproveDenyMarkers(t *testing.T) {
 	}
 	if _, err := os.Stat(pendingFile2); !os.IsNotExist(err) {
 		t.Errorf("expected pending file removed after deny, stat err=%v", err)
+	}
+}
+
+func TestFourEyesApprovalEnforcesDistinctConfiguredApprover(t *testing.T) {
+	eng, err := NewEngine(EngineConfig{FourEyesDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ensureFourEyesDirs(); err != nil {
+		t.Fatal(err)
+	}
+	seed := func(token, requester, approver string) {
+		t.Helper()
+		pending := FourEyesPending{
+			Token:     token,
+			Requester: requester,
+			Rule:      FourEyesRule{Approver: approver},
+		}
+		data, err := json.Marshal(pending)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(eng.fourEyesPendingDir(), token+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	seed("abcdef123456", "alice", "bob")
+	if err := eng.ApproveRequestAs("abcdef123456", "alice"); err == nil {
+		t.Fatal("requester approved their own four-eyes request")
+	}
+	if err := eng.ApproveRequestAs("abcdef123456", "eve"); err == nil {
+		t.Fatal("unconfigured approver approved the request")
+	}
+	if err := eng.ApproveRequestAs("abcdef123456", "bob"); err != nil {
+		t.Fatalf("configured distinct approver was rejected: %v", err)
 	}
 }
 

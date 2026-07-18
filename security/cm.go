@@ -260,12 +260,39 @@ func IsTicketValid(t *CMTicket) bool {
 
 // Active CM ticket session state — now held on the Engine.
 
-// SetActiveCMTicket stores t as the active CM ticket for this session.
-func (e *Engine) SetActiveCMTicket(t *CMTicket, id string) {
+type cmTicketState struct {
+	ticket *CMTicket
+	id     string
+}
+
+// SetActiveCMTicketForSession stores a ticket for one authenticated session.
+func (e *Engine) SetActiveCMTicketForSession(sessionID string, t *CMTicket, id string) {
 	e.cmMu.Lock()
 	defer e.cmMu.Unlock()
-	e.activeCMTicket = t
-	e.activeCMID = id
+	if e.cmTickets == nil {
+		e.cmTickets = map[string]cmTicketState{}
+	}
+	e.cmTickets[sessionID] = cmTicketState{ticket: t, id: id}
+}
+
+// GetActiveCMTicketForSession returns only the named session's active ticket.
+func (e *Engine) GetActiveCMTicketForSession(sessionID string) (*CMTicket, string) {
+	e.cmMu.Lock()
+	defer e.cmMu.Unlock()
+	state := e.cmTickets[sessionID]
+	return state.ticket, state.id
+}
+
+// ClearActiveCMTicketForSession removes only the named session's active ticket.
+func (e *Engine) ClearActiveCMTicketForSession(sessionID string) {
+	e.cmMu.Lock()
+	defer e.cmMu.Unlock()
+	delete(e.cmTickets, sessionID)
+}
+
+// SetActiveCMTicket stores t as the active CM ticket for this session.
+func (e *Engine) SetActiveCMTicket(t *CMTicket, id string) {
+	e.SetActiveCMTicketForSession("", t, id)
 }
 
 // SetActiveCMTicket stores t as the active CM ticket for this session.
@@ -277,9 +304,7 @@ func SetActiveCMTicket(t *CMTicket, id string) {
 
 // GetActiveCMTicket returns the active CM ticket and its ID.
 func (e *Engine) GetActiveCMTicket() (*CMTicket, string) {
-	e.cmMu.Lock()
-	defer e.cmMu.Unlock()
-	return e.activeCMTicket, e.activeCMID
+	return e.GetActiveCMTicketForSession("")
 }
 
 // GetActiveCMTicket returns the active CM ticket and its ID.
@@ -291,10 +316,19 @@ func GetActiveCMTicket() (*CMTicket, string) {
 
 // ClearActiveCMTicket removes the active CM ticket from the session.
 func (e *Engine) ClearActiveCMTicket() {
-	e.cmMu.Lock()
-	defer e.cmMu.Unlock()
-	e.activeCMTicket = nil
-	e.activeCMID = ""
+	e.ClearActiveCMTicketForSession("")
+}
+
+func SetActiveCMTicketForSession(sessionID string, t *CMTicket, id string) {
+	defaultEngine.SetActiveCMTicketForSession(sessionID, t, id)
+}
+
+func GetActiveCMTicketForSession(sessionID string) (*CMTicket, string) {
+	return defaultEngine.GetActiveCMTicketForSession(sessionID)
+}
+
+func ClearActiveCMTicketForSession(sessionID string) {
+	defaultEngine.ClearActiveCMTicketForSession(sessionID)
 }
 
 // ClearActiveCMTicket removes the active CM ticket from the session.

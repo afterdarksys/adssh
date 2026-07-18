@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -20,34 +21,51 @@ func handleAuditLog(auditLogPath string) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Parse limit param (default 50)
 		limit := int(req.GetFloat("limit", 50))
+		if limit <= 0 {
+			return mcp.NewToolResultError("limit must be greater than zero"), nil
+		}
+		if limit > 10000 {
+			return mcp.NewToolResultError("limit must not exceed 10000"), nil
+		}
 
 		// Parse optional filter param
 		filter := req.GetString("filter", "")
 
-		data, err := os.ReadFile(auditLogPath)
+		file, err := os.Open(auditLogPath)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return mcp.NewToolResultText("(no audit log entries)"), nil
 			}
 			return mcp.NewToolResultError(fmt.Sprintf("cannot read audit log: %v", err)), nil
 		}
+		defer file.Close()
 
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-
-		// Apply filter if specified
-		if filter != "" {
-			var filtered []string
-			for _, line := range lines {
-				if strings.Contains(line, filter) {
-					filtered = append(filtered, line)
-				}
+		// Keep only a bounded ring of matching lines instead of reading an
+		// arbitrarily large audit file into memory.
+		lines := make([]string, 0, limit)
+		next := 0
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if filter != "" && !strings.Contains(line, filter) {
+				continue
 			}
-			lines = filtered
+			if len(lines) < limit {
+				lines = append(lines, line)
+				continue
+			}
+			lines[next] = line
+			next = (next + 1) % limit
 		}
-
-		// Tail to last `limit` entries
-		if len(lines) > limit {
-			lines = lines[len(lines)-limit:]
+		if err := scanner.Err(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("cannot scan audit log: %v", err)), nil
+		}
+		if len(lines) == limit && next != 0 {
+			ordered := make([]string, 0, limit)
+			ordered = append(ordered, lines[next:]...)
+			ordered = append(ordered, lines[:next]...)
+			lines = ordered
 		}
 
 		security.LogCommand("MCP:audit_log", fmt.Sprintf("limit=%d filter=%q", limit, filter))

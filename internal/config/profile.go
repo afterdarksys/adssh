@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,20 +25,29 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 	paths = append(paths, profilePath, rcPath)
 
 	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			// Auto-create the RC file with a starter template
 			if strings.HasSuffix(path, ".adsshrc") || path == rcPath {
-				_ = os.WriteFile(path, []byte(defaultRC), 0600)
+				if err := os.WriteFile(path, []byte(defaultRC), 0600); err != nil {
+					return env, fmt.Errorf("create profile %s: %w", path, err)
+				}
 			} else {
 				continue
 			}
+		} else if err != nil {
+			return env, fmt.Errorf("stat profile %s: %w", path, err)
 		}
 
 		globals, err := starlark.ExecFile(thread, path, nil, env)
-		if err == nil {
-			for k, v := range globals {
-				env[k] = v
-			}
+		if err != nil {
+			return env, fmt.Errorf("load profile %s: %w", path, err)
+		}
+		for k, v := range globals {
+			env[k] = v
 		}
 	}
 	return env, nil

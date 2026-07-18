@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
+	"sync"
 
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
@@ -21,6 +24,9 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 		"1.0.0",
 		server.WithToolCapabilities(false),
 	)
+	// Starlark dictionaries and several extension objects are mutable and are
+	// shared by all MCP tools. Serialize tool execution at their common boundary.
+	toolMu := &sync.Mutex{}
 
 	// Register eval_starlark tool
 	s.AddTool(
@@ -31,7 +37,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Starlark code to evaluate"),
 			),
 		),
-		policyGate(eng, "eval_starlark", handleEvalStarlark(globals)),
+		serializedHandler(toolMu, policyGate(eng, "eval_starlark", handleEvalStarlark(globals))),
 	)
 
 	// Register run_shell tool
@@ -43,7 +49,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Shell command to execute"),
 			),
 		),
-		policyGate(eng, "run_shell", handleRunShell(globals)),
+		serializedHandler(toolMu, policyGate(eng, "run_shell", handleRunShell(globals, cfg.Restricted))),
 	)
 
 	// Register list_sessions tool
@@ -51,7 +57,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 		mcp.NewTool("list_sessions",
 			mcp.WithDescription("List active SSH sessions. Returns a JSON array of session IDs."),
 		),
-		policyGate(eng, "list_sessions", handleListSessions()),
+		serializedHandler(toolMu, policyGate(eng, "list_sessions", handleListSessions())),
 	)
 
 	// Register cloud_query tool
@@ -67,7 +73,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Function name within the namespace to call"),
 			),
 		),
-		policyGate(eng, "cloud_query", handleCloudQuery(globals)),
+		serializedHandler(toolMu, policyGate(eng, "cloud_query", handleCloudQuery(globals))),
 	)
 
 	// Register container_exec tool
@@ -83,7 +89,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Command to run, as a JSON array of strings (e.g. [\"ls\",\"-la\"]) or a single command string"),
 			),
 		),
-		policyGate(eng, "container_exec", handleContainerExec()),
+		serializedHandler(toolMu, policyGate(eng, "container_exec", handleContainerExec())),
 	)
 
 	// Register audit_log tool
@@ -98,11 +104,19 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Optional substring filter to match against log entries"),
 			),
 		),
-		policyGate(eng, "audit_log", handleAuditLog(cfg.AuditLogPath)),
+		serializedHandler(toolMu, policyGate(eng, "audit_log", handleAuditLog(cfg.AuditLogPath))),
 	)
 
 	eng.Security().LogEvent("adssh-mcp serving on stdio")
 	return server.ServeStdio(s)
+}
+
+func serializedHandler(mu *sync.Mutex, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return handler(ctx, req)
+	}
 }
 
 // policyGate wraps a tool handler with the engine's Rego policy evaluation.
@@ -110,7 +124,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 func policyGate(eng *engine.Engine, toolName string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
 	sec := eng.Security()
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		pctx := security.BuildPolicyContext(toolName, []string{}, "")
+		pctx := security.BuildPolicyContext(toolName, policyArgs(req), "")
 		allowed, reason, policyErr := sec.EvaluatePolicy(pctx)
 		if policyErr != nil {
 			sec.LogPolicyDecision(pctx.User, toolName, false, fmt.Sprintf("error: %v", policyErr))
@@ -126,4 +140,28 @@ func policyGate(eng *engine.Engine, toolName string, handler server.ToolHandlerF
 		sec.LogPolicyDecision(pctx.User, toolName, true, "")
 		return handler(ctx, req)
 	}
+}
+
+func policyArgs(req mcp.CallToolRequest) []string {
+	arguments := req.GetArguments()
+	keys := make([]string, 0, len(arguments))
+	for key := range arguments {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	args := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := arguments[key]
+		if str, ok := value.(string); ok {
+			args = append(args, key+"="+str)
+			continue
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			encoded = []byte(fmt.Sprint(value))
+		}
+		args = append(args, key+"="+string(encoded))
+	}
+	return args
 }

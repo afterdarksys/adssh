@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/afterdarksys/adssh/internal/sys"
 )
 
 // FourEyesRule defines a pattern that requires dual approval before execution.
@@ -230,16 +233,19 @@ func generateToken(cmd string) string {
 // RequestApproval creates a pending request and polls until approved, denied, or timed out.
 // Prints the token prominently on stderr and shows a spinner while waiting.
 func (e *Engine) RequestApproval(cmd string, rule FourEyesRule) error {
+	return e.RequestApprovalForSession(cmd, rule, "")
+}
+
+// RequestApprovalForSession creates a pending request attributed to the
+// authenticated session identity, then waits for a distinct approver.
+func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessionID string) error {
 	if err := e.ensureFourEyesDirs(); err != nil {
 		return err
 	}
 
 	token := generateToken(cmd)
 	hostname, _ := os.Hostname()
-	requester := os.Getenv("USER")
-	if requester == "" {
-		requester = os.Getenv("LOGNAME")
-	}
+	requester := approvalActor(sessionID)
 	if requester == "" {
 		requester = "unknown"
 	}
@@ -343,19 +349,87 @@ func sendWebhookNotification(webhookURL, token, cmd, requester, hostname string)
 	resp.Body.Close()
 }
 
-// ApproveRequest writes an approved marker and removes the pending file.
-func (e *Engine) ApproveRequest(token string) error {
+func approvalActor(sessionID string) string {
+	if sessionID != "" {
+		if session := sys.GetSession(sessionID); session != nil {
+			return session.User
+		}
+	}
+	if user, err := osuser.Current(); err == nil {
+		return user.Username
+	}
+	return ""
+}
+
+func validApprovalToken(token string) bool {
+	if token == "" || len(token) > 128 || filepath.Base(token) != token {
+		return false
+	}
+	for _, r := range token {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// ApproveRequestAs validates the approving actor against the pending request.
+// The requester may never self-approve; a configured rule approver must match.
+func (e *Engine) ApproveRequestAs(token, approver string) error {
 	if err := e.ensureFourEyesDirs(); err != nil {
 		return err
 	}
+	if !validApprovalToken(token) {
+		return fmt.Errorf("foureyes: invalid approval token")
+	}
+	if approver == "" {
+		return fmt.Errorf("foureyes: approving identity is unavailable")
+	}
+
+	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
+	data, err := os.ReadFile(pendingFile)
+	if err != nil {
+		return fmt.Errorf("foureyes: read pending request: %w", err)
+	}
+	var pending FourEyesPending
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return fmt.Errorf("foureyes: parse pending request: %w", err)
+	}
+	if pending.Token != "" && pending.Token != token {
+		return fmt.Errorf("foureyes: pending request token mismatch")
+	}
+	if pending.Requester != "" && approver == pending.Requester {
+		return fmt.Errorf("foureyes: requester %q cannot approve their own request", approver)
+	}
+	if pending.Rule.Approver != "" && approver != pending.Rule.Approver {
+		return fmt.Errorf("foureyes: request requires approver %q", pending.Rule.Approver)
+	}
+
 	approvedPath := filepath.Join(e.fourEyesApprovedDir(), token)
-	if err := os.WriteFile(approvedPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
+	marker, err := json.Marshal(map[string]string{
+		"approved_at": time.Now().UTC().Format(time.RFC3339),
+		"approver":    approver,
+	})
+	if err != nil {
+		return fmt.Errorf("foureyes: marshal approved marker: %w", err)
+	}
+	if err := os.WriteFile(approvedPath, marker, 0600); err != nil {
 		return fmt.Errorf("foureyes: write approved marker: %w", err)
 	}
-	// Remove pending file (best effort)
-	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
-	os.Remove(pendingFile) //nolint:errcheck
+	if err := os.Remove(pendingFile); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("foureyes: remove pending request: %w", err)
+	}
 	return nil
+}
+
+// ApproveRequest writes an approved marker and removes the pending file.
+func (e *Engine) ApproveRequest(token string) error {
+	return e.ApproveRequestAs(token, approvalActor(""))
+}
+
+// ApproveRequestAs approves a pending request as the named actor.
+func ApproveRequestAs(token, approver string) error {
+	return defaultEngine.ApproveRequestAs(token, approver)
 }
 
 // ApproveRequest writes an approved marker and removes the pending file.

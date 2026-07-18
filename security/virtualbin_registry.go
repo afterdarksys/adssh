@@ -83,11 +83,15 @@ func ListVBins() []VirtualBinary {
 // engine state (vb is supplied by the caller) but is exposed as a method for
 // API symmetry.
 func (e *Engine) DispatchVBin(ctx context.Context, vb VirtualBinary, args []string) error {
-	return DispatchVBin(ctx, vb, args)
+	return dispatchVBin(context.WithValue(ctx, engineCtxKey, e), vb, args)
 }
 
 // DispatchVBin runs a virtual binary, handling --help automatically.
 func DispatchVBin(ctx context.Context, vb VirtualBinary, args []string) error {
+	return dispatchVBin(context.WithValue(ctx, engineCtxKey, defaultEngine), vb, args)
+}
+
+func dispatchVBin(ctx context.Context, vb VirtualBinary, args []string) error {
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "help") {
 		hc := interp.HandlerCtx(ctx)
 		fmt.Fprintf(hc.Stdout, "%s — %s\nUsage: %s\n", vb.Name(), vb.Description(), vb.Usage())
@@ -100,6 +104,17 @@ func DispatchVBin(ctx context.Context, vb VirtualBinary, args []string) error {
 type vbinContextKey string
 
 const sessionIDCtxKey vbinContextKey = "sessionID"
+
+type engineContextKeyType string
+
+const engineCtxKey engineContextKeyType = "securityEngine"
+
+func engineFromContext(ctx context.Context) *Engine {
+	if engine, ok := ctx.Value(engineCtxKey).(*Engine); ok && engine != nil {
+		return engine
+	}
+	return defaultEngine
+}
 
 // WithSessionID stores a session ID in the context for virtual binaries that need it.
 func WithSessionID(ctx context.Context, id string) context.Context {

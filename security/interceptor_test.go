@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/afterdarksys/adssh/internal/sys"
 
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
@@ -90,6 +93,37 @@ deny_reason = "nope" { input.command == "dangerous" }`)); err != nil {
 	}
 }
 
+func TestInterceptor_PolicyDeny_BlocksBackgroundCommand(t *testing.T) {
+	resetPolicy()
+	t.Cleanup(resetPolicy)
+	resetChain()
+	t.Cleanup(resetChain)
+	if err := LoadPolicy(writePolicy(t, `package adssh.authz
+default allow = false
+deny_reason = "nope" { input.command == "dangerous" }`)); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	ledger := filepath.Join(dir, "audit.chain")
+	InitChain(ledger, filepath.Join(dir, "audit.key"), "background-test")
+
+	_, _, _, rec := runShell(t, false, starlark.StringDict{}, "dangerous --arg &")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(ledger)
+		if err == nil && strings.Contains(string(data), `"cmd":"dangerous --arg"`) && strings.Contains(string(data), `"allowed":false`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for background policy denial in audit chain; read error=%v data=%q", err, data)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(rec.calls) != 0 {
+		t.Errorf("denied background command fell through to exec: %v", rec.calls)
+	}
+}
+
 func TestInterceptor_PolicyAllow_FallsThrough(t *testing.T) {
 	resetPolicy()
 	t.Cleanup(resetPolicy)
@@ -103,6 +137,57 @@ default allow = true`)); err != nil {
 	}
 	if len(rec.calls) != 1 || rec.calls[0][0] != "somecmd" {
 		t.Errorf("expected somecmd to reach exec, got: %v", rec.calls)
+	}
+}
+
+func TestInterceptor_UsesAuthenticatedSessionIdentity(t *testing.T) {
+	eng, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh.authz
+default allow = false
+allow = true { input.user == "alice"; input.groups[_] == "ops" }
+`)})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	const sessionID = "identity-policy-test"
+	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice", Principals: []string{"ops"}})
+	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
+	globals := starlark.StringDict{"SESSION_ID": starlark.String(sessionID)}
+
+	if _, err := eng.callHandler(false, globals)(context.Background(), []string{"deploy"}); err != nil {
+		t.Fatalf("authenticated SSH identity was not used by policy: %v", err)
+	}
+}
+
+func TestInterceptor_EnforcesConfiguredEntitlements(t *testing.T) {
+	entitlements := filepath.Join(t.TempDir(), "entitlements.yaml")
+	if err := os.WriteFile(entitlements, []byte(`users:
+  alice: [ls]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := NewEngine(EngineConfig{
+		PolicySource:     []byte("package adssh.authz\ndefault allow = true"),
+		EntitlementsPath: entitlements,
+	})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	const sessionID = "identity-rbac-test"
+	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
+	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
+	globals := starlark.StringDict{"SESSION_ID": starlark.String(sessionID)}
+	handler := eng.callHandler(false, globals)
+
+	if _, err := handler(context.Background(), []string{"ls"}); err != nil {
+		t.Fatalf("explicitly entitled command denied: %v", err)
+	}
+	if _, err := handler(context.Background(), []string{"rm"}); err == nil {
+		t.Fatal("command absent from configured entitlements was allowed")
+	} else if !strings.Contains(err.Error(), "entitlements") {
+		t.Fatalf("denial = %q, want entitlements diagnostic", err)
 	}
 }
 

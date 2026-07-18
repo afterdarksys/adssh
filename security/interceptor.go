@@ -113,7 +113,7 @@ func (e *Engine) CallInterceptorSession(sess *SessionState) interp.CallHandlerFu
 // and GateProgram (for DeclClause keywords mvdan routes through NEITHER handler)
 // call this exactly once per command, so every command is authorized and audited
 // EXACTLY ONCE and always fails closed (rule 8 of SECURITY-RULES.md).
-func (e *Engine) gateCommand(restricted bool, args []string) error {
+func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -122,7 +122,7 @@ func (e *Engine) gateCommand(restricted bool, args []string) error {
 	e.LogCommand("BASH", cmd)
 
 	// 0. Rego policy evaluation (primary authorization) — fail closed.
-	pctx := BuildPolicyContext(args[0], args[1:], "")
+	pctx := BuildPolicyContext(args[0], args[1:], sessionID)
 	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 	if policyErr != nil {
 		return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
@@ -136,13 +136,21 @@ func (e *Engine) gateCommand(restricted bool, args []string) error {
 	}
 	e.LogPolicyDecision(pctx.User, cmd, true, "")
 
+	// A configured entitlements file is an additional allow-list. Rego and
+	// entitlements must both authorize the command; when no file is configured,
+	// Rego remains the sole authorization source for backward compatibility.
+	if e.hasEntitlements() && !e.IsAuthorized(pctx.User, pctx.Groups, args[0]) {
+		e.LogPolicyDecision(pctx.User, cmd, false, "not permitted by entitlements")
+		return fmt.Errorf("adssh: access denied by entitlements for %q", args[0])
+	}
+
 	// 0a. Change management ticket check.
-	if err := e.CMSessionCheck(args[0], args[1:]); err != nil {
+	if err := e.CMSessionCheckForSession(sessionID, args[0], args[1:]); err != nil {
 		return err
 	}
 
 	// 0b. 4-eyes dual-approval gate.
-	if err := e.CheckFourEyes(cmd, args, nil); err != nil {
+	if err := e.CheckFourEyesForSession(cmd, args, sessionID); err != nil {
 		return err
 	}
 
@@ -196,7 +204,7 @@ func (e *Engine) callHandler(restricted bool, globals starlark.StringDict) inter
 		if len(args) == 0 {
 			return args, nil
 		}
-		if err := e.gateCommand(restricted, args); err != nil {
+		if err := e.gateCommand(restricted, args, sessionIDFromGlobals(globals)); err != nil {
 			return nil, err
 		}
 		return args, nil
@@ -223,12 +231,25 @@ func GateProgram(restricted bool, node syntax.Node) error {
 // GateProgramSession runs the DeclClause-keyword authorization pre-scan for the
 // process-global default engine bound to a specific session's state.
 func GateProgramSession(sess *SessionState, node syntax.Node) error {
-	return defaultEngine.GateProgram(sess.Restricted, node)
+	return defaultEngine.gateProgram(sess.Restricted, node, sessionIDFromGlobals(sess.Globals))
 }
 
 // GateProgram runs the DeclClause-keyword authorization pre-scan against this
 // engine. See the package-level GateProgram for the full contract.
 func (e *Engine) GateProgram(restricted bool, node syntax.Node) error {
+	return e.gateProgram(restricted, node, "")
+}
+
+// GateProgramSession runs the declaration-keyword pre-scan against this engine
+// while preserving the authenticated identity stored in the session globals.
+func (e *Engine) GateProgramSession(sess *SessionState, node syntax.Node) error {
+	if sess == nil {
+		return e.GateProgram(e.restricted, node)
+	}
+	return e.gateProgram(sess.Restricted, node, sessionIDFromGlobals(sess.Globals))
+}
+
+func (e *Engine) gateProgram(restricted bool, node syntax.Node, sessionID string) error {
 	if node == nil {
 		return nil
 	}
@@ -245,13 +266,28 @@ func (e *Engine) GateProgram(restricted bool, node syntax.Node) error {
 		if len(args) == 0 {
 			return true
 		}
-		if err := e.gateCommand(restricted, args); err != nil {
+		if err := e.gateCommand(restricted, args, sessionID); err != nil {
 			gateErr = err
 			return false
 		}
 		return true
 	})
 	return gateErr
+}
+
+func sessionIDFromGlobals(globals starlark.StringDict) string {
+	if globals == nil {
+		return ""
+	}
+	value, ok := globals["SESSION_ID"]
+	if !ok {
+		return ""
+	}
+	sessionID, ok := value.(starlark.String)
+	if !ok {
+		return ""
+	}
+	return string(sessionID)
 }
 
 // declArgs reconstructs a command-style argument vector from a DeclClause so it

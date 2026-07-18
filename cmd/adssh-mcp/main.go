@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
@@ -39,15 +41,19 @@ func main() {
 
 	// 3. Build the security engine from configuration (fail-closed: a malformed
 	// policy aborts startup). As in the shell binary, this configures the audit
-	// log and Rego policy the MCP server enforces; the HMAC chain and RBAC
-	// entitlements are intentionally left uninitialised, matching the prior
-	// package-level init sequence.
+	// log, HMAC chain, RBAC entitlements, restricted mode, and Rego policy the
+	// MCP server enforces.
 	eng, err := engine.New(engine.Config{
 		EngineConfig: security.EngineConfig{
-			PolicyPath:    cfg.PolicyPath,
-			AuditLogPath:  cfg.AuditLogPath,
-			AuditLogURL:   cfg.AuditURL,
-			AuditLogToken: cfg.AuditToken,
+			PolicyPath:       cfg.PolicyPath,
+			AuditLogPath:     cfg.AuditLogPath,
+			AuditLogURL:      cfg.AuditURL,
+			AuditLogToken:    cfg.AuditToken,
+			ChainPath:        cfg.AuditLogPath + ".chain",
+			ChainKeyPath:     filepath.Join(config.XDGDataHome(), "audit.key"),
+			SessionID:        fmt.Sprintf("mcp-%d", time.Now().UnixNano()),
+			EntitlementsPath: cfg.EntitlementsPath,
+			Restricted:       cfg.Restricted,
 		},
 	})
 	if err != nil {
@@ -66,7 +72,7 @@ func main() {
 
 	// 4. Build Starlark env (shared across all tool calls)
 	globals := starlark.StringDict{}
-	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: false, Engine: eng.Security()})
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: cfg.Restricted, Engine: eng.Security()})
 
 	// 5. Start MCP server
 	eng.Security().LogEvent("adssh-mcp server starting")

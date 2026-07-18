@@ -103,7 +103,7 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 			return fmt.Errorf("4eyes approve: usage: 4eyes approve <token>")
 		}
 		token := args[2]
-		if err := ApproveRequest(token); err != nil {
+		if err := engineFromContext(ctx).ApproveRequestAs(token, approvalActor(SessionIDFromContext(ctx))); err != nil {
 			return err
 		}
 		fmt.Fprintf(hc.Stdout, "%s%s✓%s Approved request: %s\n", ansiBold, ansiGreen, ansiReset, token)

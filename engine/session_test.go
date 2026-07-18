@@ -8,6 +8,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/afterdarksys/adssh/internal/sys"
+	"github.com/afterdarksys/adssh/security"
+
 	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -64,6 +67,31 @@ func runSrc(t *testing.T, s *Session, src string) error {
 		t.Fatalf("parse %q: %v", src, err)
 	}
 	return s.Runner.Run(context.Background(), f)
+}
+
+func TestSessionGateProgramUsesAuthenticatedIdentity(t *testing.T) {
+	sec, err := security.NewEngine(security.EngineConfig{PolicySource: []byte(`
+package adssh
+authz := {"allow": input.user == "alice", "reason": "alice required"}
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "declaration-identity"
+	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
+	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
+
+	s, err := NewSession(SessionOptions{SessionID: sessionID, User: "alice", Engine: sec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader("export SAFE=1"), "test.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.GateProgram(file); err != nil {
+		t.Fatalf("authenticated identity was dropped for declaration gate: %v", err)
+	}
 }
 
 // TestSession_IsolatedGlobals proves a custom command, a shopt (xtrace), and the
