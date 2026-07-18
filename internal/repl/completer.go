@@ -1,8 +1,8 @@
 package repl
 
 import (
-	"github.com/afterdarksys/adssh/security"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
+	"github.com/afterdarksys/adssh/security"
 	"os"
 	"path/filepath"
 	"strings"
