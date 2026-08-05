@@ -183,6 +183,16 @@ func main() {
 		}
 		repl.Start(sessGlobals, cfg.Restricted, cfg.HistoryFile, in, out, errOut)
 	}
+	gatewayAuthorizer := func(req sys.GatewayAuthRequest) error {
+		return eng.Security().AuthorizeGateway(security.GatewayPolicyRequest{
+			SessionID:  req.SessionID,
+			User:       req.User,
+			Groups:     req.Principals,
+			Action:     "direct-tcpip",
+			TargetHost: req.TargetHost,
+			TargetPort: req.TargetPort,
+		})
+	}
 
 	// 6b. Inject SSH management builtins into `sys` dict
 	if sysVal, ok := env["sys"]; ok {
@@ -192,7 +202,7 @@ func main() {
 				if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr); err != nil {
 					return nil, err
 				}
-				if err := sys.EnableSSH(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter); err != nil {
+				if err := sys.EnableSSH(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter, gatewayAuthorizer); err != nil {
 					return nil, err
 				}
 				return starlark.None, nil
@@ -220,7 +230,7 @@ func main() {
 	}
 
 	if cfg.ServeAddr != "" {
-		if err := sys.EnableSSH(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter); err != nil {
+		if err := sys.EnableSSH(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter, gatewayAuthorizer); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start SSH server: %v\n", err)
 			os.Exit(1)
 		}
@@ -318,7 +328,11 @@ VIRTUAL BINARIES (type 'vbins' for full list)
   jq          JSON processor             jq '.name' < file.json
   yq          YAML processor             cat k8s.yaml | yq '.spec'
   http        HTTP client                http https://api.example.com/v1/status
-  mirror      Session viewer             mirror list
+  mirror      Session supervisor         mirror list
+  gateway     Policy TCP gateway         gateway start --target host:22
+  lease       Command secret lease       lease --from vault:path?field=token --as TOKEN -- cmd
+  elevate     Break-glass elevation      elevate request prod-admin --for 10m --reason INC
+  ??          Last denial explainer      ??
   cmdgen      Cloud CLI generator        cmdgen aws ec2 create instance_type=t3.micro
   package     Package manager            package install ripgrep
   darkscan    Malware scanner            darkscan /tmp/suspect
@@ -330,6 +344,7 @@ ENVIRONMENT VARIABLES
   ADSSH_POLICY            Path to Rego policy file
   ADSSH_ENTITLEMENTS      Path to entitlements YAML
   ADSSH_AUDIT_LOG         Audit log path (default: ~/.adssh/audit.log)
+  ADSSH_RECORD_DIR        Session recording directory (default: ~/.adssh/recordings)
   ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
   ADSSH_RC                RC script (default: ~/.adsshrc)
 

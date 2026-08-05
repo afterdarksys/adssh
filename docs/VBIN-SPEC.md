@@ -218,15 +218,18 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `history` | `security/vbin_history.go` | Interactive command history |
 | `fc` | `security/vbin_history.go` | History listing/editing command |
 | `audit` | `security/vbin_audit.go` | Audit-chain inspection and export |
-| `mirror` | `security/mirror.go` | Session mirroring and console access |
+| `mirror` | `security/mirror.go` | Session metadata, mirroring, console access, and audited termination |
 | `cmdgen` | `security/cmdgen.go` | Cloud and container command generator |
 | `grant` | `security/grants.go` | Temporary role escalation |
+| `elevate` | `security/vbin_elevate.go` | Time-boxed break-glass elevation with reason and audit trail |
+| `gateway` | `security/vbin_gateway.go` | Policy-audited local TCP gateway for SSH and internal services |
 | `4eyes` | `security/vbin_foureyes.go` | Four-eyes approval workflow |
 | `cm` | `security/vbin_cm.go` | Change-management workflow |
 | `pick` | `security/vbin_pick.go` | Charm-powered fuzzy selector for arguments, stdin lines, and JSON choices |
 | `nav` | `security/vbin_nav.go` | Three-column file navigator with parent/current/preview panes |
 | `from`, `where`, `select`, `to` | `security/vbin_structured.go` | JSONL structured pipeline with JSON/CSV adapters and Starlark predicates |
 | `why` | `security/vbin_why.go` | Side-effect-free explanation of every governance stage |
+| `??` | `security/vbin_denial.go` | Last-denial explanation for the current session |
 | `runbook` | `security/vbin_runbook.go` | Typed Starlark procedures whose argv-only steps are independently governed |
 | `par` | `security/vbin_par.go` | Bounded worker pool with deterministic output and per-child governance |
 | `evidence` | `security/vbin_evidence.go` | Full-chain-verified, filtered audit evidence bundles |
@@ -267,18 +270,25 @@ change, or time filters. Returned entries retain their original chain hashes;
 the bundle also contains its chain head and a SHA-256 digest. Output files are
 published atomically with mode `0600`.
 
-`lease` accepts only `env:NAME` or a private regular `file:path`, injects the
-value into one child environment, applies a maximum 24-hour TTL, and redacts the
-exact secret from captured stdout/stderr. For `env:NAME`, the source variable is
-removed from the child environment so only the requested destination name is
-present. It is a command-scoping primitive, not a replacement for a vault. The
-owned source byte buffer is zeroed after the
-child exits, but Go and the operating system necessarily create immutable
-environment copies that cannot be synchronously erased by the parent process.
-This is an explicit runtime boundary rather than an unfinished guarantee. A
-child can also deliberately exfiltrate a credential through transformed output
-or external side effects, so policy must restrict which commands may receive a
-lease.
+`lease` accepts `env:NAME`, a private regular `file:path`, or read-only
+vault-backed sources: `vault:path?field=KEY`, `aws-sm:name?region=REGION`,
+`azure-kv:vault/name?version=VERSION`, and
+`gcp-sm:project/name?version=VERSION`. Provider authentication comes from the
+provider's normal environment/configuration, not from command-line tokens. The
+value is injected into one child environment with a maximum 24-hour TTL. For
+`env:NAME`, the source variable is removed from the child environment so only
+the requested destination name is present.
+
+Captured stdout/stderr redact the exact leased secret and common
+credential-shaped strings. Audit command/event/policy entries are redacted
+before they are written to the flat audit log, remote audit sink, or HMAC chain.
+`lease` is a command-scoping primitive, not a complete vault. The owned source
+byte buffer is zeroed after the child exits, but Go and the operating system
+necessarily create immutable environment copies that cannot be synchronously
+erased by the parent process. This is an explicit runtime boundary rather than
+an unfinished guarantee. A child can also deliberately exfiltrate a credential
+through transformed output or external side effects, so policy must restrict
+which commands may receive a lease.
 
 ---
 

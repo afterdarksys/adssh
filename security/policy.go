@@ -14,12 +14,29 @@ import (
 
 // PolicyContext is the input document passed to OPA evaluation.
 type PolicyContext struct {
-	User      string   `json:"user"`
-	Groups    []string `json:"groups"`
-	Command   string   `json:"command"`
-	Args      []string `json:"args"`
-	Time      string   `json:"time"`
-	SessionID string   `json:"session_id"`
+	User      string          `json:"user"`
+	Groups    []string        `json:"groups"`
+	Command   string          `json:"command"`
+	Args      []string        `json:"args"`
+	Time      string          `json:"time"`
+	SessionID string          `json:"session_id"`
+	Elevation *ElevationClaim `json:"elevation,omitempty"`
+	Gateway   *GatewayClaim   `json:"gateway,omitempty"`
+}
+
+type ElevationClaim struct {
+	Role      string `json:"role"`
+	Reason    string `json:"reason"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+type GatewayClaim struct {
+	Action     string `json:"action"`
+	Listen     string `json:"listen,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Target     string `json:"target"`
+	TargetHost string `json:"target_host"`
+	TargetPort string `json:"target_port"`
 }
 
 // LoadPolicy reads a Rego file and prepares the OPA query.
@@ -79,6 +96,23 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 		"args":       pctx.Args,
 		"time":       pctx.Time,
 		"session_id": pctx.SessionID,
+	}
+	if pctx.Elevation != nil {
+		input["elevation"] = map[string]interface{}{
+			"role":       pctx.Elevation.Role,
+			"reason":     pctx.Elevation.Reason,
+			"expires_at": pctx.Elevation.ExpiresAt,
+		}
+	}
+	if pctx.Gateway != nil {
+		input["gateway"] = map[string]interface{}{
+			"action":      pctx.Gateway.Action,
+			"listen":      pctx.Gateway.Listen,
+			"name":        pctx.Gateway.Name,
+			"target":      pctx.Gateway.Target,
+			"target_host": pctx.Gateway.TargetHost,
+			"target_port": pctx.Gateway.TargetPort,
+		}
 	}
 
 	results, err := e.preparedQuery.Eval(ctx, rego.EvalInput(input))
@@ -149,6 +183,14 @@ func BuildPolicyContext(command string, args []string, sessionID string) PolicyC
 		if session := sys.GetSession(sessionID); session != nil {
 			pctx.User = session.User
 			pctx.Groups = session.Principals
+			if elevation := session.ActiveElevation(); elevation != nil {
+				pctx.Groups = append(pctx.Groups, elevation.Role)
+				pctx.Elevation = &ElevationClaim{
+					Role:      elevation.Role,
+					Reason:    elevation.Reason,
+					ExpiresAt: elevation.ExpiresAt.UTC().Format(time.RFC3339),
+				}
+			}
 			return pctx
 		}
 	}

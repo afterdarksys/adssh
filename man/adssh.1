@@ -74,6 +74,9 @@ and authorised keys from
 The process remains in the foreground; combine with
 .BR \-\-login / \-\-restricted
 to control the session policy for remote users.
+The server also authorizes SSH
+.B direct-tcpip
+channels, so it can act as a policy-gated jump host.
 .TP
 .BI \-\-entitlements " PATH"
 Load RBAC entitlements from the YAML file at
@@ -169,6 +172,11 @@ Path to the readline history file.
 Default:
 .BR ~/.adssh/history .
 .TP
+.B ADSSH_RECORD_DIR
+Directory for JSONL session recordings.
+Default:
+.BR ~/.adssh/recordings .
+.TP
 .B XDG_CONFIG_HOME
 Base directory for user configuration files.
 .B adssh
@@ -221,6 +229,29 @@ exec adssh
 .B Start the built-in SSH server on port 2222:
 .nf
 adssh --serve :2222
+.fi
+.TP
+.B Use adssh as a policy-gated SSH jump gateway:
+.nf
+ssh -J operator@adssh-gateway:2222 user@bastion.internal
+.fi
+.TP
+.B Open a governed local TCP gateway:
+.nf
+gateway start --listen 127.0.0.1:0 --target bastion.internal:22 --name prod
+gateway list
+gateway stop gw-1
+.fi
+.TP
+.B Lease a vault-backed secret into one command:
+.nf
+lease --from vault:secret/data/prod/deploy?field=token --as TOKEN -- deploy
+.fi
+.TP
+.B Request break-glass elevation and explain a denial:
+.nf
+elevate request prod-admin --for 10m --reason "incident INC-1042"
+??
 .fi
 .TP
 .B Run a one-off command and exit (Starlark or shell auto-detected):

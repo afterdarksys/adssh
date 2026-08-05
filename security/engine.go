@@ -102,6 +102,10 @@ type Engine struct {
 
 	// restricted mode
 	restricted bool
+
+	// last denial, keyed by authenticated session ID.
+	denialMu    sync.RWMutex
+	lastDenials map[string]CommandExplanation
 }
 
 // defaultEngine is the process-global engine that every package-level shim
@@ -115,8 +119,9 @@ var defaultEngine = newDefaultEngine()
 // an empty vbin registry that init() Register calls fill in.
 func newDefaultEngine() *Engine {
 	return &Engine{
-		vbins:     map[string]VirtualBinary{},
-		cmTickets: map[string]cmTicketState{},
+		vbins:       map[string]VirtualBinary{},
+		cmTickets:   map[string]cmTicketState{},
+		lastDenials: map[string]CommandExplanation{},
 	}
 }
 
@@ -155,6 +160,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		fourEyesDir: cfg.FourEyesDir,
 		vbins:       map[string]VirtualBinary{},
 		cmTickets:   map[string]cmTicketState{},
+		lastDenials: map[string]CommandExplanation{},
 	}
 
 	// Seed the vbin registry from the package default (built by init()).

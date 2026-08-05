@@ -156,10 +156,22 @@ var (
 // cycle; the concrete starter is supplied by the binary/engine layer.
 type SessionStarter func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer)
 
+type GatewayAuthRequest struct {
+	SessionID      string
+	User           string
+	Principals     []string
+	TargetHost     string
+	TargetPort     uint32
+	OriginatorHost string
+	OriginatorPort uint32
+}
+
+type GatewayAuthorizer func(GatewayAuthRequest) error
+
 // EnableSSH starts the SSH daemon in the background. It returns an error if
 // already running or if not root. Each accepted channel is handed to start,
 // which builds that session's own isolated globals.
-func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionStarter) error {
+func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionStarter, authorizeGateway GatewayAuthorizer) error {
 	sshMu.Lock()
 	defer sshMu.Unlock()
 
@@ -211,7 +223,7 @@ func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionSta
 				log.Printf("Failed to accept incoming connection: %v", err)
 				continue
 			}
-			go handleSSHConnection(nConn, config, start)
+			go handleSSHConnection(nConn, config, start, authorizeGateway)
 		}
 	}()
 
@@ -264,7 +276,7 @@ func (c *CtrlCInterceptor) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start SessionStarter) {
+func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start SessionStarter, authorizeGateway GatewayAuthorizer) {
 	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
 	if err != nil {
 		log.Printf("Failed to handshake: %v", err)
@@ -276,6 +288,10 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 	go ssh.DiscardRequests(reqs)
 
 	for newChannel := range chans {
+		if newChannel.ChannelType() == "direct-tcpip" {
+			go handleDirectTCPIP(conn, newChannel, authorizeGateway)
+			continue
+		}
 		if newChannel.ChannelType() != "session" {
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type") // best-effort
 			continue
@@ -357,4 +373,100 @@ func parseDims(b []byte) (uint32, uint32) {
 	w := binary.BigEndian.Uint32(b)
 	h := binary.BigEndian.Uint32(b[4:])
 	return w, h
+}
+
+type directTCPIPPayload struct {
+	TargetHost     string
+	TargetPort     uint32
+	OriginatorHost string
+	OriginatorPort uint32
+}
+
+func handleDirectTCPIP(conn *ssh.ServerConn, newChannel ssh.NewChannel, authorize GatewayAuthorizer) {
+	payload, err := parseDirectTCPIPPayload(newChannel.ExtraData())
+	if err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	if authorize == nil {
+		_ = newChannel.Reject(ssh.Prohibited, "gateway forwarding is disabled")
+		return
+	}
+	sessionID := GenerateSessionID()
+	var principals []string
+	if pExt, ok := conn.Permissions.Extensions["principals"]; ok && pExt != "" {
+		principals = strings.Split(pExt, ",")
+	}
+	if err := authorize(GatewayAuthRequest{
+		SessionID:      sessionID,
+		User:           conn.User(),
+		Principals:     principals,
+		TargetHost:     payload.TargetHost,
+		TargetPort:     payload.TargetPort,
+		OriginatorHost: payload.OriginatorHost,
+		OriginatorPort: payload.OriginatorPort,
+	}); err != nil {
+		_ = newChannel.Reject(ssh.Prohibited, err.Error())
+		return
+	}
+	target := net.JoinHostPort(payload.TargetHost, fmt.Sprintf("%d", payload.TargetPort))
+	targetConn, err := net.Dial("tcp", target)
+	if err != nil {
+		_ = newChannel.Reject(ssh.ConnectionFailed, err.Error())
+		return
+	}
+	channel, requests, err := newChannel.Accept()
+	if err != nil {
+		_ = targetConn.Close()
+		return
+	}
+	go ssh.DiscardRequests(requests)
+	go func() {
+		defer channel.Close()
+		defer targetConn.Close()
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(targetConn, channel)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(channel, targetConn)
+		}()
+		wg.Wait()
+	}()
+}
+
+func parseDirectTCPIPPayload(data []byte) (directTCPIPPayload, error) {
+	var payload directTCPIPPayload
+	rest := data
+	var ok bool
+	payload.TargetHost, rest, ok = parseSSHString(rest)
+	if !ok || len(rest) < 4 {
+		return payload, fmt.Errorf("malformed direct-tcpip payload")
+	}
+	payload.TargetPort = binary.BigEndian.Uint32(rest[:4])
+	rest = rest[4:]
+	payload.OriginatorHost, rest, ok = parseSSHString(rest)
+	if !ok || len(rest) < 4 {
+		return payload, fmt.Errorf("malformed direct-tcpip payload")
+	}
+	payload.OriginatorPort = binary.BigEndian.Uint32(rest[:4])
+	if payload.TargetHost == "" || payload.TargetPort == 0 || payload.TargetPort > 65535 {
+		return payload, fmt.Errorf("invalid direct-tcpip target")
+	}
+	return payload, nil
+}
+
+func parseSSHString(data []byte) (string, []byte, bool) {
+	if len(data) < 4 {
+		return "", nil, false
+	}
+	length := binary.BigEndian.Uint32(data[:4])
+	if length > uint32(len(data)-4) {
+		return "", nil, false
+	}
+	value := string(data[4 : 4+length])
+	return value, data[4+length:], true
 }

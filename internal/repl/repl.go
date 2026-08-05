@@ -728,6 +728,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 						var cancel context.CancelFunc
 						ctx, cancel = context.WithCancel(context.Background())
 						session.SetContext(ctx, cancel)
+						session.SetCurrentCommand(line)
 					}
 				}
 			}
@@ -759,6 +760,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				if sessionIDStr, ok := val.(starlark.String); ok {
 					if session := sys.GetSession(string(sessionIDStr)); session != nil {
 						session.SetContext(context.Background(), nil)
+						session.SetCurrentCommand("")
 					}
 				}
 			}

@@ -125,10 +125,12 @@ func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) e
 	pctx := BuildPolicyContext(args[0], args[1:], sessionID)
 	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 	if policyErr != nil {
+		e.rememberDeniedCommand(sessionID, args)
 		return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
 	}
 	if !allowed {
 		e.LogPolicyDecision(pctx.User, cmd, false, reason)
+		e.rememberDeniedCommand(sessionID, args)
 		if reason != "" {
 			return fmt.Errorf("adssh: access denied: %s", reason)
 		}
@@ -141,16 +143,19 @@ func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) e
 	// Rego remains the sole authorization source for backward compatibility.
 	if e.hasEntitlements() && !e.IsAuthorized(pctx.User, pctx.Groups, args[0]) {
 		e.LogPolicyDecision(pctx.User, cmd, false, "not permitted by entitlements")
+		e.rememberDeniedCommand(sessionID, args)
 		return fmt.Errorf("adssh: access denied by entitlements for %q", args[0])
 	}
 
 	// 0a. Change management ticket check.
 	if err := e.CMSessionCheckForSession(sessionID, args[0], args[1:]); err != nil {
+		e.rememberDeniedCommand(sessionID, args)
 		return err
 	}
 
 	// 0b. 4-eyes dual-approval gate.
 	if err := e.CheckFourEyesForSession(cmd, args, sessionID); err != nil {
+		e.rememberDeniedCommand(sessionID, args)
 		return err
 	}
 
@@ -160,13 +165,18 @@ func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) e
 	// enforced here at the single choke point.
 	if restricted {
 		if strings.Contains(args[0], "/") {
+			e.rememberDeniedCommand(sessionID, args)
 			return fmt.Errorf("adssh: restricted: cannot specify '/' in command names")
 		}
 		if args[0] == "cd" || args[0] == "export" {
+			e.rememberDeniedCommand(sessionID, args)
 			return fmt.Errorf("adssh: restricted: %s is not allowed", args[0])
 		}
 	}
 
+	if args[0] != "??" {
+		e.ClearLastDenial(sessionID)
+	}
 	return nil
 }
 

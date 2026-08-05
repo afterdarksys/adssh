@@ -91,7 +91,7 @@ var starlarkNamespaceKeys = map[string][]string{
 	"gcp.run":    {"list_services", "get_service"},
 }
 
-var mirrorSubcmds = []string{"list", "view", "console"}
+var mirrorSubcmds = []string{"list", "view", "console", "kill"}
 var cmdgenProviders = []string{"docker", "kubectl", "aws"}
 
 // vbinSubcommands maps a vbin name to its recognized first-argument completions.
@@ -99,7 +99,7 @@ var vbinSubcommands = map[string][]string{
 	"stty":     {"sane", "size", "echo", "-echo", "raw", "-raw", "rows", "cols"},
 	"history":  {"-c", "-d"},
 	"fc":       {"-l", "-e"},
-	"mirror":   {"list", "view", "console"},
+	"mirror":   {"list", "view", "console", "kill"},
 	"cmdgen":   {"docker", "kubectl", "aws"},
 	"set":      {"-e", "+e", "-u", "+u", "-x", "+x", "-o", "+o"},
 	"help":     {"list", "search", "categories", "examples"},
@@ -108,10 +108,13 @@ var vbinSubcommands = map[string][]string{
 	"from":     {"json", "jsonl", "csv"},
 	"to":       {"json", "jsonl", "csv", "table"},
 	"why":      {"--json", "--"},
+	"??":       {"--json"},
 	"runbook":  {"list", "show", "run"},
 	"par":      {"--jobs", "--"},
 	"evidence": {"--session", "--change", "--since", "--until", "--out"},
 	"lease":    {"--from", "--as", "--ttl", "--"},
+	"elevate":  {"request", "status", "drop", "--for", "--reason"},
+	"gateway":  {"start", "list", "stop", "--listen", "--target", "--name"},
 }
 
 // Do implements readline.AutoCompleter.

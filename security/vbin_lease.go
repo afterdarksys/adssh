@@ -17,10 +17,10 @@ type leaseBinary struct{}
 
 func (leaseBinary) Name() string { return "lease" }
 func (leaseBinary) Description() string {
-	return "Inject an environment or private-file secret into one governed command with a bounded TTL"
+	return "Inject an environment, private-file, or vault-backed secret into one governed command with a bounded TTL"
 }
 func (leaseBinary) Usage() string {
-	return "lease --from env:NAME|file:path --as DEST [--ttl duration] -- command [args...]"
+	return "lease --from env:NAME|file:path|vault:path?field=KEY|aws-sm:name?region=REGION|azure-kv:vault/name|gcp-sm:project/name --as DEST [--ttl duration] -- command [args...]"
 }
 
 func (leaseBinary) Run(ctx context.Context, args []string) error {
@@ -67,7 +67,7 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	if !validEnvironmentName(destination) {
 		return fmt.Errorf("lease: invalid destination environment variable %q", destination)
 	}
-	secret, err := loadLeaseSecret(source)
+	secret, err := loadLeaseSecret(ctx, source)
 	if err != nil {
 		return err
 	}
@@ -94,6 +94,8 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	}, nil)
 	result.Stdout = redactSecret(result.Stdout, secret)
 	result.Stderr = redactSecret(result.Stderr, secret)
+	result.Stdout = redactSensitiveBytes(result.Stdout)
+	result.Stderr = redactSensitiveBytes(result.Stderr)
 	if len(result.Stdout) > 0 {
 		_, _ = hc.Stdout.Write(result.Stdout)
 	}
@@ -109,62 +111,83 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	return nil
 }
 
-func loadLeaseSecret(source string) ([]byte, error) {
+type leaseSecretReader func(context.Context, string) ([]byte, error)
+
+var leaseSecretReaders = map[string]leaseSecretReader{
+	"env":      readEnvLeaseSecret,
+	"file":     readFileLeaseSecret,
+	"vault":    readVaultLeaseSecret,
+	"aws-sm":   readAWSSecretsManagerLeaseSecret,
+	"azure-kv": readAzureKeyVaultLeaseSecret,
+	"gcp-sm":   readGCPSecretManagerLeaseSecret,
+}
+
+func loadLeaseSecret(ctx context.Context, source string) ([]byte, error) {
 	kind, name, found := strings.Cut(source, ":")
 	if !found || name == "" {
-		return nil, fmt.Errorf("lease: source must be env:NAME or file:path")
+		return nil, fmt.Errorf("lease: source must be env:NAME, file:path, vault:path, aws-sm:name, azure-kv:vault/name, or gcp-sm:project/name")
 	}
-	switch kind {
-	case "env":
-		if !validEnvironmentName(name) {
-			return nil, fmt.Errorf("lease: invalid source environment variable %q", name)
-		}
-		value, ok := os.LookupEnv(name)
-		if !ok {
-			return nil, fmt.Errorf("lease: source environment variable %s is not set", name)
-		}
-		if len(value) > 1<<20 {
-			return nil, fmt.Errorf("lease: environment secret exceeds 1 MiB")
-		}
-		return []byte(value), nil
-	case "file":
-		info, err := os.Lstat(name)
-		if err != nil {
-			return nil, fmt.Errorf("lease: inspect secret file: %w", err)
-		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("lease: secret file must be a regular file")
-		}
-		if info.Mode().Perm()&0o077 != 0 {
-			return nil, fmt.Errorf("lease: secret file permissions must not grant group or other access")
-		}
-		file, err := os.Open(name)
-		if err != nil {
-			return nil, fmt.Errorf("lease: open secret file: %w", err)
-		}
-		defer file.Close()
-		openedInfo, err := file.Stat()
-		if err != nil {
-			return nil, fmt.Errorf("lease: inspect opened secret file: %w", err)
-		}
-		if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-			return nil, fmt.Errorf("lease: secret file changed while it was being opened")
-		}
-		if openedInfo.Mode().Perm()&0o077 != 0 {
-			return nil, fmt.Errorf("lease: secret file permissions must not grant group or other access")
-		}
-		data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
-		if err != nil {
-			return nil, fmt.Errorf("lease: read secret file: %w", err)
-		}
-		if len(data) > 1<<20 {
-			zeroBytes(data)
-			return nil, fmt.Errorf("lease: secret file exceeds 1 MiB")
-		}
-		return bytes.TrimSuffix(bytes.TrimSuffix(data, []byte("\n")), []byte("\r")), nil
-	default:
+	reader, ok := leaseSecretReaders[kind]
+	if !ok {
 		return nil, fmt.Errorf("lease: unsupported source type %q", kind)
 	}
+	secret, err := reader(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if len(secret) > 1<<20 {
+		zeroBytes(secret)
+		return nil, fmt.Errorf("lease: secret exceeds 1 MiB")
+	}
+	return bytes.TrimSuffix(bytes.TrimSuffix(secret, []byte("\n")), []byte("\r")), nil
+}
+
+func readEnvLeaseSecret(_ context.Context, name string) ([]byte, error) {
+	if !validEnvironmentName(name) {
+		return nil, fmt.Errorf("lease: invalid source environment variable %q", name)
+	}
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil, fmt.Errorf("lease: source environment variable %s is not set", name)
+	}
+	return []byte(value), nil
+}
+
+func readFileLeaseSecret(_ context.Context, name string) ([]byte, error) {
+	info, err := os.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("lease: inspect secret file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("lease: secret file must be a regular file")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("lease: secret file permissions must not grant group or other access")
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		return nil, fmt.Errorf("lease: open secret file: %w", err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("lease: inspect opened secret file: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("lease: secret file changed while it was being opened")
+	}
+	if openedInfo.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("lease: secret file permissions must not grant group or other access")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("lease: read secret file: %w", err)
+	}
+	if len(data) > 1<<20 {
+		zeroBytes(data)
+		return nil, fmt.Errorf("lease: secret file exceeds 1 MiB")
+	}
+	return data, nil
 }
 
 func validEnvironmentName(name string) bool {

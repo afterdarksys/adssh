@@ -48,17 +48,6 @@ func (whyBinary) Run(ctx context.Context, args []string) error {
 		return encoder.Encode(explanation)
 	}
 
-	fmt.Fprintf(hc.Stdout, "%s %s", strings.ToUpper(explanation.Outcome), explanation.Command)
-	if len(explanation.Args) > 0 {
-		fmt.Fprintf(hc.Stdout, " %s", strings.Join(explanation.Args, " "))
-	}
-	fmt.Fprintln(hc.Stdout)
-	for _, stage := range explanation.Stages {
-		fmt.Fprintf(hc.Stdout, "  %-20s %-18s", stage.Name, stage.Status)
-		if stage.Reason != "" {
-			fmt.Fprintf(hc.Stdout, " %s", stage.Reason)
-		}
-		fmt.Fprintln(hc.Stdout)
-	}
+	printCommandExplanation(hc.Stdout, explanation)
 	return nil
 }

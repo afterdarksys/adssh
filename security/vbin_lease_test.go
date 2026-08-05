@@ -84,6 +84,21 @@ func TestLeaseRedactsSecretPrintedByChild(t *testing.T) {
 	}
 }
 
+func TestLeaseRedactsCredentialShapesPrintedByChild(t *testing.T) {
+	t.Setenv("ADSSH_LEASE_SOURCE", "super-secret")
+	eng, _ := NewEngine(EngineConfig{})
+	output, err := runLeaseVBin(t, eng, []string{
+		"lease", "--from", "env:ADSSH_LEASE_SOURCE", "--as", "TOKEN", "--",
+		"/usr/bin/printf", "api_key=ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output, "ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ") || !strings.Contains(output, "api_key=[REDACTED]") {
+		t.Fatalf("credential-shaped output was not redacted: %q", output)
+	}
+}
+
 func TestLeaseRejectsInsecureSecretFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret")
 	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {

@@ -133,6 +133,7 @@ func (e *Engine) dispatchAuditEvent(payload map[string]interface{}) {
 }
 
 func (e *Engine) LogCommand(source string, cmd string) {
+	cmd = RedactSensitiveText(cmd)
 	if e.auditLogger != nil {
 		e.auditLogger.Printf("[%s] %s\n", source, cmd)
 	}
@@ -157,6 +158,7 @@ func LogCommand(source string, cmd string) {
 }
 
 func (e *Engine) LogEvent(event string) {
+	event = RedactSensitiveText(event)
 	if e.auditLogger != nil {
 		e.auditLogger.Println(event)
 	}
@@ -185,6 +187,8 @@ func LogEvent(event string) {
 
 // LogPolicyDecision records a Rego policy evaluation result in the audit log.
 func (e *Engine) LogPolicyDecision(user, command string, allowed bool, denyReason string) {
+	command = RedactSensitiveText(command)
+	denyReason = RedactSensitiveText(denyReason)
 	if e.auditLogger != nil {
 		e.auditLogger.Printf("[POLICY] user=%s command=%s allowed=%v reason=%q\n",
 			user, command, allowed, denyReason)

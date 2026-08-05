@@ -48,10 +48,11 @@ containers.exec("alpine", cmd=["sh", "-c", "cat /etc/os-release"])
 containers.audit()     # see what ran
 containers.replay(session_id)   # re-run exact params
 
-# 6. Session mirroring (pair-program over SSH)
+# 6. Session supervision (metadata, mirroring, console, audited kill)
 mirror list
 mirror view <session_id>
 mirror console <session_id>
+mirror kill <session_id>
 
 # 7. GitHub operations
 prs = github.list_prs("afterdarksys/adssh")
@@ -111,19 +112,22 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `jq` | JSON processor |
 | `yq` | YAML processor |
 | `http` | HTTP GET client |
-| `mirror` | Live session viewer / console |
+| `mirror` | Live session metadata, viewer, console, and audited termination |
 | `cmdgen` | Cloud CLI command generator |
 | `package` | Cross-platform package manager |
 | `proc` | `/proc` filesystem reader/writer (Linux) |
 | `grant` | Temporary role escalation |
+| `elevate` | Time-boxed break-glass elevation with reason and audit trail |
+| `gateway` | Policy-audited local TCP gateway for SSH and internal services |
 | `pick` | Charm-powered fuzzy selector for arguments, stdin, or JSON choices |
 | `nav` | Interactive three-column file navigator with previews |
 | `from` / `where` / `select` / `to` | JSONL structured-data pipeline |
 | `why` | Side-effect-free policy/RBAC/CM/four-eyes explanation |
+| `??` | Explain the last blocked command in the current session |
 | `runbook` | Typed Starlark runbooks with governed argv-only steps |
 | `par` | Bounded parallel execution with per-child authorization |
 | `evidence` | Verified, filtered HMAC-chain evidence bundles |
-| `lease` | TTL-bounded command-scoped secrets from environment or private files |
+| `lease` | TTL-bounded command-scoped secrets from environment, private files, Vault, and cloud secret managers |
 | `darkscan` | Simulated malware-scanner demo (no security verdict) |
 | `memforensics` | Simulated memory-forensics demo (no process inspection) |
 
@@ -139,6 +143,20 @@ cat services.json | from json | where 'row["cpu"] > 50' | select name,cpu | to t
 
 # Explain governance without executing or opening an approval request
 why -- kubectl delete namespace production
+??   # after a denied command, explain what blocked it
+
+# Break-glass for one session with a visible expiry and audit entry
+elevate request prod-admin --for 10m --reason "incident INC-1042"
+elevate status
+elevate drop
+
+# Open a governed local gateway to an internal SSH target
+gateway start --listen 127.0.0.1:0 --target bastion.internal:22 --name prod-bastion
+gateway list
+gateway stop gw-1
+
+# Native SSH jump traffic through adssh --serve is also policy-gated
+ssh -J operator@adssh-gateway:2222 user@bastion.internal
 
 # Typed Starlark procedures: every step is an argv list and is re-authorized
 ADSSH_RUNBOOK_DIR=examples/runbooks runbook run diagnose --param path=. --dry-run
@@ -149,6 +167,8 @@ par --jobs 4 api worker scheduler -- printf '%s\n' '{}'
 # Export verified audit evidence, or lease a secret to one command only
 evidence --session "$SESSION_ID" --out evidence.json
 lease --from env:DEPLOY_TOKEN --as TOKEN --ttl 5m -- deploy --token-env TOKEN
+lease --from vault:secret/data/prod/deploy?field=token --as TOKEN -- deploy --token-env TOKEN
+lease --from aws-sm:prod/deploy-token?region=us-east-1 --as TOKEN -- deploy --token-env TOKEN
 ```
 
 ## Security
@@ -171,6 +191,16 @@ deny {
 }
 
 allow { not deny }
+```
+
+Gateway policies can use structured target fields instead of parsing argv:
+```rego
+allow {
+    input.command == "gateway"
+    input.gateway.target_host == "bastion.internal"
+    input.gateway.target_port == "22"
+    input.elevation.role == "prod-admin"
+}
 ```
 
 ## SSH server
@@ -220,6 +250,7 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_POLICY` | — | Rego policy file path |
 | `ADSSH_ENTITLEMENTS` | — | RBAC entitlements YAML |
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |
+| `ADSSH_RECORD_DIR` | `~/.adssh/recordings` | JSONL session recording directory |
 | `ADSSH_HISTORY` | `~/.adssh/history` | Readline history |
 | `ADSSH_HOST_KEY` | `~/.adssh/host_key` | SSH host key |
 | `ADSSH_AUTHORIZED_KEYS` | `~/.adssh/authorized_keys` | SSH pubkeys |
