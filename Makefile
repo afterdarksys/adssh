@@ -3,7 +3,7 @@ MCP_BINARY = adssh-mcp
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS    = -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build build-mcp install clean test test-e2e vet lint
+.PHONY: build build-mcp install clean test test-e2e vet lint demo package dist
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) .
@@ -22,6 +22,12 @@ test:
 # Guarded behind the `e2e` build tag so `make test` never runs them.
 test-e2e:
 	go test -tags e2e -count=1 ./e2e/...
+
+demo:
+	scripts/commercial-demo.sh
+
+package dist:
+	VERSION=$(VERSION) scripts/package-release.sh
 
 vet:
 	go vet ./...

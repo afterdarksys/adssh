@@ -6,7 +6,7 @@ adssh \- programmable DevOps shell (Starlark + POSIX shell hybrid)
 .SH SYNOPSIS
 .B adssh
 [\fIOPTIONS\fR]
-[\fIscript.star\fR]
+[\fIscript.star|script.adssh\fR]
 .\" ─────────────────────────────────────────────────────────────────────────
 .SH DESCRIPTION
 .B adssh
@@ -30,8 +30,18 @@ as a prefix to force shell mode.
 .PP
 When a
 .I script.star
-argument is supplied, the file is evaluated non-interactively and adssh
-exits.
+argument is supplied, the file is evaluated as Starlark non-interactively and
+adssh exits.
+When a
+.I script.adssh
+argument is supplied, the file is evaluated line-by-line through the same
+shell, policy, audit, elevation, lease, gateway, and recording path used by
+interactive commands.
+Prefix a
+.I script.adssh
+line with
+.B -
+to mark an expected failure and continue to the next line.
 Shebang lines (\fB#!\fR) are stripped automatically.
 .\" ─────────────────────────────────────────────────────────────────────────
 .SH OPTIONS

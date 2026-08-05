@@ -15,8 +15,13 @@
 - Added recording manifests to evidence bundles, including recording path, size, event count, and SHA-256 digest.
 - Added gateway connection evidence logs with target, duration, byte counts, close reason, and evidence-bundle digest manifests.
 - Added starter policy bundles for home, regulated ops, gateway-only, and AI-agent postures.
+- Added a reproducible local commercial demo script covering denied gateway access, `??`, break-glass elevation, governed gateway traffic, secret leasing, recording, and evidence export.
+- Added `.adssh` line-script execution for deterministic non-interactive shell demos and runbooks, including `-`-prefixed expected-failure lines.
+- Added release packaging automation for cross-platform tarballs, checksums, optional GPG checksum signatures, optional `.deb`/`.rpm` packages, and a Homebrew formula template.
+- Added a GitHub Actions release workflow for version-tagged artifact builds and GitHub Release publishing.
 
 ### Changed
 
 - `why` and `??` share the same governance-stage explanation formatter.
 - `mirror list` now reports user, principals, age, idle time, active command, recording path, active elevation, and termination state.
+- Local interactive sessions are now registered with the supervision/recording layer so the commercial demo exercises the same governance evidence path without requiring `adssh --serve`.

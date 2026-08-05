@@ -22,6 +22,40 @@ adssh               # launch
 
 Requires Go 1.26+.
 
+## Commercial Demo
+
+Run the local governed-access walkthrough:
+
+```bash
+make demo
+```
+
+The demo builds `adssh`, starts a disposable local TCP target, blocks an initial
+gateway attempt, explains it with `??`, grants time-boxed `elevate` access,
+proves gateway traffic, leases a redacted secret to one command, records the
+session, and exports an evidence bundle. It prints the temporary workspace,
+transcript, audit log, recordings, and evidence paths at the end.
+
+`.adssh` files run as line-oriented shell scripts through the same policy,
+audit, elevation, lease, gateway, and recording path as the interactive shell.
+Prefix a line with `-` when the failure is expected and the script should keep
+running, which is useful for demos that intentionally show denied access before
+elevation.
+
+## Release Packaging
+
+Build release artifacts locally:
+
+```bash
+make package VERSION=v0.9.0
+```
+
+The packaging script emits cross-platform tarballs, `SHA256SUMS`, optional GPG
+checksum signatures when `GPG_SIGN=1`, and optional `.deb`/`.rpm` packages when
+the host has `dpkg-deb` or `rpmbuild`. Release tarballs include the binaries,
+manpage, shell completions, policy bundles, docs, and the Homebrew formula
+template under `packaging/homebrew/`.
+
 ## 5-minute tour
 
 ```bash

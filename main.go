@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -136,6 +137,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize terminal: %v\n", err)
 	}
 
+	outCast := sys.NewOutputBroadcaster(os.Stdout)
+	localSession := &sys.Session{
+		ID:   sessionID,
+		User: os.Getenv("USER"),
+		Out:  outCast,
+	}
+	sys.RegisterSession(localSession)
+	defer sys.UnregisterSession(sessionID)
+
 	// 5. Open the single-user session for the interactive / -c / script paths.
 	// The engine builds its globals fresh; the login/RC profiles are then layered
 	// on top so ~/.adsshprofile and ~/.adsshrc customisations still apply.
@@ -143,7 +153,7 @@ func main() {
 		SessionID:   sessionID,
 		Restricted:  cfg.Restricted,
 		In:          os.Stdin,
-		Out:         os.Stdout,
+		Out:         outCast,
 		Err:         os.Stderr,
 		HistoryFile: cfg.HistoryFile,
 	})
@@ -252,12 +262,19 @@ func main() {
 				content = ""
 			}
 		}
-		if _, err := starlark.ExecFile(thread, cfg.ScriptPath, []byte(content), env); err != nil {
-			fmt.Fprintf(os.Stderr, "Execution error: %v\n", err)
-			os.Exit(1)
+		if strings.HasSuffix(cfg.ScriptPath, ".adssh") {
+			if err := evalLineScript(sess, content); err != nil {
+				fmt.Fprintf(os.Stderr, "Execution error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			if _, err := starlark.ExecFile(thread, cfg.ScriptPath, []byte(content), env); err != nil {
+				fmt.Fprintf(os.Stderr, "Execution error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	} else {
-		smartReplWrapper(eng, env, cfg.Restricted, cfg.HistoryFile, os.Stdin, os.Stdout, os.Stderr)
+		smartReplWrapper(eng, env, cfg.Restricted, cfg.HistoryFile, os.Stdin, outCast, os.Stderr)
 	}
 }
 
@@ -287,6 +304,11 @@ func evalOnce(sess *engine.Session, src string) error {
 	}
 
 	// Shell mode — run through this session's engine-authorized runner.
+	if strings.HasPrefix(src, "!") {
+		src = strings.TrimSpace(src[1:])
+	} else if strings.HasPrefix(src, "$ ") {
+		src = strings.TrimSpace(src[2:])
+	}
 	f, parseErr := syntax.NewParser().Parse(strings.NewReader(src), "")
 	if parseErr != nil {
 		return fmt.Errorf("parse error: %v", parseErr)
@@ -300,11 +322,42 @@ func evalOnce(sess *engine.Session, src string) error {
 	return nil
 }
 
+func evalLineScript(sess *engine.Session, src string) error {
+	scanner := bufio.NewScanner(strings.NewReader(src))
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == "exit" || line == "quit" {
+			return nil
+		}
+		ignoreError := false
+		if strings.HasPrefix(line, "-") {
+			ignoreError = true
+			line = strings.TrimSpace(line[1:])
+		}
+		if err := evalOnce(sess, line); err != nil {
+			if ignoreError {
+				fmt.Fprintln(sess.Err, err)
+				continue
+			}
+			return fmt.Errorf("line %d: %w", lineNo, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func printHelp() {
 	fmt.Print(`adssh — programmable DevOps shell
 
 USAGE
-  adssh [options] [script.star]
+  adssh [options] [script.star|script.adssh]
 
 OPTIONS
   -h, --help                  Show this help
