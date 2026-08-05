@@ -7,12 +7,10 @@ import (
 )
 
 func TestShippedPolicyExamplesCompile(t *testing.T) {
-	paths, err := filepath.Glob(filepath.Join("..", "policy", "examples", "*.rego"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	paths := globPolicyFiles(t, filepath.Join("..", "policy", "examples", "*.rego"))
+	paths = append(paths, globPolicyFiles(t, filepath.Join("..", "policy", "bundles", "*.rego"))...)
 	if len(paths) == 0 {
-		t.Fatal("no policy examples found")
+		t.Fatal("no policy examples or bundles found")
 	}
 	for _, path := range paths {
 		path := path
@@ -26,4 +24,13 @@ func TestShippedPolicyExamplesCompile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func globPolicyFiles(t *testing.T, pattern string) []string {
+	t.Helper()
+	paths, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return paths
 }

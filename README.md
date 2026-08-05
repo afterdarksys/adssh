@@ -203,6 +203,15 @@ allow {
 }
 ```
 
+Starter policy bundles live in `policy/bundles/`:
+
+| Bundle | Purpose |
+|---|---|
+| `home-permissive.rego` | Personal/demo allow-by-default posture |
+| `regulated-ops.rego` | Deny-by-default ops with break-glass for production |
+| `gateway-only.rego` | Controlled SSH/TCP gateway targets |
+| `ai-agent.rego` | Conservative policy for MCP/AI agents |
+
 ## SSH server
 
 ```bash

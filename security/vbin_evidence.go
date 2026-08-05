@@ -31,6 +31,15 @@ type EvidenceBundle struct {
 	DigestSHA256 string         `json:"digest_sha256"`
 	Filter       EvidenceFilter `json:"filter"`
 	Entries      []ChainEntry   `json:"entries"`
+	Recordings   []RecordingRef `json:"recordings,omitempty"`
+}
+
+type RecordingRef struct {
+	SessionID    string `json:"session_id"`
+	Path         string `json:"path"`
+	SizeBytes    int64  `json:"size_bytes"`
+	EventCount   int    `json:"event_count"`
+	DigestSHA256 string `json:"digest_sha256"`
 }
 
 // BuildEvidence verifies the entire configured HMAC chain before returning a
@@ -103,6 +112,10 @@ func (e *Engine) BuildEvidence(filter EvidenceFilter) (EvidenceBundle, error) {
 	if err != nil {
 		return EvidenceBundle{}, fmt.Errorf("evidence: encode digest input: %w", err)
 	}
+	recordings, err := buildRecordingRefs(filter, entries)
+	if err != nil {
+		return EvidenceBundle{}, err
+	}
 	digest := sha256.Sum256(canonical)
 	return EvidenceBundle{
 		Version:      1,
@@ -113,7 +126,73 @@ func (e *Engine) BuildEvidence(filter EvidenceFilter) (EvidenceBundle, error) {
 		DigestSHA256: hex.EncodeToString(digest[:]),
 		Filter:       filter,
 		Entries:      entries,
+		Recordings:   recordings,
 	}, nil
+}
+
+func buildRecordingRefs(filter EvidenceFilter, entries []ChainEntry) ([]RecordingRef, error) {
+	sessions := map[string]struct{}{}
+	if filter.SessionID != "" {
+		sessions[filter.SessionID] = struct{}{}
+	}
+	for _, entry := range entries {
+		if entry.SessionID != "" {
+			sessions[entry.SessionID] = struct{}{}
+		}
+	}
+	refs := make([]RecordingRef, 0, len(sessions))
+	for sessionID := range sessions {
+		ref, ok, err := recordingRef(sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			refs = append(refs, ref)
+		}
+	}
+	return refs, nil
+}
+
+func recordingRef(sessionID string) (RecordingRef, bool, error) {
+	dir := os.Getenv("ADSSH_RECORD_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return RecordingRef{}, false, nil
+		}
+		dir = filepath.Join(home, ".adssh", "recordings")
+	}
+	path := filepath.Join(dir, sessionID+".jsonl")
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return RecordingRef{}, false, nil
+		}
+		return RecordingRef{}, false, fmt.Errorf("evidence: open recording %s: %w", path, err)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 2<<20)
+	events := 0
+	var size int64
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		events++
+		size += int64(len(line)) + 1
+		_, _ = hash.Write(line)
+		_, _ = hash.Write([]byte("\n"))
+	}
+	if err := scanner.Err(); err != nil {
+		return RecordingRef{}, false, fmt.Errorf("evidence: scan recording %s: %w", path, err)
+	}
+	return RecordingRef{
+		SessionID:    sessionID,
+		Path:         path,
+		SizeBytes:    size,
+		EventCount:   events,
+		DigestSHA256: hex.EncodeToString(hash.Sum(nil)),
+	}, true, nil
 }
 
 func parseEvidenceTime(value string, endOfDay bool) (time.Time, error) {

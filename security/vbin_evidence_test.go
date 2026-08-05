@@ -68,3 +68,34 @@ func TestEvidenceWritesPrivateBundleFile(t *testing.T) {
 		t.Fatalf("bundle mode = %o, want 600", info.Mode().Perm())
 	}
 }
+
+func TestEvidenceIncludesRecordingDigestForMatchingSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ADSSH_RECORD_DIR", dir)
+	ledger := filepath.Join(dir, "chain")
+	eng, err := NewEngine(EngineConfig{
+		ChainPath:    ledger,
+		ChainKeyPath: filepath.Join(dir, "key"),
+		SessionID:    "recorded-session",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordingPath := filepath.Join(dir, "recorded-session.jsonl")
+	if err := os.WriteFile(recordingPath, []byte("{\"type\":\"start\"}\n{\"type\":\"end\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng.AppendChain(ChainEntry{SessionID: "recorded-session", Type: "cmd", Command: "whoami"})
+
+	bundle, err := eng.BuildEvidence(EvidenceFilter{SessionID: "recorded-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Recordings) != 1 {
+		t.Fatalf("recordings = %#v", bundle.Recordings)
+	}
+	ref := bundle.Recordings[0]
+	if ref.SessionID != "recorded-session" || ref.Path != recordingPath || ref.EventCount != 2 || ref.SizeBytes == 0 || ref.DigestSHA256 == "" {
+		t.Fatalf("recording ref = %#v", ref)
+	}
+}
