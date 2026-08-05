@@ -7,32 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	dockerimage "github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
 	"go.starlark.net/starlark"
 )
 
-// SetupContainersAPI registers the containers.* namespace into the Starlark environment.
-//
-// Every execution is:
-//   - Fully ephemeral (container removed after exit)
-//   - Audit-logged to ~/.adssh/container_audit.jsonl (append-only JSONL)
-//   - Replayable by session_id
-//
-// Starlark API:
-//
-//	result = containers.exec(image="ubuntu:22.04", cmd=["ls","-la"], env={"FOO":"bar"})
-//	containers.list()           # active ephemeral containers
-//	containers.audit(last=20)   # recent audit entries
-//	containers.replay("abc123") # re-run exact session
-//	containers.clean()          # remove any dangling ephemeral containers
 func SetupContainersAPI(env starlark.StringDict) {
 	d := starlark.NewDict(5)
 	_ = d.SetKey(starlark.String("exec"), starlark.NewBuiltin("exec", containersExec))
@@ -43,7 +25,6 @@ func SetupContainersAPI(env starlark.StringDict) {
 	env["containers"] = d
 }
 
-// ContainerAuditRecord is persisted as one JSON line per execution.
 type ContainerAuditRecord struct {
 	SessionID  string            `json:"session_id"`
 	Timestamp  string            `json:"timestamp"`
@@ -98,7 +79,7 @@ func readAuditRecords() ([]ContainerAuditRecord, error) {
 
 func newSessionID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
@@ -121,78 +102,38 @@ func auditRecordToStarlark(rec ContainerAuditRecord) *starlark.Dict {
 	)
 }
 
-// runContainer is the core execution engine used by both exec and replay.
-func runContainer(ctx context.Context, sessionID, image string, cmd []string, env map[string]string, replayOf string) (ContainerAuditRecord, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return ContainerAuditRecord{}, fmt.Errorf("docker client: %v", err)
+func RunEphemeralContainer(ctx context.Context, sessionID, image string, cmdArgs []string, env map[string]string, replayOf string) (ContainerAuditRecord, error) {
+	if sessionID == "" {
+		sessionID = newSessionID()
 	}
-	defer cli.Close()
-
-	// Pull image if not present
-	rc, err := cli.ImagePull(ctx, image, dockerimage.PullOptions{})
-	if err != nil {
+	if _, err := dockerCLI(ctx, "pull", image); err != nil {
 		return ContainerAuditRecord{}, fmt.Errorf("containers.exec pull %s: %v", image, err)
 	}
-	_, _ = io.Copy(io.Discard, rc) // best-effort: draining pull progress stream
-	rc.Close()
 
-	// Build env slice
-	var envSlice []string
-	for k, v := range env {
-		envSlice = append(envSlice, k+"="+v)
+	args := []string{
+		"run", "--rm",
+		"--name", "adssh-" + sessionID,
+		"--label", "adssh.session=" + sessionID,
+		"--label", "adssh.managed=true",
 	}
+	for k, v := range env {
+		args = append(args, "-e", k+"="+v)
+	}
+	args = append(args, image)
+	args = append(args, cmdArgs...)
 
 	start := time.Now()
-	resp, err := cli.ContainerCreate(ctx, &container.Config{
-		Image: image,
-		Cmd:   cmd,
-		Env:   envSlice,
-		Labels: map[string]string{
-			"adssh.session": sessionID,
-			"adssh.managed": "true",
-		},
-	}, &container.HostConfig{
-		AutoRemove: false, // we remove manually after capturing logs
-	}, nil, nil, "adssh-"+sessionID)
-	if err != nil {
-		return ContainerAuditRecord{}, fmt.Errorf("containers.exec create: %v", err)
-	}
-	containerID := resp.ID
-
-	defer func() {
-		_ = cli.ContainerRemove(context.Background(), containerID, container.RemoveOptions{Force: true})
-	}() // best-effort cleanup
-
-	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
-		return ContainerAuditRecord{}, fmt.Errorf("containers.exec start: %v", err)
-	}
-
-	// Capture logs
-	logOpts := container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-		Follow:     true,
-	}
-	logRC, err := cli.ContainerLogs(ctx, containerID, logOpts)
-	if err != nil {
-		return ContainerAuditRecord{}, fmt.Errorf("containers.exec logs: %v", err)
-	}
-	defer logRC.Close()
-
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	var stdoutBuf, stderrBuf bytes.Buffer
-	if _, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, logRC); err != nil {
-		fmt.Fprintf(os.Stderr, "containers.exec: log capture incomplete for %s: %v\n", containerID, err)
-	}
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
 
-	// Wait for exit
-	statusCh, errCh := cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
-	var exitCode int
-	select {
-	case status := <-statusCh:
-		exitCode = int(status.StatusCode)
-	case err := <-errCh:
-		if err != nil {
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
 			exitCode = -1
 		}
 	}
@@ -201,7 +142,7 @@ func runContainer(ctx context.Context, sessionID, image string, cmd []string, en
 		SessionID:  sessionID,
 		Timestamp:  start.UTC().Format(time.RFC3339),
 		Image:      image,
-		Cmd:        cmd,
+		Cmd:        cmdArgs,
 		Env:        env,
 		ExitCode:   exitCode,
 		Stdout:     stdoutBuf.String(),
@@ -212,10 +153,8 @@ func runContainer(ctx context.Context, sessionID, image string, cmd []string, en
 	if err := writeAuditRecord(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "containers.exec: failed to write audit record: %v\n", err)
 	}
-	return rec, nil
+	return rec, err
 }
-
-// ── Starlark builtins ─────────────────────────────────────────────────────────
 
 func containersExec(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var image string
@@ -229,24 +168,22 @@ func containersExec(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 		return nil, err
 	}
 
-	// Parse cmd: accept string or list
-	var cmd []string
+	var cmdArgs []string
 	switch v := cmdVal.(type) {
 	case starlark.String:
-		cmd = []string{"sh", "-c", string(v)}
+		cmdArgs = []string{"sh", "-c", string(v)}
 	case *starlark.List:
 		for i := 0; i < v.Len(); i++ {
 			s, ok := v.Index(i).(starlark.String)
 			if !ok {
 				return nil, fmt.Errorf("containers.exec: cmd list must contain strings")
 			}
-			cmd = append(cmd, string(s))
+			cmdArgs = append(cmdArgs, string(s))
 		}
 	default:
 		return nil, fmt.Errorf("containers.exec: cmd must be a string or list")
 	}
 
-	// Parse env dict
 	env := make(map[string]string)
 	if envVal != nil {
 		for _, kv := range envVal.Items() {
@@ -258,8 +195,7 @@ func containersExec(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 		}
 	}
 
-	sessionID := newSessionID()
-	rec, err := runContainer(context.Background(), sessionID, image, cmd, env, "")
+	rec, err := RunEphemeralContainer(context.Background(), newSessionID(), image, cmdArgs, env, "")
 	if err != nil {
 		return nil, err
 	}
@@ -267,34 +203,11 @@ func containersExec(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 }
 
 func containersList(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return nil, fmt.Errorf("docker client: %v", err)
-	}
-	defer cli.Close()
-
-	containers, err := cli.ContainerList(context.Background(), container.ListOptions{All: false})
-	if err != nil {
-		return nil, fmt.Errorf("containers.list: %v", err)
-	}
-
-	var results []starlark.Value
-	for _, c := range containers {
-		if c.Labels["adssh.managed"] != "true" {
-			continue
-		}
-		results = append(results, makeDict(
-			"id", c.ID[:12],
-			"image", c.Image,
-			"status", c.Status,
-			"session", c.Labels["adssh.session"],
-		))
-	}
-	return starlark.NewList(results), nil
+	return dockerJSONLines("ps", "-a", "--filter", "label=adssh.managed=true", "--format", "{{json .}}")
 }
 
 func containersAudit(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	var last int
+	last := 20
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "last?", &last); err != nil {
 		return nil, err
 	}
@@ -305,7 +218,6 @@ func containersAudit(thread *starlark.Thread, b *starlark.Builtin, args starlark
 	if err != nil {
 		return nil, fmt.Errorf("containers.audit: %v", err)
 	}
-	// Return last N
 	if len(records) > last {
 		records = records[len(records)-last:]
 	}
@@ -336,8 +248,7 @@ func containersReplay(thread *starlark.Thread, b *starlark.Builtin, args starlar
 		return nil, fmt.Errorf("containers.replay: session %s not found in audit log", sessionID)
 	}
 
-	newID := newSessionID()
-	rec, err := runContainer(context.Background(), newID, original.Image, original.Cmd, original.Env, sessionID)
+	rec, err := RunEphemeralContainer(context.Background(), newSessionID(), original.Image, original.Cmd, original.Env, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -345,24 +256,31 @@ func containersReplay(thread *starlark.Thread, b *starlark.Builtin, args starlar
 }
 
 func containersClean(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	list, err := dockerJSONLines("ps", "-a", "--filter", "label=adssh.managed=true", "--format", "{{json .}}")
 	if err != nil {
-		return nil, fmt.Errorf("docker client: %v", err)
+		return nil, err
 	}
-	defer cli.Close()
-
-	containers, err := cli.ContainerList(context.Background(), container.ListOptions{All: true})
-	if err != nil {
-		return nil, fmt.Errorf("containers.clean: %v", err)
+	values, ok := list.(*starlark.List)
+	if !ok {
+		return nil, fmt.Errorf("containers.clean: unexpected docker list result")
 	}
-
-	var removed []starlark.Value
-	for _, c := range containers {
-		if c.Labels["adssh.managed"] != "true" {
+	removed := starlark.NewList(nil)
+	for i := 0; i < values.Len(); i++ {
+		item, ok := values.Index(i).(*starlark.Dict)
+		if !ok {
 			continue
 		}
-		_ = cli.ContainerRemove(context.Background(), c.ID, container.RemoveOptions{Force: true}) // best-effort cleanup
-		removed = append(removed, starlark.String(c.ID[:12]))
+		value, found, err := item.Get(starlark.String("ID"))
+		if err != nil || !found {
+			continue
+		}
+		id, ok := starlark.AsString(value)
+		if !ok || id == "" {
+			continue
+		}
+		if _, err := dockerCLI(context.Background(), "rm", "-f", id); err == nil {
+			_ = removed.Append(starlark.String(id))
+		}
 	}
-	return starlark.NewList(removed), nil
+	return removed, nil
 }

@@ -24,7 +24,7 @@ type mcpAgentConfig struct {
 
 // serveMCP creates the MCP server, registers all tools, and starts stdio transport.
 // Every tool is gated by the engine's Rego policy via policyGate.
-func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringDict, apiKey string, agent mcpAgentConfig) error {
+func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringDict, agent mcpAgentConfig) error {
 	s := server.NewMCPServer(
 		"adssh-mcp",
 		"1.0.0",

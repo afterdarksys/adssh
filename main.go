@@ -163,6 +163,7 @@ func main() {
 	}
 	thread := sess.Thread
 	env := sess.Globals
+	starlarkext.GovernStarlarkGlobalsInPlace(eng.Security(), env)
 	if _, perr := config.LoadProfiles(thread, env, cfg.IsLoginShell, cfg.ProfilePath, cfg.RCPath); perr != nil {
 		fmt.Fprintf(os.Stderr, "Error loading profiles: %v\n", perr)
 	}
@@ -183,6 +184,7 @@ func main() {
 			Out:        out,
 			Err:        errOut,
 		})
+		starlarkext.GovernStarlarkGlobalsInPlace(eng.Security(), sessGlobals)
 		sessThread := &starlark.Thread{Name: "ssh-" + sessionID}
 		if _, perr := config.LoadProfiles(sessThread, sessGlobals, false, cfg.ProfilePath, cfg.RCPath); perr != nil {
 			fmt.Fprintf(errOut, "Error loading profiles: %v\n", perr)
@@ -206,25 +208,31 @@ func main() {
 
 	// 6b. Inject SSH management builtins into `sys` dict
 	if sysVal, ok := env["sys"]; ok {
-		if sysDict, ok := sysVal.(*starlark.Dict); ok {
-			enableSSH := starlark.NewBuiltin("enable_ssh", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-				var addr string
-				if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr); err != nil {
-					return nil, err
-				}
-				if err := sys.EnableSSH(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter, gatewayAuthorizer); err != nil {
-					return nil, err
-				}
-				return starlark.None, nil
-			})
-			disableSSH := starlark.NewBuiltin("disable_ssh", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-				if err := sys.DisableSSH(); err != nil {
-					return nil, err
-				}
-				return starlark.None, nil
-			})
-			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSH)
-			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSH)
+		enableSSH := starlark.NewBuiltin("enable_ssh", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var addr string
+			if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr); err != nil {
+				return nil, err
+			}
+			if err := sys.EnableSSH(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter, gatewayAuthorizer); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		})
+		disableSSH := starlark.NewBuiltin("disable_ssh", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			if err := sys.DisableSSH(); err != nil {
+				return nil, err
+			}
+			return starlark.None, nil
+		})
+		enableSSHVal := starlarkext.GovernStarlarkValue(eng.Security(), "starlark.sys.enable_ssh", enableSSH)
+		disableSSHVal := starlarkext.GovernStarlarkValue(eng.Security(), "starlark.sys.disable_ssh", disableSSH)
+		switch sysDict := sysVal.(type) {
+		case *starlark.Dict:
+			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSHVal)
+			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSHVal)
+		case *starlarkext.GovernedStarlarkDict:
+			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSHVal)
+			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSHVal)
 		}
 	}
 
