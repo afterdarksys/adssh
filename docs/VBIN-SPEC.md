@@ -286,6 +286,14 @@ value is injected into one child environment with a maximum 24-hour TTL. For
 `env:NAME`, the source variable is removed from the child environment so only
 the requested destination name is present.
 
+Before fetching the secret, `lease` authorizes the child command with structured
+Rego input under `input.lease`: `id`, `source_type`, `source_name`,
+`destination`, `ttl_seconds`, and `command`. This lets policy constrain which
+sources may be leased, how long a lease may live, and which child command may
+receive it without parsing the `lease` argv. The audit chain records
+`LEASE_REQUEST`, `LEASE_GRANT`, and `LEASE_REVOKE` events with the lease ID and
+non-secret metadata.
+
 Captured stdout/stderr redact the exact leased secret and common
 credential-shaped strings. Audit command/event/policy entries are redacted
 before they are written to the flat audit log, remote audit sink, or HMAC chain.

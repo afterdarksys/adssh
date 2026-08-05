@@ -5,19 +5,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
+	"github.com/afterdarksys/adssh/security"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"go.starlark.net/starlark"
 )
 
+type mcpAgentConfig struct {
+	ID            string
+	RequireDryRun bool
+}
+
 // serveMCP creates the MCP server, registers all tools, and starts stdio transport.
 // Every tool is gated by the engine's Rego policy via policyGate.
-func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringDict, apiKey string) error {
+func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringDict, apiKey string, agent mcpAgentConfig) error {
 	s := server.NewMCPServer(
 		"adssh-mcp",
 		"1.0.0",
@@ -36,7 +43,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Starlark code to evaluate"),
 			),
 		),
-		serializedHandler(toolMu, policyGate(eng, "eval_starlark", handleEvalStarlark(globals))),
+		serializedHandler(toolMu, policyGate(eng, "eval_starlark", handleEvalStarlark(globals), agent)),
 	)
 
 	// Register run_shell tool
@@ -47,8 +54,11 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Required(),
 				mcp.Description("Shell command to execute"),
 			),
+			mcp.WithBoolean("dry_run",
+				mcp.Description("Authorize and report the command plan without executing it"),
+			),
 		),
-		serializedHandler(toolMu, policyGate(eng, "run_shell", handleRunShell(globals, cfg.Restricted))),
+		serializedHandler(toolMu, policyGate(eng, "run_shell", handleRunShell(globals, cfg.Restricted), agent)),
 	)
 
 	// Register list_sessions tool
@@ -56,7 +66,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 		mcp.NewTool("list_sessions",
 			mcp.WithDescription("List active SSH sessions. Returns a JSON array of session IDs."),
 		),
-		serializedHandler(toolMu, policyGate(eng, "list_sessions", handleListSessions())),
+		serializedHandler(toolMu, policyGate(eng, "list_sessions", handleListSessions(), agent)),
 	)
 
 	// Register cloud_query tool
@@ -72,7 +82,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Function name within the namespace to call"),
 			),
 		),
-		serializedHandler(toolMu, policyGate(eng, "cloud_query", handleCloudQuery(globals))),
+		serializedHandler(toolMu, policyGate(eng, "cloud_query", handleCloudQuery(globals), agent)),
 	)
 
 	// Register container_exec tool
@@ -88,7 +98,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Command to run, as a JSON array of strings (e.g. [\"ls\",\"-la\"]) or a single command string"),
 			),
 		),
-		serializedHandler(toolMu, policyGate(eng, "container_exec", handleContainerExec())),
+		serializedHandler(toolMu, policyGate(eng, "container_exec", handleContainerExec(), agent)),
 	)
 
 	// Register audit_log tool
@@ -103,7 +113,7 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 				mcp.Description("Optional substring filter to match against log entries"),
 			),
 		),
-		serializedHandler(toolMu, policyGate(eng, "audit_log", handleAuditLog(cfg.AuditLogPath))),
+		serializedHandler(toolMu, policyGate(eng, "audit_log", handleAuditLog(cfg.AuditLogPath), agent)),
 	)
 
 	eng.Security().LogEvent("adssh-mcp serving on stdio")
@@ -120,15 +130,81 @@ func serializedHandler(mu *sync.Mutex, handler server.ToolHandlerFunc) server.To
 
 // policyGate wraps a tool handler with the engine's Rego policy evaluation.
 // Every tool invocation is evaluated against eng before execution (MCP-08).
-func policyGate(eng *engine.Engine, toolName string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
+func policyGate(eng *engine.Engine, toolName string, handler server.ToolHandlerFunc, configs ...mcpAgentConfig) server.ToolHandlerFunc {
 	sec := eng.Security()
+	agent := mcpAgentConfig{ID: "mcp-agent"}
+	if len(configs) > 0 {
+		agent = configs[0]
+		if agent.ID == "" {
+			agent.ID = "mcp-agent"
+		}
+	}
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := append([]string{toolName}, policyArgs(req)...)
-		if err := sec.AuthorizeCommand(args, ""); err != nil {
+		risk := classifyAgentRisk(toolName, req)
+		dryRun := requestDryRun(req)
+		if agent.RequireDryRun && risk == "destructive" && !dryRun {
+			return mcp.NewToolResultError("agent: destructive action requires dry_run=true"), nil
+		}
+		if err := sec.AuthorizeCommandWithExtra(args, "", security.PolicyContextExtra{
+			Agent: &security.AgentClaim{
+				ID:     agent.ID,
+				Kind:   "mcp",
+				Risk:   risk,
+				DryRun: dryRun,
+			},
+		}); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		return handler(context.WithValue(ctx, mcpSecurityEngineContextKey{}, sec), req)
 	}
+}
+
+func requestDryRun(req mcp.CallToolRequest) bool {
+	value, ok := req.GetArguments()["dry_run"]
+	if !ok {
+		return false
+	}
+	switch value := value.(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(value, "true") || value == "1" || strings.EqualFold(value, "yes")
+	default:
+		return false
+	}
+}
+
+func classifyAgentRisk(toolName string, req mcp.CallToolRequest) string {
+	switch toolName {
+	case "list_sessions", "audit_log", "cloud_query":
+		return "read"
+	case "container_exec", "eval_starlark":
+		return "mutable"
+	case "run_shell":
+		command, _ := req.GetArguments()["command"].(string)
+		if shellCommandLooksDestructive(command) {
+			return "destructive"
+		}
+		return "mutable"
+	default:
+		return "unknown"
+	}
+}
+
+func shellCommandLooksDestructive(command string) bool {
+	lower := strings.ToLower(command)
+	destructiveFragments := []string{
+		"rm -", "rm ", " rmdir ", "delete", "destroy", "terminate",
+		"kubectl delete", "terraform apply", "terraform destroy", "tofu apply", "tofu destroy",
+		"docker rm", "docker rmi", "git push --force", "chmod 777",
+	}
+	for _, fragment := range destructiveFragments {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func policyArgs(req mcp.CallToolRequest) []string {

@@ -78,6 +78,91 @@ func TestPolicyGateEnforcesConfiguredEntitlements(t *testing.T) {
 	}
 }
 
+func TestPolicyGateIncludesAgentContext(t *testing.T) {
+	eng, err := engine.New(engine.Config{EngineConfig: security.EngineConfig{PolicySource: []byte(`
+package adssh
+default allow = false
+allow {
+    input.command == "run_shell"
+    input.agent.id == "planner"
+    input.agent.kind == "mcp"
+    input.agent.risk == "destructive"
+    input.agent.dry_run
+}
+authz := {"allow": allow}
+`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	handler := policyGate(eng, "run_shell", server.ToolHandlerFunc(func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		called = true
+		return mcp.NewToolResultText("ok"), nil
+	}), mcpAgentConfig{ID: "planner"})
+
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name:      "run_shell",
+		Arguments: map[string]any{"command": "rm -rf /tmp/adssh-test", "dry_run": true},
+	}}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError || !called {
+		t.Fatalf("agent policy context did not authorize tool call: %#v", result)
+	}
+}
+
+func TestPolicyGateRequiresDryRunForDestructiveAgents(t *testing.T) {
+	eng, err := engine.New(engine.Config{EngineConfig: security.EngineConfig{PolicySource: []byte(`
+package adssh
+authz := {"allow": true}
+`)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	handler := policyGate(eng, "run_shell", server.ToolHandlerFunc(func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		called = true
+		return mcp.NewToolResultText("unexpected"), nil
+	}), mcpAgentConfig{ID: "planner", RequireDryRun: true})
+
+	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name:      "run_shell",
+		Arguments: map[string]any{"command": "kubectl delete pod web-0"},
+	}}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("destructive agent command executed without dry_run")
+	}
+	if !result.IsError || !strings.Contains(result.Content[0].(mcp.TextContent).Text, "dry_run=true") {
+		t.Fatalf("dry-run denial was not surfaced: %#v", result)
+	}
+}
+
+func TestRunShellDryRunDoesNotExecuteCommand(t *testing.T) {
+	eng, err := engine.New(engine.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), mcpSecurityEngineContextKey{}, eng.Security())
+	handler := handleRunShell(starlark.StringDict{}, false)
+	result, err := handler(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{
+		Name:      "run_shell",
+		Arguments: map[string]any{"command": "exit 7", "dry_run": true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := result.Content[0].(mcp.TextContent).Text
+	if result.IsError || !strings.Contains(text, "dry_run: true") || !strings.Contains(text, "exit 7") {
+		t.Fatalf("dry-run shell result was not returned: %#v", result)
+	}
+}
+
 func TestSerializedHandlerPreventsConcurrentToolExecution(t *testing.T) {
 	var mu sync.Mutex
 	entered := make(chan struct{}, 2)

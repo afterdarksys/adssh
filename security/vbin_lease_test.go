@@ -110,3 +110,55 @@ func TestLeaseRejectsInsecureSecretFile(t *testing.T) {
 		t.Fatalf("insecure secret file was accepted: %v", err)
 	}
 }
+
+func TestLeasePolicyCanDenyBeforeSecretLoad(t *testing.T) {
+	eng, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh
+default allow = false
+deny_reason = "lease ttl too long" {
+    input.lease.ttl_seconds > 60
+}
+allow {
+    input.lease.ttl_seconds <= 60
+}
+authz := {"allow": allow, "deny_reason": deny_reason}
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runLeaseVBin(t, eng, []string{
+		"lease", "--from", "env:ADSSH_LEASE_DOES_NOT_EXIST", "--as", "TOKEN", "--ttl", "2m", "--", "/usr/bin/true",
+	})
+	if err == nil || !strings.Contains(err.Error(), "lease ttl too long") {
+		t.Fatalf("lease policy denial did not happen before secret load: %v", err)
+	}
+}
+
+func TestLeaseLifecycleAuditIncludesIDAndMetadata(t *testing.T) {
+	t.Setenv("ADSSH_LEASE_SOURCE", "super-secret")
+	dir := t.TempDir()
+	ledger := filepath.Join(dir, "chain")
+	eng, err := NewEngine(EngineConfig{ChainPath: ledger, ChainKeyPath: filepath.Join(dir, "key")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runLeaseVBin(t, eng, []string{
+		"lease", "--from", "env:ADSSH_LEASE_SOURCE", "--as", "TOKEN", "--", "/usr/bin/true",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(chain)
+	for _, want := range []string{"LEASE_REQUEST id=lease-", "source_type=env", "as=TOKEN", "LEASE_GRANT id=lease-", "LEASE_REVOKE id=lease-"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("lease audit missing %q in:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "super-secret") {
+		t.Fatal("lease audit leaked secret value")
+	}
+}

@@ -16,7 +16,8 @@ allow {
 
 allow {
     input.command in mcp_tools
-    not destructive_arg
+    input.agent.kind == "mcp"
+    input.agent.risk != "destructive"
 }
 
 allow {
@@ -24,11 +25,23 @@ allow {
     input.elevation.reason != ""
 }
 
+allow {
+    input.agent.kind == "mcp"
+    input.agent.risk == "destructive"
+    input.agent.dry_run
+}
+
 destructive_arg {
     some arg in input.args
     lower(arg) in {"delete", "destroy", "terminate", "rm", "--force", "-f"}
 }
 
-deny_reason = "human-approved-agent elevation is required for destructive agent actions" {
+deny_reason = "destructive agent actions require dry_run=true or human-approved-agent elevation" {
+    input.agent.kind == "mcp"
+    input.agent.risk == "destructive"
+    not input.agent.dry_run
+}
+
+deny_reason = "human-approved-agent elevation is required for destructive shell actions" {
     destructive_arg
 }

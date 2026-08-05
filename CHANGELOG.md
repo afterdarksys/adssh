@@ -22,6 +22,8 @@
 - Added `identity` for OIDC claim import, session group mapping, local SSH CA generation, and short-lived SSH user certificate issuance.
 - Added `admin` for governed local API access to sessions, gateways, pending approvals, policy explanations, and evidence export.
 - Added release provenance files: `provenance.json` and `slsa-provenance.intoto.json`.
+- Added structured lease Rego input under `input.lease`, lease IDs, and explicit `LEASE_REQUEST` / `LEASE_GRANT` / `LEASE_REVOKE` audit events.
+- Added structured MCP agent Rego input under `input.agent`, configurable MCP agent identity, destructive-action risk classification, and `run_shell` dry-run mode.
 
 ### Changed
 
@@ -29,3 +31,4 @@
 - `mirror list` now reports user, principals, age, idle time, active command, recording path, active elevation, and termination state.
 - Local interactive sessions are now registered with the supervision/recording layer so the commercial demo exercises the same governance evidence path without requiring `adssh --serve`.
 - `why` and `??` now include prescriptive next steps for policy, RBAC, change-management, four-eyes, and restricted-mode blocks.
+- `policy/bundles/ai-agent.rego` now uses MCP agent risk and dry-run context for destructive action governance.

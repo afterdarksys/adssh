@@ -22,6 +22,8 @@ type PolicyContext struct {
 	SessionID string          `json:"session_id"`
 	Elevation *ElevationClaim `json:"elevation,omitempty"`
 	Gateway   *GatewayClaim   `json:"gateway,omitempty"`
+	Lease     *LeaseClaim     `json:"lease,omitempty"`
+	Agent     *AgentClaim     `json:"agent,omitempty"`
 }
 
 type ElevationClaim struct {
@@ -37,6 +39,27 @@ type GatewayClaim struct {
 	Target     string `json:"target"`
 	TargetHost string `json:"target_host"`
 	TargetPort string `json:"target_port"`
+}
+
+type LeaseClaim struct {
+	ID          string   `json:"id"`
+	SourceType  string   `json:"source_type"`
+	SourceName  string   `json:"source_name"`
+	Destination string   `json:"destination"`
+	TTLSeconds  int64    `json:"ttl_seconds"`
+	Command     []string `json:"command"`
+}
+
+type AgentClaim struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Risk   string `json:"risk"`
+	DryRun bool   `json:"dry_run"`
+}
+
+type PolicyContextExtra struct {
+	Lease *LeaseClaim
+	Agent *AgentClaim
 }
 
 // LoadPolicy reads a Rego file and prepares the OPA query.
@@ -112,6 +135,24 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 			"target":      pctx.Gateway.Target,
 			"target_host": pctx.Gateway.TargetHost,
 			"target_port": pctx.Gateway.TargetPort,
+		}
+	}
+	if pctx.Lease != nil {
+		input["lease"] = map[string]interface{}{
+			"id":          pctx.Lease.ID,
+			"source_type": pctx.Lease.SourceType,
+			"source_name": pctx.Lease.SourceName,
+			"destination": pctx.Lease.Destination,
+			"ttl_seconds": pctx.Lease.TTLSeconds,
+			"command":     pctx.Lease.Command,
+		}
+	}
+	if pctx.Agent != nil {
+		input["agent"] = map[string]interface{}{
+			"id":      pctx.Agent.ID,
+			"kind":    pctx.Agent.Kind,
+			"risk":    pctx.Agent.Risk,
+			"dry_run": pctx.Agent.DryRun,
 		}
 	}
 

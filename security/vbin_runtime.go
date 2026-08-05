@@ -12,12 +12,15 @@ import (
 )
 
 type governedCommand struct {
-	Args      []string
-	Dir       string
-	Env       map[string]string
-	UnsetEnv  []string
-	Stdin     io.Reader
-	MaxOutput int
+	Args          []string
+	Dir           string
+	Env           map[string]string
+	UnsetEnv      []string
+	Stdin         io.Reader
+	MaxOutput     int
+	Lease         *LeaseClaim
+	Agent         *AgentClaim
+	Preauthorized bool
 }
 
 type commandResult struct {
@@ -32,8 +35,13 @@ func (e *Engine) runGovernedCommand(ctx context.Context, sessionID string, comma
 	if len(command.Args) == 0 || command.Args[0] == "" {
 		return commandResult{}, fmt.Errorf("adssh: child command is empty")
 	}
-	if err := e.gateCommand(e.restricted, command.Args, sessionID); err != nil {
-		return commandResult{}, err
+	if !command.Preauthorized {
+		if err := e.gateCommandWithExtra(e.restricted, command.Args, sessionID, PolicyContextExtra{
+			Lease: command.Lease,
+			Agent: command.Agent,
+		}); err != nil {
+			return commandResult{}, err
+		}
 	}
 	if vb, ok := e.Lookup(command.Args[0]); ok {
 		return commandResult{}, e.DispatchVBin(ctx, vb, command.Args)

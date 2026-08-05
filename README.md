@@ -256,6 +256,16 @@ allow {
 }
 ```
 
+Lease policies can use structured lease fields before the secret is fetched:
+```rego
+allow {
+    input.lease.source_type == "vault"
+    input.lease.ttl_seconds <= 300
+    input.lease.destination == "TOKEN"
+    input.lease.command[0] == "deploy"
+}
+```
+
 Starter policy bundles live in `policy/bundles/`:
 
 | Bundle | Purpose |
@@ -292,6 +302,11 @@ Tools exposed: `eval_starlark`, `run_shell`, `list_sessions`, `cloud_query`, `co
 
 Every MCP request passes through the complete Rego, entitlement, change-management,
 four-eyes, restricted-mode, and audit gate with deterministic tool arguments.
+The gate also provides structured agent context as `input.agent.id`,
+`input.agent.kind`, `input.agent.risk`, and `input.agent.dry_run`. Set
+`ADSSH_AGENT_ID` or `--agent-id` to name the agent, and set
+`ADSSH_AGENT_REQUIRE_DRY_RUN=true` or `--require-agent-dry-run` to reject
+destructive MCP shell plans unless `dry_run=true`.
 Within `eval_starlark`, each Go builtin passes through that gate again immediately
 before it is called, using an operation name such as
 `starlark.docker.images.pull` and canonical `arg0=...`/`keyword=...` policy
@@ -314,6 +329,8 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |
 | `ADSSH_RECORD_DIR` | `~/.adssh/recordings` | JSONL session recording directory |
 | `ADSSH_GATEWAY_LOG` | `$ADSSH_RECORD_DIR/gateway_connections.jsonl` | Gateway connection evidence log |
+| `ADSSH_AGENT_ID` | process-specific MCP ID | MCP agent identity exposed as `input.agent.id` |
+| `ADSSH_AGENT_REQUIRE_DRY_RUN` | off | Require `dry_run=true` for destructive MCP shell plans |
 | `ADSSH_HISTORY` | `~/.adssh/history` | Readline history |
 | `ADSSH_HOST_KEY` | `~/.adssh/host_key` | SSH host key |
 | `ADSSH_AUTHORIZED_KEYS` | `~/.adssh/authorized_keys` | SSH pubkeys |

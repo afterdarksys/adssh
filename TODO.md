@@ -25,6 +25,10 @@ control, with a programmable and AI-native operations shell.
   and evidence export.
 - Release provenance and SLSA-style attestation metadata.
 - Prescriptive `why` / `??` next-step guidance for blocked commands.
+- Lease IDs, structured `input.lease` policy context, and explicit lease
+  request/grant/revoke audit events.
+- MCP agent identity, structured `input.agent` policy context, destructive-risk
+  classification, and `run_shell` dry-run mode.
 
 ## Next Up
 
@@ -45,10 +49,9 @@ control, with a programmable and AI-native operations shell.
    - Add signed SLSA provenance through GitHub OIDC/keyless signing.
 
 4. **Lease Hardening**
-   - Lease IDs and explicit lease audit events.
-   - Provider metadata in audit/evidence.
+   - Provider metadata in evidence bundles.
    - Stdin or file-descriptor injection in addition to env injection.
-   - Policy examples for lease TTL/source/target restrictions.
+   - More policy examples for lease TTL/source/target restrictions.
 
 5. **Approval UX**
    - Show active pending token and required approver directly in denial output.
@@ -56,9 +59,8 @@ control, with a programmable and AI-native operations shell.
    - Make `??` infer required role from structured policy metadata where available.
 
 6. **Agent Governance**
-   - Per-agent identity.
-   - Dry-run gates for risky tools.
    - Approval-required destructive agent actions.
+   - Agent-specific entitlements and session binding.
    - Expanded MCP/AI-agent policy examples.
 
 7. **Docs Site**

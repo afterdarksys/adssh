@@ -25,6 +25,10 @@ func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHan
 		if err != nil {
 			return mcp.NewToolResultError("missing required parameter: command"), nil
 		}
+		if requestDryRun(req) {
+			security.LogCommand("MCP:run_shell:dry_run", cmd)
+			return mcp.NewToolResultText(fmt.Sprintf("dry_run: true\ncommand: %s", cmd)), nil
+		}
 
 		// Parse shell command (from starlarkext/exec.go pattern)
 		parserFile, err := syntax.NewParser().Parse(strings.NewReader(cmd), "")

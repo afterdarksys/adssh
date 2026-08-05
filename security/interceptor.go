@@ -114,6 +114,10 @@ func (e *Engine) CallInterceptorSession(sess *SessionState) interp.CallHandlerFu
 // call this exactly once per command, so every command is authorized and audited
 // EXACTLY ONCE and always fails closed (rule 8 of SECURITY-RULES.md).
 func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) error {
+	return e.gateCommandWithExtra(restricted, args, sessionID, PolicyContextExtra{})
+}
+
+func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID string, extra PolicyContextExtra) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -123,6 +127,8 @@ func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) e
 
 	// 0. Rego policy evaluation (primary authorization) — fail closed.
 	pctx := BuildPolicyContext(args[0], args[1:], sessionID)
+	pctx.Lease = extra.Lease
+	pctx.Agent = extra.Agent
 	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 	if policyErr != nil {
 		e.rememberDeniedCommand(sessionID, args)
@@ -186,6 +192,10 @@ func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) e
 // use this method so they cannot accidentally implement only a subset.
 func (e *Engine) AuthorizeCommand(args []string, sessionID string) error {
 	return e.gateCommand(e.restricted, args, sessionID)
+}
+
+func (e *Engine) AuthorizeCommandWithExtra(args []string, sessionID string, extra PolicyContextExtra) error {
+	return e.gateCommandWithExtra(e.restricted, args, sessionID, extra)
 }
 
 // callHandler is the AUTHORIZATION GATE for every simple command mvdan.cc/sh

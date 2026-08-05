@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.starlark.net/resolve"
@@ -27,6 +28,8 @@ func main() {
 
 	// 2. Parse MCP-specific CLI flags
 	apiKey := os.Getenv("ADSSH_MCP_API_KEY")
+	agentID := os.Getenv("ADSSH_AGENT_ID")
+	requireDryRun := strings.EqualFold(os.Getenv("ADSSH_AGENT_REQUIRE_DRY_RUN"), "true")
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
 		switch {
@@ -36,7 +39,15 @@ func main() {
 		case (arg == "--api-key") && i+1 < len(os.Args):
 			apiKey = os.Args[i+1]
 			i++
+		case (arg == "--agent-id") && i+1 < len(os.Args):
+			agentID = os.Args[i+1]
+			i++
+		case arg == "--require-agent-dry-run":
+			requireDryRun = true
 		}
+	}
+	if agentID == "" {
+		agentID = fmt.Sprintf("mcp-%d", os.Getpid())
 	}
 
 	// 3. Build the security engine from configuration (fail-closed: a malformed
@@ -76,7 +87,7 @@ func main() {
 
 	// 5. Start MCP server
 	eng.Security().LogEvent("adssh-mcp server starting")
-	if err := serveMCP(cfg, eng, globals, apiKey); err != nil {
+	if err := serveMCP(cfg, eng, globals, apiKey, mcpAgentConfig{ID: agentID, RequireDryRun: requireDryRun}); err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
 		os.Exit(1)
 	}

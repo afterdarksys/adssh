@@ -3,6 +3,8 @@ package security
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -67,15 +69,43 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	if !validEnvironmentName(destination) {
 		return fmt.Errorf("lease: invalid destination environment variable %q", destination)
 	}
+	sourceKind, sourceName, found := strings.Cut(source, ":")
+	if !found || sourceName == "" {
+		return fmt.Errorf("lease: source must be env:NAME, file:path, vault:path, aws-sm:name, azure-kv:vault/name, or gcp-sm:project/name")
+	}
+	leaseID, err := newLeaseID()
+	if err != nil {
+		return err
+	}
+	commandArgs := append([]string(nil), args[delimiter+1:]...)
+	leaseClaim := &LeaseClaim{
+		ID:          leaseID,
+		SourceType:  sourceKind,
+		SourceName:  sourceName,
+		Destination: destination,
+		TTLSeconds:  int64(ttl.Seconds()),
+		Command:     commandArgs,
+	}
+	eng := engineFromContext(ctx)
+	sessionID := SessionIDFromContext(ctx)
+	eng.LogEvent(fmt.Sprintf("LEASE_REQUEST id=%s session=%s source_type=%s source=%s as=%s ttl=%s command=%s",
+		leaseID, sessionID, sourceKind, sourceName, destination, ttl, strings.Join(commandArgs, " ")))
+	if err := eng.AuthorizeCommandWithExtra(commandArgs, sessionID, PolicyContextExtra{Lease: leaseClaim}); err != nil {
+		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=policy-denied", leaseID))
+		return err
+	}
 	secret, err := loadLeaseSecret(ctx, source)
 	if err != nil {
+		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=load-error", leaseID))
 		return err
 	}
 	defer zeroBytes(secret)
 	if len(secret) == 0 {
+		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=empty-secret", leaseID))
 		return fmt.Errorf("lease: secret source is empty")
 	}
 	if bytes.IndexByte(secret, 0) >= 0 {
+		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=nul-secret", leaseID))
 		return fmt.Errorf("lease: secret contains a NUL byte and cannot be placed in an environment variable")
 	}
 
@@ -83,15 +113,25 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	defer cancel()
 	secretValue := string(secret)
 	var unsetEnv []string
-	if kind, name, found := strings.Cut(source, ":"); found && kind == "env" {
-		unsetEnv = []string{name}
+	if sourceKind == "env" {
+		unsetEnv = []string{sourceName}
 	}
-	result, err := engineFromContext(ctx).runGovernedCommand(leaseCtx, SessionIDFromContext(ctx), governedCommand{
-		Args:     args[delimiter+1:],
-		Dir:      hc.Dir,
-		Env:      map[string]string{destination: secretValue},
-		UnsetEnv: unsetEnv,
+	eng.LogEvent(fmt.Sprintf("LEASE_GRANT id=%s", leaseID))
+	result, err := eng.runGovernedCommand(leaseCtx, sessionID, governedCommand{
+		Args:          commandArgs,
+		Dir:           hc.Dir,
+		Env:           map[string]string{destination: secretValue},
+		UnsetEnv:      unsetEnv,
+		Lease:         leaseClaim,
+		Preauthorized: true,
 	}, nil)
+	revokeReason := "completed"
+	if leaseCtx.Err() == context.DeadlineExceeded {
+		revokeReason = "expired"
+	} else if err != nil || result.ExitCode != 0 {
+		revokeReason = "child-error"
+	}
+	defer eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=%s", leaseID, revokeReason))
 	result.Stdout = redactSecret(result.Stdout, secret)
 	result.Stderr = redactSecret(result.Stderr, secret)
 	result.Stdout = redactSensitiveBytes(result.Stdout)
@@ -109,6 +149,14 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("lease: child command exited with status %d", result.ExitCode)
 	}
 	return nil
+}
+
+func newLeaseID() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("lease: generate lease id: %w", err)
+	}
+	return "lease-" + hex.EncodeToString(raw[:]), nil
 }
 
 type leaseSecretReader func(context.Context, string) ([]byte, error)
