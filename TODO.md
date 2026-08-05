@@ -29,19 +29,21 @@ control, with a programmable and AI-native operations shell.
   request/grant/revoke audit events.
 - MCP agent identity, structured `input.agent` policy context, destructive-risk
   classification, and `run_shell` dry-run mode.
+- JWKS-backed OIDC signature verification with issuer discovery.
+- Token-capable local `admin serve` HTTP API for sessions, gateways, approvals,
+  explanations, and evidence.
+- Role-separated `admin-api.rego` starter policy bundle.
 
 ## Next Up
 
 1. **Identity Hardening**
    - Full OIDC authorization-code/device login flow.
-   - JWKS signature verification and issuer metadata discovery.
    - Cert principal policy examples.
 
 2. **Admin API Hardening**
-   - HTTP API daemon mode for sessions, recordings, gateways, elevations,
-     leases, approvals, evidence, and policy explainability.
+   - Extend HTTP API coverage to recordings, elevations, leases, and approval actions.
    - MCP parity for the new `admin` and `identity` operations.
-   - Role-separated admin policy examples.
+   - HTTP API audit event details and OpenAPI schema.
 
 3. **Release Hardening**
    - Publish a dedicated Homebrew tap repository.

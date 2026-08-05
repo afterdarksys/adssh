@@ -2,14 +2,19 @@ package security
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
+	"math/big"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -32,7 +37,7 @@ func (identityBinary) Description() string {
 }
 func (identityBinary) Usage() string {
 	return `identity status [--json]
-identity oidc import (--token token|--token-file path|--env name) [--issuer iss] [--audience aud] [--user-claim claim] [--group-claim claim]
+identity oidc import (--token token|--token-file path|--env name) [--issuer iss] [--audience aud] [--jwks-url url|--discover] [--user-claim claim] [--group-claim claim]
 identity ssh-ca init --out ca_key
 identity ssh-ca issue --ca ca_key --pub user.pub --principal name [--principal group] --for duration --out user-cert.pub`
 }
@@ -134,6 +139,14 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 				return fmt.Errorf("identity oidc import: --audience requires a value")
 			}
 			opts.Audience = args[i]
+		case "--jwks-url":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("identity oidc import: --jwks-url requires a value")
+			}
+			opts.JWKSURL = args[i]
+		case "--discover":
+			opts.Discover = true
 		case "--user-claim":
 			i++
 			if i >= len(args) {
@@ -153,7 +166,7 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 	if opts.Token == "" {
 		return fmt.Errorf("identity oidc import: token is required")
 	}
-	claims, user, groups, err := parseOIDCIdentity(opts)
+	claims, user, groups, err := parseOIDCIdentity(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -175,12 +188,19 @@ type oidcImportOptions struct {
 	Audience   string
 	UserClaim  string
 	GroupClaim string
+	JWKSURL    string
+	Discover   bool
 }
 
-func parseOIDCIdentity(opts oidcImportOptions) (map[string]any, string, []string, error) {
+func parseOIDCIdentity(ctx context.Context, opts oidcImportOptions) (map[string]any, string, []string, error) {
 	parts := strings.Split(opts.Token, ".")
-	if len(parts) < 2 {
+	if len(parts) != 3 {
 		return nil, "", nil, fmt.Errorf("identity oidc import: token must be a JWT")
+	}
+	if opts.JWKSURL != "" || opts.Discover {
+		if err := verifyOIDCTokenSignature(ctx, opts); err != nil {
+			return nil, "", nil, err
+		}
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -208,6 +228,145 @@ func parseOIDCIdentity(opts oidcImportOptions) (map[string]any, string, []string
 	}
 	groups := stringSliceClaim(claims, opts.GroupClaim)
 	return claims, user, groups, nil
+}
+
+type oidcJWTHeader struct {
+	Algorithm string `json:"alg"`
+	KeyID     string `json:"kid"`
+	Type      string `json:"typ"`
+}
+
+type oidcJWKSet struct {
+	Keys []oidcJWK `json:"keys"`
+}
+
+type oidcJWK struct {
+	KeyType   string `json:"kty"`
+	KeyID     string `json:"kid"`
+	Algorithm string `json:"alg"`
+	Use       string `json:"use"`
+	N         string `json:"n"`
+	E         string `json:"e"`
+}
+
+func verifyOIDCTokenSignature(ctx context.Context, opts oidcImportOptions) error {
+	parts := strings.Split(opts.Token, ".")
+	var header oidcJWTHeader
+	headerData, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return fmt.Errorf("identity oidc import: decode token header: %w", err)
+	}
+	if err := json.Unmarshal(headerData, &header); err != nil {
+		return fmt.Errorf("identity oidc import: parse token header: %w", err)
+	}
+	if header.Algorithm != "RS256" {
+		return fmt.Errorf("identity oidc import: unsupported signing algorithm %q", header.Algorithm)
+	}
+	jwks, err := fetchOIDCJWKS(ctx, opts)
+	if err != nil {
+		return err
+	}
+	publicKey, err := selectOIDCRSAKey(jwks, header.KeyID, header.Algorithm)
+	if err != nil {
+		return err
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return fmt.Errorf("identity oidc import: decode token signature: %w", err)
+	}
+	signed := parts[0] + "." + parts[1]
+	digest := sha256.Sum256([]byte(signed))
+	if err := rsa.VerifyPKCS1v15(publicKey, crypto.SHA256, digest[:], signature); err != nil {
+		return fmt.Errorf("identity oidc import: signature verification failed")
+	}
+	return nil
+}
+
+func fetchOIDCJWKS(ctx context.Context, opts oidcImportOptions) (oidcJWKSet, error) {
+	jwksURL := opts.JWKSURL
+	if opts.Discover {
+		if opts.Issuer == "" {
+			return oidcJWKSet{}, fmt.Errorf("identity oidc import: --discover requires --issuer")
+		}
+		discoveryURL := strings.TrimRight(opts.Issuer, "/") + "/.well-known/openid-configuration"
+		var discovery struct {
+			JWKSURI string `json:"jwks_uri"`
+		}
+		if err := fetchOIDCJSON(ctx, discoveryURL, &discovery); err != nil {
+			return oidcJWKSet{}, fmt.Errorf("identity oidc import: discover issuer metadata: %w", err)
+		}
+		if discovery.JWKSURI == "" {
+			return oidcJWKSet{}, fmt.Errorf("identity oidc import: issuer metadata did not include jwks_uri")
+		}
+		jwksURL = discovery.JWKSURI
+	}
+	if jwksURL == "" {
+		return oidcJWKSet{}, fmt.Errorf("identity oidc import: --jwks-url or --discover is required for signature verification")
+	}
+	var jwks oidcJWKSet
+	if err := fetchOIDCJSON(ctx, jwksURL, &jwks); err != nil {
+		return oidcJWKSet{}, fmt.Errorf("identity oidc import: fetch jwks: %w", err)
+	}
+	return jwks, nil
+}
+
+func fetchOIDCJSON(ctx context.Context, url string, target any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("http status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(body, target)
+}
+
+func selectOIDCRSAKey(jwks oidcJWKSet, keyID, algorithm string) (*rsa.PublicKey, error) {
+	for _, key := range jwks.Keys {
+		if key.KeyType != "RSA" {
+			continue
+		}
+		if keyID != "" && key.KeyID != keyID {
+			continue
+		}
+		if key.Algorithm != "" && key.Algorithm != algorithm {
+			continue
+		}
+		if key.Use != "" && key.Use != "sig" {
+			continue
+		}
+		return jwkRSAPublicKey(key)
+	}
+	return nil, fmt.Errorf("identity oidc import: no matching RSA signing key in JWKS")
+}
+
+func jwkRSAPublicKey(key oidcJWK) (*rsa.PublicKey, error) {
+	nBytes, err := base64.RawURLEncoding.DecodeString(key.N)
+	if err != nil {
+		return nil, fmt.Errorf("identity oidc import: decode jwk modulus: %w", err)
+	}
+	eBytes, err := base64.RawURLEncoding.DecodeString(key.E)
+	if err != nil {
+		return nil, fmt.Errorf("identity oidc import: decode jwk exponent: %w", err)
+	}
+	exponent := 0
+	for _, b := range eBytes {
+		exponent = exponent<<8 + int(b)
+	}
+	if exponent == 0 {
+		return nil, fmt.Errorf("identity oidc import: jwk exponent is empty")
+	}
+	return &rsa.PublicKey{N: new(big.Int).SetBytes(nBytes), E: exponent}, nil
 }
 
 func identitySSHCAInit(ctx context.Context, args []string) error {

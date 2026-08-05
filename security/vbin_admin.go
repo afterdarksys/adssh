@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"net"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -23,7 +25,8 @@ func (adminBinary) Usage() string {
 admin gateways [--json]
 admin approvals [--json]
 admin explain [--json] -- command [args...]
-admin evidence [--session id] [--change id] [--since time] [--until time] [--out path]`
+admin evidence [--session id] [--change id] [--since time] [--until time] [--out path]
+admin serve --listen addr [--api-key key|--api-key-env name]`
 }
 
 func (adminBinary) Run(ctx context.Context, args []string) error {
@@ -41,6 +44,8 @@ func (adminBinary) Run(ctx context.Context, args []string) error {
 		return adminExplain(ctx, args[2:])
 	case "evidence":
 		return adminEvidence(ctx, args[2:])
+	case "serve":
+		return adminServe(ctx, args[2:])
 	default:
 		return fmt.Errorf("admin: unknown command %q", args[1])
 	}
@@ -85,35 +90,19 @@ func adminGateways(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	gatewayMu.RLock()
-	sessions := make([]*gatewaySession, 0, len(gatewaySessions))
-	for _, session := range gatewaySessions {
-		sessions = append(sessions, session)
-	}
-	gatewayMu.RUnlock()
-	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
+	sessions := adminGatewaySnapshot()
 	if jsonOutput {
-		out := make([]map[string]any, 0, len(sessions))
-		for _, s := range sessions {
-			out = append(out, map[string]any{
-				"id":         s.ID,
-				"name":       s.Name,
-				"listen":     s.Listen,
-				"target":     s.Target,
-				"user":       s.User,
-				"started_at": s.Started,
-			})
-		}
 		encoder := json.NewEncoder(hc.Stdout)
 		encoder.SetIndent("", "  ")
-		return encoder.Encode(out)
+		return encoder.Encode(sessions)
 	}
 	fmt.Fprintln(hc.Stdout, "admin: gateways")
 	for _, s := range sessions {
+		started, _ := s["started_at"].(time.Time)
 		fmt.Fprintf(hc.Stdout, "  %s listen=%s target=%s user=%s age=%s",
-			s.ID, s.Listen, s.Target, emptyDash(s.User), formatSessionDuration(time.Since(s.Started)))
-		if s.Name != "" {
-			fmt.Fprintf(hc.Stdout, " name=%q", s.Name)
+			s["id"], s["listen"], s["target"], emptyDash(fmt.Sprint(s["user"])), formatSessionDuration(time.Since(started)))
+		if name := fmt.Sprint(s["name"]); name != "" {
+			fmt.Fprintf(hc.Stdout, " name=%q", name)
 		}
 		fmt.Fprintln(hc.Stdout)
 	}
@@ -208,6 +197,64 @@ func adminEvidence(ctx context.Context, args []string) error {
 		*target = args[i]
 	}
 	return (evidenceBinary{}).write(ctx, engineFromContext(ctx), filter, outputPath)
+}
+
+func adminServe(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
+	listen := "127.0.0.1:8787"
+	apiKey := os.Getenv("ADSSH_ADMIN_API_KEY")
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--listen":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("admin serve: --listen requires a value")
+			}
+			listen = args[i]
+		case "--api-key":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("admin serve: --api-key requires a value")
+			}
+			apiKey = args[i]
+		case "--api-key-env":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("admin serve: --api-key-env requires a value")
+			}
+			apiKey = os.Getenv(args[i])
+		default:
+			return fmt.Errorf("admin serve: unknown option %q", args[i])
+		}
+	}
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("admin serve: listen: %w", err)
+	}
+	defer listener.Close()
+
+	actual := listener.Addr().String()
+	engine := engineFromContext(ctx)
+	engine.LogEvent(fmt.Sprintf("ADMIN_HTTP_START: listen=%s auth=%t", actual, apiKey != ""))
+	fmt.Fprintln(hc.Stdout, formatAdminHTTPStart(actual, apiKey))
+	server := adminHTTPServerTimeouts(NewAdminHTTPHandler(engine, apiKey))
+	errCh := make(chan error, 1)
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+		return nil
+	case err := <-errCh:
+		return err
+	}
 }
 
 func parseJSONFlag(name string, args []string) (bool, error) {

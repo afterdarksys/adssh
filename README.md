@@ -182,13 +182,14 @@ cat services.json | from json | where 'row["cpu"] > 50' | select name,cpu | to t
 why -- kubectl delete namespace production
 ??   # after a denied command, explain what blocked it
 
-# Import externally verified OIDC claims into this session, then inspect admin state
-identity oidc import --env ADSSH_OIDC_TOKEN --issuer https://idp.example --audience adssh
+# Import signed OIDC claims into this session, then inspect admin state
+identity oidc import --env ADSSH_OIDC_TOKEN --issuer https://idp.example --audience adssh --discover
 identity status
 admin sessions --json
 admin gateways
 admin approvals
 admin explain -- gateway start --target bastion.internal:22
+ADSSH_ADMIN_API_KEY="$(openssl rand -hex 16)" admin serve --listen 127.0.0.1:8787
 
 # Create a local SSH CA and issue a short-lived user certificate
 identity ssh-ca init --out ~/.adssh/ca_user_key
@@ -230,7 +231,8 @@ lease --from aws-sm:prod/deploy-token?region=us-east-1 --as TOKEN -- deploy --to
   in `~/.adssh/authorized_keys`; short-lived user certs can be issued with
   `identity ssh-ca issue`.
 - **Local admin API** — `admin sessions/gateways/approvals/explain/evidence`
-  exposes the current operational state through governed VBINs.
+  exposes the current operational state through governed VBINs, and
+  `admin serve` exposes the same surfaces over a token-capable local HTTP API.
 
 Example policy (allow everything except `rm -rf`):
 ```rego
@@ -274,6 +276,7 @@ Starter policy bundles live in `policy/bundles/`:
 | `regulated-ops.rego` | Deny-by-default ops with break-glass for production |
 | `gateway-only.rego` | Controlled SSH/TCP gateway targets |
 | `ai-agent.rego` | Conservative policy for MCP/AI agents |
+| `admin-api.rego` | Role-separated admin API operations |
 
 ## SSH server
 
@@ -329,6 +332,7 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |
 | `ADSSH_RECORD_DIR` | `~/.adssh/recordings` | JSONL session recording directory |
 | `ADSSH_GATEWAY_LOG` | `$ADSSH_RECORD_DIR/gateway_connections.jsonl` | Gateway connection evidence log |
+| `ADSSH_ADMIN_API_KEY` | — | Bearer or `X-ADSSH-API-Key` token for `admin serve` |
 | `ADSSH_AGENT_ID` | process-specific MCP ID | MCP agent identity exposed as `input.agent.id` |
 | `ADSSH_AGENT_REQUIRE_DRY_RUN` | off | Require `dry_run=true` for destructive MCP shell plans |
 | `ADSSH_HISTORY` | `~/.adssh/history` | Readline history |

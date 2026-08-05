@@ -219,8 +219,8 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `fc` | `security/vbin_history.go` | History listing/editing command |
 | `audit` | `security/vbin_audit.go` | Audit-chain inspection and export |
 | `mirror` | `security/mirror.go` | Session metadata, mirroring, console access, and audited termination |
-| `admin` | `security/vbin_admin.go` | Governed local admin API for sessions, gateways, approvals, explanations, and evidence |
-| `identity` | `security/vbin_identity.go` | OIDC claim import and short-lived SSH certificate issuance |
+| `admin` | `security/vbin_admin.go`, `security/admin_http.go` | Governed local and HTTP admin API for sessions, gateways, approvals, explanations, and evidence |
+| `identity` | `security/vbin_identity.go` | Signed OIDC claim import and short-lived SSH certificate issuance |
 | `cmdgen` | `security/cmdgen.go` | Cloud and container command generator |
 | `grant` | `security/grants.go` | Temporary role escalation |
 | `elevate` | `security/vbin_elevate.go` | Time-boxed break-glass elevation with reason and audit trail |
@@ -247,6 +247,22 @@ Each child argv is passed through the same Rego, entitlement, change-management,
 four-eyes, restricted-mode, and audit gate used by an ordinary shell command.
 The runtime does not construct `/bin/sh -c` strings. Output capture is bounded;
 `par` renders buffers in input order even when work completes out of order.
+
+### Identity and admin API contract
+
+`identity oidc import` can validate RS256 JWT signatures against an explicit
+`--jwks-url` or via `--discover`, which reads the issuer's OpenID Provider
+metadata and then fetches `jwks_uri`. Issuer, audience, expiry, user claim, and
+group claim checks run after signature verification when verification is
+configured. Without `--jwks-url` or `--discover`, import remains available for
+externally verified tokens and tests.
+
+`admin serve` starts a local HTTP API for the same operational surfaces exposed
+by the `admin` VBIN: sessions, gateways, approvals, explanations, and evidence.
+The command itself is governed by the normal shell policy gate. When
+`ADSSH_ADMIN_API_KEY`, `--api-key`, or `--api-key-env` supplies a token, HTTP
+requests must present it as `Authorization: Bearer <token>` or
+`X-ADSSH-API-Key`.
 
 ### Structured pipeline contract
 
