@@ -19,9 +19,13 @@
 - Added `.adssh` line-script execution for deterministic non-interactive shell demos and runbooks, including `-`-prefixed expected-failure lines.
 - Added release packaging automation for cross-platform tarballs, checksums, optional GPG checksum signatures, optional `.deb`/`.rpm` packages, and a Homebrew formula template.
 - Added a GitHub Actions release workflow for version-tagged artifact builds and GitHub Release publishing.
+- Added `identity` for OIDC claim import, session group mapping, local SSH CA generation, and short-lived SSH user certificate issuance.
+- Added `admin` for governed local API access to sessions, gateways, pending approvals, policy explanations, and evidence export.
+- Added release provenance files: `provenance.json` and `slsa-provenance.intoto.json`.
 
 ### Changed
 
 - `why` and `??` share the same governance-stage explanation formatter.
 - `mirror list` now reports user, principals, age, idle time, active command, recording path, active elevation, and termination state.
 - Local interactive sessions are now registered with the supervision/recording layer so the commercial demo exercises the same governance evidence path without requiring `adssh --serve`.
+- `why` and `??` now include prescriptive next steps for policy, RBAC, change-management, four-eyes, and restricted-mode blocks.

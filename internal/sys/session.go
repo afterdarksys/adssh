@@ -117,6 +117,16 @@ func (s *Session) SetCurrentCommand(command string) {
 	s.touchLocked()
 }
 
+func (s *Session) SetIdentity(user string, principals []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if user != "" {
+		s.User = user
+	}
+	s.Principals = append([]string(nil), principals...)
+	s.touchLocked()
+}
+
 func (s *Session) Touch() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

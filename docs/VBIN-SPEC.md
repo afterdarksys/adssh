@@ -219,6 +219,8 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `fc` | `security/vbin_history.go` | History listing/editing command |
 | `audit` | `security/vbin_audit.go` | Audit-chain inspection and export |
 | `mirror` | `security/mirror.go` | Session metadata, mirroring, console access, and audited termination |
+| `admin` | `security/vbin_admin.go` | Governed local admin API for sessions, gateways, approvals, explanations, and evidence |
+| `identity` | `security/vbin_identity.go` | OIDC claim import and short-lived SSH certificate issuance |
 | `cmdgen` | `security/cmdgen.go` | Cloud and container command generator |
 | `grant` | `security/grants.go` | Temporary role escalation |
 | `elevate` | `security/vbin_elevate.go` | Time-boxed break-glass elevation with reason and audit trail |

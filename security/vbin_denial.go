@@ -56,6 +56,9 @@ func printCommandExplanation(out io.Writer, explanation CommandExplanation) {
 		}
 		fmt.Fprintln(out)
 	}
+	for _, step := range explanation.NextSteps {
+		fmt.Fprintf(out, "  next                 %s\n", step)
+	}
 }
 
 func init() { Register(denialBinary{}) }

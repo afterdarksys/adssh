@@ -54,7 +54,8 @@ The packaging script emits cross-platform tarballs, `SHA256SUMS`, optional GPG
 checksum signatures when `GPG_SIGN=1`, and optional `.deb`/`.rpm` packages when
 the host has `dpkg-deb` or `rpmbuild`. Release tarballs include the binaries,
 manpage, shell completions, policy bundles, docs, and the Homebrew formula
-template under `packaging/homebrew/`.
+template under `packaging/homebrew/`. Each run also writes `provenance.json`
+and `slsa-provenance.intoto.json` with artifact digests and build metadata.
 
 ## 5-minute tour
 
@@ -147,6 +148,8 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `yq` | YAML processor |
 | `http` | HTTP GET client |
 | `mirror` | Live session metadata, viewer, console, and audited termination |
+| `admin` | Local admin API for sessions, gateways, approvals, evidence, and explanations |
+| `identity` | OIDC identity import and short-lived SSH certificate issuance |
 | `cmdgen` | Cloud CLI command generator |
 | `package` | Cross-platform package manager |
 | `proc` | `/proc` filesystem reader/writer (Linux) |
@@ -178,6 +181,18 @@ cat services.json | from json | where 'row["cpu"] > 50' | select name,cpu | to t
 # Explain governance without executing or opening an approval request
 why -- kubectl delete namespace production
 ??   # after a denied command, explain what blocked it
+
+# Import externally verified OIDC claims into this session, then inspect admin state
+identity oidc import --env ADSSH_OIDC_TOKEN --issuer https://idp.example --audience adssh
+identity status
+admin sessions --json
+admin gateways
+admin approvals
+admin explain -- gateway start --target bastion.internal:22
+
+# Create a local SSH CA and issue a short-lived user certificate
+identity ssh-ca init --out ~/.adssh/ca_user_key
+identity ssh-ca issue --ca ~/.adssh/ca_user_key --pub ~/.ssh/id_ed25519.pub --principal alice --principal ops --for 15m --out ~/.ssh/id_ed25519-cert.pub
 
 # Break-glass for one session with a visible expiry and audit entry
 elevate request prod-admin --for 10m --reason "incident INC-1042"
@@ -211,7 +226,11 @@ lease --from aws-sm:prod/deploy-token?region=us-east-1 --as TOKEN -- deploy --to
 - **RBAC entitlements** — YAML-based per-user/group command ACL.
 - **Audit log** — every command logged to `~/.adssh/audit.log` (configurable).
 - **Restricted mode** — `adssh -r` disables path traversal, cd, export.
-- **SSH pubkey-only auth** — `~/.adssh/authorized_keys`.
+- **SSH pubkey and certificate auth** — direct keys and `cert-authority` entries
+  in `~/.adssh/authorized_keys`; short-lived user certs can be issued with
+  `identity ssh-ca issue`.
+- **Local admin API** — `admin sessions/gateways/approvals/explain/evidence`
+  exposes the current operational state through governed VBINs.
 
 Example policy (allow everything except `rm -rf`):
 ```rego

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${VERSION:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)}"
+COMMIT_SHA="${COMMIT_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
 DIST="${DIST:-$ROOT/dist}"
 PLATFORMS="${PLATFORMS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64}"
 if [[ -x /usr/local/bin/go ]]; then
@@ -131,5 +132,57 @@ fi
     gpg --batch --yes --armor --detach-sign SHA256SUMS
   fi
 )
+
+python3 - "$DIST" "$VERSION" "$COMMIT_SHA" "$PLATFORMS" <<'PY'
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+dist, version, commit, platforms = sys.argv[1:5]
+artifacts = []
+for name in sorted(os.listdir(dist)):
+    path = os.path.join(dist, name)
+    if not os.path.isfile(path):
+        continue
+    if not (name.endswith(".tar.gz") or name.endswith(".deb") or name.endswith(".rpm")):
+        continue
+    h = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            size += len(chunk)
+            h.update(chunk)
+    artifacts.append({"name": name, "size_bytes": size, "sha256": h.hexdigest()})
+
+provenance = {
+    "version": version,
+    "commit_sha": commit,
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "platforms": platforms.split(),
+    "artifacts": artifacts,
+    "checksum_file": "SHA256SUMS",
+}
+with open(os.path.join(dist, "provenance.json"), "w", encoding="utf-8") as f:
+    json.dump(provenance, f, indent=2)
+    f.write("\n")
+
+attestation = {
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [{"name": a["name"], "digest": {"sha256": a["sha256"]}} for a in artifacts],
+    "predicateType": "https://slsa.dev/provenance/v1",
+    "predicate": {
+        "buildDefinition": {
+            "buildType": "https://github.com/afterdarksys/adssh/actions/workflows/release.yml",
+            "externalParameters": {"version": version, "platforms": platforms.split()},
+        },
+        "runDetails": {"metadata": {"invocationId": commit}},
+    },
+}
+with open(os.path.join(dist, "slsa-provenance.intoto.json"), "w", encoding="utf-8") as f:
+    json.dump(attestation, f, indent=2)
+    f.write("\n")
+PY
 
 echo "release artifacts written to $DIST"

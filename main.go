@@ -382,6 +382,8 @@ VIRTUAL BINARIES (type 'vbins' for full list)
   yq          YAML processor             cat k8s.yaml | yq '.spec'
   http        HTTP client                http https://api.example.com/v1/status
   mirror      Session supervisor         mirror list
+  admin       Local admin API            admin sessions --json
+  identity    OIDC / SSH CA identity     identity status
   gateway     Policy TCP gateway         gateway start --target host:22
   lease       Command secret lease       lease --from vault:path?field=token --as TOKEN -- cmd
   elevate     Break-glass elevation      elevate request prod-admin --for 10m --reason INC

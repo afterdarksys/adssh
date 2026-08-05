@@ -19,6 +19,7 @@ type CommandExplanation struct {
 	Command   string             `json:"command"`
 	Args      []string           `json:"args,omitempty"`
 	Stages    []ExplanationStage `json:"stages"`
+	NextSteps []string           `json:"next_steps,omitempty"`
 }
 
 // ExplainCommand evaluates every governance stage without executing the
@@ -99,5 +100,51 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 	} else {
 		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "restricted_mode", Status: "allowed"})
 	}
+	explanation.NextSteps = suggestNextSteps(explanation)
 	return explanation, nil
+}
+
+func suggestNextSteps(explanation CommandExplanation) []string {
+	steps := make([]string, 0, 4)
+	for _, stage := range explanation.Stages {
+		switch stage.Name {
+		case "policy":
+			if stage.Status == "denied" {
+				steps = append(steps, `request the required role with: elevate request <role> --for 10m --reason "<ticket/reason>"`)
+			}
+		case "entitlements":
+			if stage.Status == "denied" {
+				steps = append(steps, "ask an administrator to add this command to your RBAC entitlement")
+			}
+		case "change_management":
+			if stage.Status == "denied" {
+				steps = append(steps, "attach an approved change ticket with: cm set <ticket-id>")
+			}
+		case "four_eyes":
+			if stage.Status == "approval_required" {
+				steps = append(steps, "open or check approvals with: 4eyes pending")
+			}
+		case "restricted_mode":
+			if stage.Status == "denied" {
+				steps = append(steps, "retry with an allowed command name or start a non-restricted session")
+			}
+		}
+	}
+	return compactStrings(steps)
+}
+
+func compactStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }

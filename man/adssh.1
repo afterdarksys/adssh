@@ -70,7 +70,6 @@ Evaluate
 as a single expression or command and exit.
 The string is parsed with the same mode-detection heuristic used in the
 REPL (Starlark first, then POSIX shell).
-.TP
 .BI \-\-serve " :PORT"
 Start the built-in SSH server listening on
 .I :PORT
@@ -110,6 +109,16 @@ and
 .B .adsshrc
 file, then exit.
 Existing files are not overwritten.
+.\" ─────────────────────────────────────────────────────────────────────────
+.SH IDENTITY AND ADMIN COMMANDS
+.B identity
+imports externally verified OIDC claims into the current session, maps group
+claims into policy principals, and can create a local SSH CA or issue
+short-lived SSH user certificates.
+.PP
+.B admin
+exposes a governed local API for sessions, gateways, pending approvals,
+explanations, and evidence export.
 .\" ─────────────────────────────────────────────────────────────────────────
 .SH ENVIRONMENT
 .TP

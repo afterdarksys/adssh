@@ -44,6 +44,7 @@ jobs:
       - name: Package
         env:
           VERSION: ${{ github.event.inputs.version || github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
           GO_BIN: go
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |

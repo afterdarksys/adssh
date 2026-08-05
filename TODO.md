@@ -19,23 +19,30 @@ control, with a programmable and AI-native operations shell.
 - Reproducible local commercial demo script for the governed-access story.
 - Release packaging script and GitHub release workflow for tarballs, checksums,
   optional signed checksums, optional `.deb`/`.rpm`, and Homebrew formula metadata.
+- OIDC claim import, session group mapping, local SSH CA generation, and
+  short-lived SSH user certificate issuance.
+- Governed local `admin` API for sessions, gateways, approvals, explanations,
+  and evidence export.
+- Release provenance and SLSA-style attestation metadata.
+- Prescriptive `why` / `??` next-step guidance for blocked commands.
 
 ## Next Up
 
-1. **SSO / SSH CA**
-   - OIDC login.
-   - Group mapping.
-   - Short-lived SSH certificate issuance.
+1. **Identity Hardening**
+   - Full OIDC authorization-code/device login flow.
+   - JWKS signature verification and issuer metadata discovery.
    - Cert principal policy examples.
 
-2. **Admin / API Surface**
-   - HTTP or MCP tools for sessions, recordings, gateways, elevations, leases,
-     approvals, evidence, and policy explainability.
+2. **Admin API Hardening**
+   - HTTP API daemon mode for sessions, recordings, gateways, elevations,
+     leases, approvals, evidence, and policy explainability.
+   - MCP parity for the new `admin` and `identity` operations.
+   - Role-separated admin policy examples.
 
 3. **Release Hardening**
    - Publish a dedicated Homebrew tap repository.
-   - Add release provenance/SLSA attestation.
    - Document GPG signing key setup and release cut procedure.
+   - Add signed SLSA provenance through GitHub OIDC/keyless signing.
 
 4. **Lease Hardening**
    - Lease IDs and explicit lease audit events.
@@ -44,8 +51,9 @@ control, with a programmable and AI-native operations shell.
    - Policy examples for lease TTL/source/target restrictions.
 
 5. **Approval UX**
-   - Better user flow when gateway, lease, or elevation is blocked by CM/four-eyes.
-   - Make `??` more prescriptive: required role, required approver, active ticket state.
+   - Show active pending token and required approver directly in denial output.
+   - Add optional webhook-driven approval links for gateway, lease, and elevation blocks.
+   - Make `??` infer required role from structured policy metadata where available.
 
 6. **Agent Governance**
    - Per-agent identity.
