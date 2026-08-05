@@ -270,7 +270,10 @@ change, or time filters. Returned entries retain their original chain hashes;
 the bundle also contains its chain head and a SHA-256 digest. If a matching
 session recording exists under `ADSSH_RECORD_DIR` (or `~/.adssh/recordings`),
 the bundle includes a recording manifest with path, size, event count, and
-SHA-256 digest. Output files are published atomically with mode `0600`.
+SHA-256 digest. If a gateway connection log exists at `ADSSH_GATEWAY_LOG` (or
+the default under the recording directory), the bundle includes its path, size,
+event count, and SHA-256 digest. Output files are published atomically with mode
+`0600`.
 
 `lease` accepts `env:NAME`, a private regular `file:path`, or read-only
 vault-backed sources: `vault:path?field=KEY`, `aws-sm:name?region=REGION`,

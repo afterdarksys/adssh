@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -43,6 +44,7 @@ func TestGatewayStartProxiesTCPAndAuditsStop(t *testing.T) {
 	target, closeTarget := startGatewayEchoServer(t)
 	defer closeTarget()
 	dir := t.TempDir()
+	t.Setenv("ADSSH_GATEWAY_LOG", filepath.Join(dir, "gateway_connections.jsonl"))
 	chainPath := filepath.Join(dir, "audit.chain")
 	eng, err := NewEngine(EngineConfig{
 		ChainPath:    chainPath,
@@ -97,6 +99,17 @@ func TestGatewayStartProxiesTCPAndAuditsStop(t *testing.T) {
 	}
 	if !strings.Contains(string(chain), "GATEWAY_START") || !strings.Contains(string(chain), "GATEWAY_STOP") {
 		t.Fatalf("gateway events were not audited: %s", chain)
+	}
+	gatewayLog, err := os.ReadFile(filepath.Join(dir, "gateway_connections.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record GatewayConnectionRecord
+	if err := json.Unmarshal(bytes.TrimSpace(gatewayLog), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.GatewayID != id || record.Target != target || record.BytesToTarget == 0 || record.BytesToClient == 0 || record.CloseReason == "" {
+		t.Fatalf("gateway connection record = %#v", record)
 	}
 }
 

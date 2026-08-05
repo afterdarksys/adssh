@@ -260,6 +260,7 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_ENTITLEMENTS` | — | RBAC entitlements YAML |
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |
 | `ADSSH_RECORD_DIR` | `~/.adssh/recordings` | JSONL session recording directory |
+| `ADSSH_GATEWAY_LOG` | `$ADSSH_RECORD_DIR/gateway_connections.jsonl` | Gateway connection evidence log |
 | `ADSSH_HISTORY` | `~/.adssh/history` | Readline history |
 | `ADSSH_HOST_KEY` | `~/.adssh/host_key` | SSH host key |
 | `ADSSH_AUTHORIZED_KEYS` | `~/.adssh/authorized_keys` | SSH pubkeys |

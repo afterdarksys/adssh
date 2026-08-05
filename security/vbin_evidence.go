@@ -32,6 +32,7 @@ type EvidenceBundle struct {
 	Filter       EvidenceFilter `json:"filter"`
 	Entries      []ChainEntry   `json:"entries"`
 	Recordings   []RecordingRef `json:"recordings,omitempty"`
+	GatewayLog   *GatewayLogRef `json:"gateway_log,omitempty"`
 }
 
 type RecordingRef struct {
@@ -116,6 +117,12 @@ func (e *Engine) BuildEvidence(filter EvidenceFilter) (EvidenceBundle, error) {
 	if err != nil {
 		return EvidenceBundle{}, err
 	}
+	var gatewayLog *GatewayLogRef
+	if ref, ok, err := gatewayLogRef(); err != nil {
+		return EvidenceBundle{}, err
+	} else if ok {
+		gatewayLog = &ref
+	}
 	digest := sha256.Sum256(canonical)
 	return EvidenceBundle{
 		Version:      1,
@@ -127,6 +134,7 @@ func (e *Engine) BuildEvidence(filter EvidenceFilter) (EvidenceBundle, error) {
 		Filter:       filter,
 		Entries:      entries,
 		Recordings:   recordings,
+		GatewayLog:   gatewayLog,
 	}, nil
 }
 

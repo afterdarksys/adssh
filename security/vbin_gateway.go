@@ -200,14 +200,20 @@ func serveGateway(ctx context.Context, session *gatewaySession) {
 			}
 			continue
 		}
-		go proxyGatewayConnection(ctx, conn, session.Target)
+		go proxyGatewayConnection(ctx, conn, session)
 	}
 }
 
-func proxyGatewayConnection(ctx context.Context, client net.Conn, target string) {
+func proxyGatewayConnection(ctx context.Context, client net.Conn, session *gatewaySession) {
 	defer client.Close()
-	targetConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	record := newGatewayConnectionRecord(session)
+	openedAt := time.Now().UTC()
+	targetConn, err := net.DialTimeout("tcp", session.Target, 10*time.Second)
 	if err != nil {
+		record.ClosedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		record.DurationMS = time.Since(openedAt).Milliseconds()
+		record.CloseReason = "dial_failed"
+		appendGatewayConnectionRecord(record)
 		return
 	}
 	defer targetConn.Close()
@@ -216,17 +222,28 @@ func proxyGatewayConnection(ctx context.Context, client net.Conn, target string)
 		_ = client.Close()
 		_ = targetConn.Close()
 	}()
+	var bytesToTarget int64
+	var bytesToClient int64
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(targetConn, client)
+		_, _ = io.Copy(countingWriter{writer: targetConn, count: &bytesToTarget}, client)
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(client, targetConn)
+		_, _ = io.Copy(countingWriter{writer: client, count: &bytesToClient}, targetConn)
 	}()
 	wg.Wait()
+	record.ClosedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	record.DurationMS = time.Since(openedAt).Milliseconds()
+	record.BytesToTarget = bytesToTarget
+	record.BytesToClient = bytesToClient
+	record.CloseReason = "closed"
+	if ctx.Err() != nil {
+		record.CloseReason = "gateway_stopped"
+	}
+	appendGatewayConnectionRecord(record)
 }
 
 func nextGatewayID() string {

@@ -13,6 +13,7 @@
 - Added native SSH `direct-tcpip` gateway authorization for `adssh --serve`, enabling policy-gated SSH jump traffic.
 - Added structured gateway Rego input under `input.gateway`.
 - Added recording manifests to evidence bundles, including recording path, size, event count, and SHA-256 digest.
+- Added gateway connection evidence logs with target, duration, byte counts, close reason, and evidence-bundle digest manifests.
 - Added starter policy bundles for home, regulated ops, gateway-only, and AI-agent postures.
 
 ### Changed

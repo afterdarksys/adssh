@@ -99,3 +99,40 @@ func TestEvidenceIncludesRecordingDigestForMatchingSession(t *testing.T) {
 		t.Fatalf("recording ref = %#v", ref)
 	}
 }
+
+func TestEvidenceIncludesGatewayLogDigest(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("ADSSH_GATEWAY_LOG", filepath.Join(dir, "gateway_connections.jsonl"))
+	ledger := filepath.Join(dir, "chain")
+	eng, err := NewEngine(EngineConfig{
+		ChainPath:    ledger,
+		ChainKeyPath: filepath.Join(dir, "key"),
+		SessionID:    "gateway-evidence",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendGatewayConnectionRecord(GatewayConnectionRecord{
+		ID:            "gwc-test",
+		GatewayID:     "gw-test",
+		Target:        "127.0.0.1:22",
+		OpenedAt:      "2026-01-01T00:00:00Z",
+		ClosedAt:      "2026-01-01T00:00:01Z",
+		DurationMS:    1000,
+		BytesToTarget: 4,
+		BytesToClient: 8,
+		CloseReason:   "closed",
+	})
+	eng.AppendChain(ChainEntry{SessionID: "gateway-evidence", Type: "event", Command: "GATEWAY_START"})
+
+	bundle, err := eng.BuildEvidence(EvidenceFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.GatewayLog == nil {
+		t.Fatal("gateway log manifest missing")
+	}
+	if bundle.GatewayLog.EventCount != 1 || bundle.GatewayLog.SizeBytes == 0 || bundle.GatewayLog.DigestSHA256 == "" {
+		t.Fatalf("gateway log ref = %#v", bundle.GatewayLog)
+	}
+}
