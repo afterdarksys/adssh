@@ -24,6 +24,12 @@ import (
 //	ADSSH_POLICY=/path         Path to Rego policy file     (default: ~/.adssh/policy.rego)
 //	ADSSH_AUDIT_URL=url        Webhook URL for remote SIEM logging
 //	ADSSH_AUDIT_TOKEN=token    Bearer token for the webhook URL
+//	ADSSH_AGENT_SERVE=addr     Start instrumentation-agent HTTP listener on addr
+//	                           (e.g. 127.0.0.1:7777 — localhost or behind TLS)
+//	ADSSH_AGENT_TOKEN=token    Bearer token the instrumentation agent requires
+//	                           (no token => agent refuses to start; fail closed)
+//	ADSSH_AGENT_TASKS=/path    Instrumentation task allowlist YAML
+//	                           (default: ~/.adssh/instrument-tasks.yaml)
 type AppConfig struct {
 	Restricted         bool
 	ServeAddr          string
@@ -39,6 +45,9 @@ type AppConfig struct {
 	RCPath             string
 	AuditURL           string
 	AuditToken         string
+	AgentServeAddr     string
+	AgentToken         string
+	AgentTasksPath     string
 }
 
 // LoadFromEnv populates an AppConfig from ADSSH_* environment variables,
@@ -62,6 +71,9 @@ func LoadFromEnv() AppConfig {
 		RCPath:             envOr("ADSSH_RC", filepath.Join(home, ".adsshrc")),
 		AuditURL:           os.Getenv("ADSSH_AUDIT_URL"),
 		AuditToken:         os.Getenv("ADSSH_AUDIT_TOKEN"),
+		AgentServeAddr:     os.Getenv("ADSSH_AGENT_SERVE"),
+		AgentToken:         os.Getenv("ADSSH_AGENT_TOKEN"),
+		AgentTasksPath:     envOr("ADSSH_AGENT_TASKS", filepath.Join(cfgDir, "instrument-tasks.yaml")),
 	}
 	return cfg
 }

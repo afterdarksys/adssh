@@ -16,6 +16,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/afterdarksys/adssh/engine"
+	"github.com/afterdarksys/adssh/internal/agent"
 	"github.com/afterdarksys/adssh/internal/config"
 	"github.com/afterdarksys/adssh/internal/repl"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
@@ -66,6 +67,9 @@ func main() {
 			cfg.IsLoginShell = true
 		case (arg == "--serve") && i+1 < len(os.Args):
 			cfg.ServeAddr = os.Args[i+1]
+			i++
+		case (arg == "--serve-agent") && i+1 < len(os.Args):
+			cfg.AgentServeAddr = os.Args[i+1]
 			i++
 		case (arg == "--entitlements") && i+1 < len(os.Args):
 			cfg.EntitlementsPath = os.Args[i+1]
@@ -254,6 +258,18 @@ func main() {
 		}
 	}
 
+	// Instrumentation agent: a hardened HTTP listener that runs only NAMED,
+	// pre-approved, read-only tasks from the allowlist, each through the same
+	// policy + audit chokepoint. It fails closed — no token configured, a
+	// malformed tasks file, or a bind failure aborts startup. Bind should be
+	// localhost or behind TLS (see docs/INSTRUMENT-AGENT.md).
+	if cfg.AgentServeAddr != "" {
+		if _, err := agent.Start(cfg.AgentServeAddr, cfg.AgentToken, cfg.AgentTasksPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start instrumentation agent: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	if cfg.ScriptPath != "" {
 		// Shebang / script file support: read content and evaluate
 		src, err := os.ReadFile(cfg.ScriptPath)
@@ -374,6 +390,9 @@ OPTIONS
   -r, --restricted            Restricted mode (no path traversal, no cd/export)
   -l, --login                 Login shell (load ~/.adsshprofile)
       --serve <addr>          Start built-in SSH server (e.g. --serve :2222)
+      --serve-agent <addr>    Start instrumentation-agent HTTP listener
+                              (e.g. --serve-agent 127.0.0.1:7777; needs
+                              ADSSH_AGENT_TOKEN, runs only allowlisted tasks)
       --policy <path>         Load OPA/Rego policy file
       --entitlements <path>   Load RBAC entitlements YAML
 
@@ -407,6 +426,9 @@ ENVIRONMENT VARIABLES
   ADSSH_POLICY            Path to Rego policy file
   ADSSH_ENTITLEMENTS      Path to entitlements YAML
   ADSSH_AUDIT_LOG         Audit log path (default: ~/.adssh/audit.log)
+  ADSSH_AGENT_SERVE       Instrumentation-agent HTTP address (127.0.0.1:7777)
+  ADSSH_AGENT_TOKEN       Bearer token for the instrumentation agent (required)
+  ADSSH_AGENT_TASKS       Task allowlist (default: ~/.adssh/instrument-tasks.yaml)
   ADSSH_RECORD_DIR        Session recording directory (default: ~/.adssh/recordings)
   ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
   ADSSH_RC                RC script (default: ~/.adsshrc)
@@ -562,6 +584,42 @@ func runDoctor(cfg config.AppConfig) int {
 	return 0
 }
 
+// defaultInstrumentTasks is the starter instrumentation-agent allowlist written
+// by --init. It ships FAIL-CLOSED: the active allowlist is empty (every task is
+// 404) until an operator deliberately adds entries. The commented examples show
+// the grammar. Only add NAMED, read-only virtual binaries here — the network
+// names only the task; the vbin + args below are fixed and never client-supplied.
+const defaultInstrumentTasks = `# adssh instrumentation-agent task allowlist
+#
+# The control-plane API names ONLY a task; the virtual binary and its arguments
+# come from this file and are NEVER taken from the request. Allowlist only
+# genuinely read-only tasks. This is not a remote shell.
+#
+# Grammar:
+#   tasks:
+#     <task-name>:
+#       vbin: <virtual-binary-name>   # must be a registered adssh vbin
+#       args: [<fixed>, <args>]       # fixed args passed to the vbin
+#       description: <text>           # shown by GET /v1/tasks
+#       risk: <label>                 # advisory; threaded into the policy AgentClaim
+#
+# Ships empty (deny-everything) on purpose. Uncomment / add entries you trust.
+# Example (Linux; 'proc get' is read-only — never allowlist 'proc set'):
+#
+#   loadavg:
+#     vbin: proc
+#     args: ["get", "/proc/loadavg"]
+#     description: "System load average (1/5/15 min)"
+#     risk: low
+#   meminfo:
+#     vbin: proc
+#     args: ["get", "/proc/meminfo"]
+#     description: "Kernel memory statistics"
+#     risk: low
+
+tasks: {}
+`
+
 func runInit() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -585,6 +643,8 @@ func runInit() error {
 default allow = true
 default deny_reason = ""
 `,
+
+		"instrument-tasks.yaml": defaultInstrumentTasks,
 	}
 
 	rcPath := filepath.Join(home, ".adsshrc")
