@@ -53,6 +53,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -80,11 +81,34 @@ const (
 type Server struct {
 	tokenDigest [sha256.Size]byte
 	agentID     string
+	started     time.Time
+	taskTimeout time.Duration
+
+	// sem bounds concurrent instrument tasks so a chatty caller cannot exhaust
+	// the host; a full channel yields 429 rather than piling work up.
+	sem chan struct{}
 
 	mu    sync.RWMutex
 	tasks *TaskSet
 
 	httpSrv *http.Server
+}
+
+// Version is the agent build version, surfaced by /v1/info so the control plane
+// can inventory each host. Overridable at link time.
+var Version = "dev"
+
+// resolveAgentID gives each host a stable, distinct identity so the control
+// plane can tell the fleet apart: ADSSH_AGENT_ID if set, else the hostname,
+// else a safe fallback.
+func resolveAgentID() string {
+	if id := strings.TrimSpace(os.Getenv("ADSSH_AGENT_ID")); id != "" {
+		return id
+	}
+	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
+		return h
+	}
+	return "adssh-instrument-agent"
 }
 
 // New constructs a Server. It FAILS CLOSED: an empty token is refused so the
@@ -99,7 +123,10 @@ func New(token string, tasks *TaskSet) (*Server, error) {
 	}
 	return &Server{
 		tokenDigest: sha256.Sum256([]byte(token)),
-		agentID:     "adssh-instrument-agent",
+		agentID:     resolveAgentID(),
+		started:     time.Now(),
+		taskTimeout: 30 * time.Second,
+		sem:         make(chan struct{}, 4),
 		tasks:       tasks,
 	}, nil
 }
@@ -115,6 +142,7 @@ func (s *Server) currentTasks() *TaskSet {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/info", s.handleInfo)
 	mux.HandleFunc("/v1/tasks", s.handleTasks)
 	mux.HandleFunc("/v1/instrument", s.handleInstrument)
 	return mux
@@ -197,6 +225,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleInfo reports host identity, version and liveness so the control plane
+// can inventory the fleet. It requires auth (it discloses task count + version).
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.authenticate(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"agent_id":       s.agentID,
+		"version":        Version,
+		"uptime_seconds": int(time.Since(s.started).Seconds()),
+		"tasks_loaded":   s.currentTasks().Len(),
+	})
 }
 
 // handleTasks lists the allowlisted task names + descriptions. It requires auth.
@@ -294,10 +340,25 @@ func (s *Server) handleInstrument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound concurrency: a full pool means the host is already busy; shed load
+	// with 429 rather than piling on.
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	default:
+		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q result=busy", name))
+		writeError(w, http.StatusTooManyRequests, "agent busy; try again")
+		return
+	}
+
 	security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q vbin=%q dry_run=%v result=allowed", name, task.VBin, dryRun))
 
+	// Per-task timeout: a hung virtual binary must not wedge a worker slot.
+	ctx, cancel := context.WithTimeout(r.Context(), s.taskTimeout)
+	defer cancel()
+
 	fullArgs := append([]string{task.VBin}, task.Args...)
-	output, truncated, exit, runErr := runVBinCaptured(r.Context(), vb, fullArgs)
+	output, truncated, exit, runErr := runVBinCaptured(ctx, vb, fullArgs)
 	if runErr != nil {
 		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q vbin=%q exit=%d result=ran-with-error", name, task.VBin, exit))
 	}

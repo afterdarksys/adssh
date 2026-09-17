@@ -288,3 +288,74 @@ func TestLoadTasksMissingFileIsEmpty(t *testing.T) {
 		t.Fatalf("missing file yielded %d tasks, want 0", ts.Len())
 	}
 }
+
+// --- readiness additions: identity, /v1/info ---
+
+func TestAgentIDFromEnv(t *testing.T) {
+	t.Setenv("ADSSH_AGENT_ID", "host-42")
+	s, err := New("tok", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.agentID != "host-42" {
+		t.Fatalf("agentID = %q; want host-42", s.agentID)
+	}
+}
+
+func TestAgentIDDefaultsToHostnameNotConstant(t *testing.T) {
+	t.Setenv("ADSSH_AGENT_ID", "")
+	s, err := New("tok", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.agentID == "" {
+		t.Fatal("agentID must not be empty")
+	}
+	// It should be the hostname, not the old hardcoded placeholder (unless the
+	// machine is literally named that, which no fleet host is).
+	if h, err := os.Hostname(); err == nil && h != "" && s.agentID != h {
+		t.Fatalf("agentID = %q; want hostname %q", s.agentID, h)
+	}
+}
+
+func TestInfoRequiresAuthAndReportsIdentity(t *testing.T) {
+	t.Setenv("ADSSH_AGENT_ID", "host-info")
+	s, err := New("sekret", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	// no auth -> 401
+	resp, err := http.Get(srv.URL + "/v1/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no-auth /v1/info = %d; want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// with auth -> 200 and our identity
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/info", nil)
+	req.Header.Set("Authorization", "Bearer sekret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("auth /v1/info = %d; want 200", resp.StatusCode)
+	}
+	var info map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	if info["agent_id"] != "host-info" {
+		t.Fatalf("info.agent_id = %v; want host-info", info["agent_id"])
+	}
+	if _, ok := info["uptime_seconds"]; !ok {
+		t.Fatal("info missing uptime_seconds")
+	}
+}

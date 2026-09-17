@@ -88,6 +88,8 @@ func SetupExtensions(opts ExtensionOptions) {
 
 	// Security
 	SetupSecurityAPI(env, restricted)
+	// Filesystem (governed writes; refused in restricted sessions)
+	SetupFilesystemAPI(env, restricted)
 	// Crypto
 	cryptoDict := starlark.NewDict(2)
 	_ = cryptoDict.SetKey(starlark.String("md5"), starlark.NewBuiltin("md5", builtinMD5))
