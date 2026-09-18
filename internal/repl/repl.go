@@ -24,6 +24,7 @@ import (
 
 	"github.com/chzyer/readline"
 	"go.starlark.net/starlark"
+	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -499,13 +500,35 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 	envBridge := hybridEnv{globals: globals}
 	sessState := &security.SessionState{Restricted: restricted, Globals: globals, Dirs: dirs}
+
+	// Detect the interactive local session's controlling terminal so foreground
+	// external commands can run on a real PTY (so vim/top/htop/less work). This
+	// engages ONLY when the session output is terminal-backed — the broadcaster's
+	// primary writer is a tty *os.File, i.e. the local interactive REPL, never an
+	// SSH channel or a script — and stdin is that same terminal. When ptyTTY is
+	// nil the PTY handler is a no-op passthrough, preserving today's behavior for
+	// SSH, scripts and non-tty runs.
+	var ptyTTY *os.File
+	if bc, ok := out.(*sys.OutputBroadcaster); ok && bc.PrimaryTerminalFile() != nil {
+		if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+			ptyTTY = f
+		}
+	}
+
 	runner, err := interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
 		// Job control handler runs first, then the session-aware security
-		// interceptor (which uses this session's own directory stack).
+		// interceptor (which uses this session's own directory stack), then the
+		// PTY handler — installed LAST so it only runs after the interceptor has
+		// authorized the command and dispatched it to real OS exec. The gate/
+		// audit chokepoint is the CallHandler, which runs before any exec handler.
 		interp.CallHandler(security.CallInterceptorSession(sessState)),
-		interp.ExecHandlers(jobControlHandler(out), security.BashInterceptorSession(sessState)),
+		interp.ExecHandlers(
+			jobControlHandler(out),
+			security.BashInterceptorSession(sessState),
+			ptyExecHandler(ptyTTY, in, out),
+		),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 	if err != nil {

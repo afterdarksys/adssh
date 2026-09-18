@@ -9,6 +9,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // OutputBroadcaster multiplexes a single stream of bytes to multiple io.Writers
@@ -31,6 +33,28 @@ func (b *OutputBroadcaster) Write(p []byte) (n int, err error) {
 		_, _ = w.Write(p) // best-effort
 	}
 	return len(p), nil
+}
+
+// PrimaryTerminalFile returns the broadcaster's primary writer when it is an
+// *os.File attached to a real terminal, and nil otherwise. The PTY-backed
+// foreground exec path uses this to recognise the interactive local session
+// (primary = os.Stdout on a tty) and to skip everything else — SSH sessions
+// (primary = an ssh channel), scripts, and pipes — where the primary is not a
+// terminal-backed file.
+func (b *OutputBroadcaster) PrimaryTerminalFile() *os.File {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.writers) == 0 {
+		return nil
+	}
+	f, ok := b.writers[0].(*os.File)
+	if !ok {
+		return nil
+	}
+	if !term.IsTerminal(int(f.Fd())) {
+		return nil
+	}
+	return f
 }
 
 func (b *OutputBroadcaster) AddListener(w io.Writer) {
