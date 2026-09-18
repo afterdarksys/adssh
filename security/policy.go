@@ -18,6 +18,11 @@ type PolicyContext struct {
 	Groups    []string        `json:"groups"`
 	Command   string          `json:"command"`
 	Args      []string        `json:"args"`
+	// Capabilities are the capability groups the command touches (net, cloud,
+	// fileops, proc, ...). Empty for shell-layer commands; populated for
+	// governed Starlark builtins by ClassifyCapabilities. Surfaced to Rego as
+	// input.capabilities so policies can gate whole classes of operation.
+	Capabilities []string     `json:"capabilities,omitempty"`
 	Time      string          `json:"time"`
 	SessionID string          `json:"session_id"`
 	Elevation *ElevationClaim `json:"elevation,omitempty"`
@@ -117,6 +122,7 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 		"groups":     pctx.Groups,
 		"command":    pctx.Command,
 		"args":       pctx.Args,
+		"capabilities": pctx.Capabilities,
 		"time":       pctx.Time,
 		"session_id": pctx.SessionID,
 	}

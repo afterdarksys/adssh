@@ -129,6 +129,10 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 	pctx := BuildPolicyContext(args[0], args[1:], sessionID)
 	pctx.Lease = extra.Lease
 	pctx.Agent = extra.Agent
+	// Classify the capability groups this command touches so policies can gate
+	// whole classes (cloud, fileops, proc, ...). Nil for shell-layer commands;
+	// populated for governed Starlark builtins (starlark.* paths).
+	pctx.Capabilities = ClassifyCapabilities(args[0])
 	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 	if policyErr != nil {
 		e.rememberDeniedCommand(sessionID, args)
