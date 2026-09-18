@@ -127,9 +127,9 @@ func SetupExtensions(opts ExtensionOptions) {
 		_ = sysDict.SetKey(starlark.String("load_plugin"), createLoadPlugin(env))
 		_ = sysDict.SetKey(starlark.String("read_file"), starlark.NewBuiltin("read_file", builtinReadFile))
 		_ = sysDict.SetKey(starlark.String("write_file"), starlark.NewBuiltin("write_file", builtinWriteFile))
-		_ = sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", createExecCmd(env, restricted)))
-		_ = sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", createExecAsync(env, restricted)))
-		_ = sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", createExecJSON(env, restricted)))
+		_ = sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", createExecCmd(opts)))
+		_ = sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", createExecAsync(opts)))
+		_ = sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", createExecJSON(opts)))
 		_ = sysDict.SetKey(starlark.String("register_command"), createRegisterCommand(env))
 		_ = sysDict.SetKey(starlark.String("register_completer"), createRegisterCompleter(env))
 	}

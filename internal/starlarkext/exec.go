@@ -1,11 +1,44 @@
 package starlarkext
 
+// Secure process execution for Starlark (sys.exec_cmd / sys.exec_json, and the
+// shared core used by sys.exec_async in job.go).
+//
+// These run a command through adssh's OWN interpreter with the security engine's
+// session-scoped interceptors installed — NOT the host `sh -c`. Every simple
+// command inside the string is therefore individually policy-gated (Rego +
+// entitlements + change-management + four-eyes + restricted-mode) and audited by
+// the SAME engine the calling session authorizes against, exactly like a command
+// typed at the REPL. The govern wrapper additionally gates the exec_* builtins
+// themselves (capability group "proc"/"stdio").
+//
+// Threats:
+//   - Ungoverned execution / gate bypass. The command is parsed and run through
+//     the engine's own CallInterceptorSession / BashInterceptorSession /
+//     GateProgramSession, so it cannot reach the OS without passing the same
+//     authorization chokepoint as an interactive command. It never shells out to
+//     an ungoverned host shell.
+//   - Wrong-engine authorization. The builtins gate against the per-session
+//     engine threaded in via ExtensionOptions.Engine (falling back to the
+//     process default only when a session did not bind one), so a session on an
+//     isolated engine is not silently authorized by the global default.
+//   - Hung / runaway commands. Every run is bounded by a timeout (default
+//     defaultExecTimeout, caller-overridable up to maxExecTimeout); on deadline
+//     it fails closed with an error, never a partial success.
+//   - Memory exhaustion from unbounded output. Output is captured into a capped
+//     buffer that fails closed (errors, does NOT silently truncate) once the cap
+//     is exceeded.
+//   - Swallowed initialization errors. interp.New's error is checked, not `_ =`.
+// It does NOT sanitize the command text or decide which commands are allowed —
+// that is the Rego policy's job, enforced by the interceptors above.
+
 import (
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/afterdarksys/adssh/security"
 
@@ -14,71 +47,186 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-func createExecCmd(globals starlark.StringDict, restricted bool) func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-	return func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-		var cmdStr string
-		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "cmd", &cmdStr); err != nil {
-			return nil, err
-		}
+const (
+	// defaultExecTimeout bounds a run when the caller passes no timeout. maxExecTimeout
+	// is the ceiling a caller may request; larger values are clamped down.
+	defaultExecTimeout = 30 * time.Second
+	maxExecTimeout     = 10 * time.Minute
 
-		parserFile, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
-		if err != nil {
-			return nil, fmt.Errorf("parse error: %v", err)
-		}
+	// defaultExecOutputCap bounds captured output when the caller passes none.
+	// maxExecOutputCap is the ceiling; larger requests are clamped down.
+	defaultExecOutputCap = 10 << 20 // 10 MiB
+	maxExecOutputCap     = 64 << 20 // 64 MiB
+)
 
-		var buf bytes.Buffer
-		runner, _ := interp.New(
-			interp.StdIO(nil, &buf, &buf),
-			interp.CallHandler(security.CallInterceptor(restricted, globals)),
-			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
-			interp.OpenHandler(security.VirtualOpenHandler()),
-		)
+// cappedBuffer captures output up to cap bytes and then FAILS CLOSED once the
+// cap is exceeded: it records exceeded and cancels the run (killing the command)
+// so an unbounded producer cannot keep the process alive, then DISCARDS the
+// overflow while still reporting a successful Write. Discarding-with-success
+// (rather than returning a Write error) is deliberate: an io.Copy that sees a
+// short/errored write busy-loops retrying, pinning a core, whereas cancelling the
+// command stops production at the source. The caller turns exceeded into an
+// explicit error after the run (see runGatedShell), so nothing is silently
+// truncated from the caller's point of view — per SECURITY-RULES rule 10 (bound
+// all external input).
+type cappedBuffer struct {
+	buf        bytes.Buffer
+	cap        int
+	exceeded   bool
+	cancel     context.CancelFunc
+	cancelOnce sync.Once
+}
 
-		if err = security.GateProgram(restricted, parserFile); err != nil {
-			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
-		}
-		err = runner.Run(context.Background(), parserFile)
-		if err != nil {
-			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
-		}
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if c.exceeded {
+		return len(p), nil // already over the cap; discard, keep the copier happy
+	}
+	remaining := c.cap - c.buf.Len()
+	if len(p) <= remaining {
+		return c.buf.Write(p)
+	}
+	// This write crosses the cap: keep what fits, mark exceeded, kill the run.
+	if remaining > 0 {
+		_, _ = c.buf.Write(p[:remaining])
+	}
+	c.exceeded = true
+	if c.cancel != nil {
+		c.cancelOnce.Do(c.cancel)
+	}
+	return len(p), nil
+}
 
-		return starlark.String(buf.String()), nil
+func (c *cappedBuffer) String() string { return c.buf.String() }
+
+// execParams carries the hardened, validated run parameters shared by every
+// exec_* builtin.
+type execParams struct {
+	engine    *security.Engine
+	session   *security.SessionState
+	timeout   time.Duration
+	outputCap int
+}
+
+// resolveExecParams builds execParams from the session options and the optional
+// timeout/max_output kwargs, clamping both into their safe ranges. A non-positive
+// value means "use the default".
+func resolveExecParams(opts ExtensionOptions, timeoutSecs, maxOutput int) execParams {
+	engine := opts.Engine
+	if engine == nil {
+		// No session-bound engine: fall back to the process default so the
+		// interceptors still gate. This is the single-tenant path; multi-tenant
+		// hosts always bind ExtensionOptions.Engine.
+		engine = security.DefaultEngine()
+	}
+
+	timeout := defaultExecTimeout
+	if timeoutSecs > 0 {
+		timeout = time.Duration(timeoutSecs) * time.Second
+		if timeout > maxExecTimeout {
+			timeout = maxExecTimeout
+		}
+	}
+
+	cap := defaultExecOutputCap
+	if maxOutput > 0 {
+		cap = maxOutput
+		if cap > maxExecOutputCap {
+			cap = maxExecOutputCap
+		}
+	}
+
+	return execParams{
+		engine:    engine,
+		session:   &security.SessionState{Restricted: opts.Restricted, Globals: opts.Env},
+		timeout:   timeout,
+		outputCap: cap,
 	}
 }
 
-func createExecJSON(globals starlark.StringDict, restricted bool) func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+// runGatedShell parses cmdStr and runs it through the engine's session-scoped
+// interceptors with a timeout and a capped output buffer. It returns the captured
+// output and a fail-closed error on parse failure, policy denial, timeout, output
+// overrun, or a non-zero command result. It is the single implementation behind
+// exec_cmd, exec_json and exec_async.
+func runGatedShell(ctx context.Context, p execParams, cmdStr string) (string, error) {
+	prog, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
+	if err != nil {
+		return "", fmt.Errorf("parse error: %v", err)
+	}
+
+	out := &cappedBuffer{cap: p.outputCap}
+	runner, err := interp.New(
+		interp.StdIO(nil, out, out),
+		interp.CallHandler(p.engine.CallInterceptorSession(p.session)),
+		interp.ExecHandlers(p.engine.BashInterceptorSession(p.session)),
+		interp.OpenHandler(security.VirtualOpenHandler()),
+	)
+	if err != nil {
+		return "", fmt.Errorf("exec init error: %v", err)
+	}
+
+	// Gate DeclClause keywords (export/readonly/...) that bypass the exec/call
+	// handlers, before running anything. Fail closed on denial.
+	if err := p.engine.GateProgramSession(p.session, prog); err != nil {
+		return out.String(), fmt.Errorf("exec denied: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	// Let an output overrun cancel the run, so an unbounded producer is killed
+	// at the source instead of spinning the output copier.
+	out.cancel = cancel
+
+	runErr := runner.Run(runCtx, prog)
+
+	// Overrun and timeout are reported explicitly and take precedence over the
+	// generic run error they may have induced (a capped Write or a cancelled
+	// context surfaces as a runner error too).
+	if out.exceeded {
+		return out.String(), fmt.Errorf("exec output exceeded %d bytes (fail-closed)", p.outputCap)
+	}
+	if runCtx.Err() == context.DeadlineExceeded {
+		return out.String(), fmt.Errorf("exec timed out after %s (fail-closed)", p.timeout)
+	}
+	if runErr != nil {
+		return out.String(), fmt.Errorf("exec error: %v", runErr)
+	}
+	return out.String(), nil
+}
+
+// createExecCmd implements sys.exec_cmd(cmd, timeout=30, max_output=10MiB) -> str.
+func createExecCmd(opts ExtensionOptions) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
 	return func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var cmdStr string
-		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "cmd", &cmdStr); err != nil {
+		var timeoutSecs, maxOutput int
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "cmd", &cmdStr, "timeout?", &timeoutSecs, "max_output?", &maxOutput); err != nil {
 			return nil, err
 		}
-
-		parserFile, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
+		out, err := runGatedShell(context.Background(), resolveExecParams(opts, timeoutSecs, maxOutput), cmdStr)
 		if err != nil {
-			return nil, fmt.Errorf("parse error: %v", err)
+			return nil, err
 		}
+		return starlark.String(out), nil
+	}
+}
 
-		var buf bytes.Buffer
-		runner, _ := interp.New(
-			interp.StdIO(nil, &buf, &buf),
-			interp.CallHandler(security.CallInterceptor(restricted, globals)),
-			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
-			interp.OpenHandler(security.VirtualOpenHandler()),
-		)
-
-		if err = security.GateProgram(restricted, parserFile); err != nil {
-			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+// createExecJSON implements sys.exec_json(cmd, timeout=30, max_output=10MiB) and
+// parses the command's stdout as JSON into a Starlark value.
+func createExecJSON(opts ExtensionOptions) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var cmdStr string
+		var timeoutSecs, maxOutput int
+		if err := starlark.UnpackArgs(b.Name(), args, kwargs, "cmd", &cmdStr, "timeout?", &timeoutSecs, "max_output?", &maxOutput); err != nil {
+			return nil, err
 		}
-		err = runner.Run(context.Background(), parserFile)
+		out, err := runGatedShell(context.Background(), resolveExecParams(opts, timeoutSecs, maxOutput), cmdStr)
 		if err != nil {
-			return nil, fmt.Errorf("exec error: %v, output: %s", err, buf.String())
+			return nil, err
 		}
-
-		var out interface{}
-		if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 			return nil, fmt.Errorf("json parse error: %v", err)
 		}
-
-		return GoToStarlark(out), nil
+		return GoToStarlark(parsed), nil
 	}
 }
