@@ -90,6 +90,10 @@ func SetupExtensions(opts ExtensionOptions) {
 	SetupSecurityAPI(env, restricted)
 	// Filesystem (governed writes; refused in restricted sessions)
 	SetupFilesystemAPI(env, restricted)
+	// Filesystem reads + metadata tests (content reads refused in restricted)
+	SetupFilesystemReadAPI(env, restricted)
+	// String helpers (pure; capability group "strings")
+	SetupStringsAPI(env)
 	// Crypto
 	cryptoDict := starlark.NewDict(2)
 	_ = cryptoDict.SetKey(starlark.String("md5"), starlark.NewBuiltin("md5", builtinMD5))
@@ -111,6 +115,8 @@ func SetupExtensions(opts ExtensionOptions) {
 	_ = reDict.SetKey(starlark.String("match"), starlark.NewBuiltin("re_match", builtinReMatch))
 	_ = reDict.SetKey(starlark.String("pcre_match"), starlark.NewBuiltin("pcre_match", builtinPcreMatch))
 	env["re"] = reDict
+	// Extended RE2 helpers: find/findall/replace/split.
+	SetupRegexExtAPI(env)
 
 	// Sys
 	sysDict := starlark.NewDict(8)
