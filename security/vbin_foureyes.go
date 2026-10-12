@@ -115,7 +115,7 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 			return fmt.Errorf("4eyes deny: usage: 4eyes deny <token>")
 		}
 		token := args[2]
-		if err := DenyRequest(token); err != nil {
+		if err := engineFromContext(ctx).DenyRequestAs(token, approvalActor(SessionIDFromContext(ctx))); err != nil {
 			return err
 		}
 		fmt.Fprintf(hc.Stdout, "%s%s✗%s Denied request: %s\n", ansiBold, ansiRed, ansiReset, token)

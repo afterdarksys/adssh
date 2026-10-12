@@ -302,3 +302,92 @@ func TestSession_ConcurrentShellSmoke(t *testing.T) {
 		}
 	}
 }
+
+func TestRunShellDenyAllDoesNotExec(t *testing.T) {
+	allowS, _, _, allowRec := newTestSession(t, "allow-runshell", false)
+	if err := allowS.RunShell(context.Background(), "extcmd-allow"); err != nil {
+		t.Fatalf("allow RunShell: %v", err)
+	}
+	if allowRec.count() != 1 {
+		t.Fatalf("allow policy sentinel calls = %d, want 1", allowRec.count())
+	}
+
+	sec, err := security.NewEngine(security.EngineConfig{
+		RequirePolicy: true,
+		PolicySource:  []byte("package adssh.authz\ndefault allow = false\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &sentinelRecorder{}
+	s, err := NewSession(SessionOptions{
+		SessionID:      "deny-runshell",
+		User:           "tester",
+		Engine:         sec,
+		ExecMiddleware: []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc{rec.middleware},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RunShell(context.Background(), "extcmd-deny"); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("deny RunShell: %v", err)
+	}
+	if err := s.RunShell(context.Background(), "export FOO=1"); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("deny export: %v", err)
+	}
+	if rec.count() != 0 {
+		t.Fatalf("deny-all reached OS exec: %v", rec.calls)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.RunShell(cancelled, "extcmd-deny"); err == nil {
+		t.Fatal("cancelled RunShell ran")
+	}
+}
+
+func TestRunStarlarkPrintAndDenyExec(t *testing.T) {
+	sec, err := security.NewEngine(security.EngineConfig{
+		RequirePolicy: true,
+		PolicySource:  []byte("package adssh.authz\ndefault allow = false\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	rec := &sentinelRecorder{}
+	s, err := NewSession(SessionOptions{
+		SessionID:      "deny-star",
+		User:           "tester",
+		Out:            &out,
+		Engine:         sec,
+		ExecMiddleware: []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc{rec.middleware},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Thread.Print = func(_ *starlark.Thread, msg string) { out.WriteString(msg) }
+	if _, err := s.RunStarlark(context.Background(), "print('ok')"); err != nil {
+		t.Fatalf("print: %v", err)
+	}
+	if !strings.Contains(out.String(), "ok") {
+		t.Fatalf("print output = %q", out.String())
+	}
+	_, err = s.RunStarlark(context.Background(), `sys["exec_cmd"]("/nonexistent/adssh-should-not-run")`)
+	if err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("expected policy denial, got %v", err)
+	}
+	if strings.Contains(err.Error(), "executable file not found") || strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("command reached OS exec: %v", err)
+	}
+	if rec.count() != 0 {
+		t.Fatalf("starlark exec reached sentinel: %v", rec.calls)
+	}
+	if _, err := s.RunStarlark(context.Background(), "   "); err == nil {
+		t.Fatal("empty starlark source was accepted")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.RunStarlark(cancelled, "print('no')"); err == nil {
+		t.Fatal("cancelled RunStarlark ran")
+	}
+}

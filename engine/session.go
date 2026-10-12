@@ -11,6 +11,8 @@
 package engine
 
 import (
+	"context"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -197,4 +199,39 @@ func (s *Session) GateProgram(node syntax.Node) error {
 		return s.engine.GateProgramSession(state, node)
 	}
 	return security.GateProgramSession(state, node)
+}
+
+// Threats: DeclClause keywords bypass the shell call handler. RunShell always
+// runs GateProgram before Runner.Run. It does not authorize a program that
+// the caller executes through Runner directly. A cancelled context is refused
+// before parse. RunStarlark executes on this session's thread; print is not a
+// policy decision, and sys.exec_cmd stays on the session engine's gate.
+func (s *Session) RunShell(ctx context.Context, src string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f, err := syntax.NewParser().Parse(strings.NewReader(src), "session.sh")
+	if err != nil {
+		return err
+	}
+	if err := s.GateProgram(f); err != nil {
+		return err
+	}
+	return s.Runner.Run(ctx, f)
+}
+
+func (s *Session) RunStarlark(ctx context.Context, src string) (starlark.StringDict, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(src) == "" {
+		return nil, errors.New("empty starlark source")
+	}
+	return starlark.ExecFile(s.Thread, "session.star", src, s.Globals)
 }

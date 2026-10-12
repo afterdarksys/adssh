@@ -44,10 +44,9 @@ type ExtensionOptions struct {
 	In  io.Reader
 	Out io.Writer
 	Err io.Writer
-	// Engine is the security engine this session resolves through. It is carried
-	// for future per-session wiring; today the exec builtins still resolve the
-	// process-global default engine (TODO(session): thread Engine into exec_cmd,
-	// exec_json, exec_async).
+	// Engine is the security engine exec_cmd, exec_json, and exec_async gate
+	// through. resolveExecParams uses it. A nil engine falls back to
+	// security.DefaultEngine.
 	Engine *security.Engine
 }
 

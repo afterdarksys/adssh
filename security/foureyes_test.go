@@ -161,8 +161,8 @@ func TestFourEyes_ApproveDenyMarkers(t *testing.T) {
 	if err := os.WriteFile(pendingFile2, []byte(`{"token":"tok2"}`), 0600); err != nil {
 		t.Fatalf("seed pending file: %v", err)
 	}
-	if err := DenyRequest("tok2"); err != nil {
-		t.Fatalf("DenyRequest: %v", err)
+	if err := DenyRequestAs("tok2", "bob"); err != nil {
+		t.Fatalf("DenyRequestAs: %v", err)
 	}
 	deniedPath := filepath.Join(fourEyesDeniedDir(), "tok2")
 	if _, err := os.Stat(deniedPath); err != nil {
@@ -206,6 +206,23 @@ func TestFourEyesApprovalEnforcesDistinctConfiguredApprover(t *testing.T) {
 	}
 	if err := eng.ApproveRequestAs("abcdef123456", "bob"); err != nil {
 		t.Fatalf("configured distinct approver was rejected: %v", err)
+	}
+
+	seed("denytoken01", "alice", "bob")
+	if err := eng.DenyRequestAs("denytoken01", ""); err == nil {
+		t.Fatal("empty approver denied the request")
+	}
+	if err := eng.DenyRequestAs("denytoken01", "alice"); err == nil {
+		t.Fatal("requester denied their own request")
+	}
+	if err := eng.DenyRequestAs("denytoken01", "carol"); err == nil {
+		t.Fatal("unconfigured approver denied the request")
+	}
+	if _, err := os.Stat(filepath.Join(eng.fourEyesPendingDir(), "denytoken01.json")); err != nil {
+		t.Fatalf("failed deny removed the pending request: %v", err)
+	}
+	if err := eng.DenyRequestAs("denytoken01", "bob"); err != nil {
+		t.Fatalf("configured approver deny: %v", err)
 	}
 }
 

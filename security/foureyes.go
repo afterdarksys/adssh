@@ -268,8 +268,11 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 		return fmt.Errorf("foureyes: write pending: %w", err)
 	}
 
-	// Print token prominently
-	fmt.Fprintf(os.Stderr, "\n\U0001F510 4-eyes required. Token: %s\nRun: 4eyes approve %s\n\n", token, token)
+	required := rule.Approver
+	if required == "" {
+		required = "any distinct approver"
+	}
+	fmt.Fprintf(os.Stderr, "\n\U0001F510 4-eyes required. Token: %s\nRequired approver: %s\nRun: 4eyes approve %s\n\n", token, required, token)
 
 	// Send webhook notification if configured
 	// TODO(engine-config): read the webhook URL from EngineConfig instead of the process env.
@@ -300,7 +303,7 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 		// Check denied
 		if _, err := os.Stat(deniedPath); err == nil {
 			fmt.Fprintf(os.Stderr, "\r\033[K\u274C Request %s denied.\n", token)
-			return fmt.Errorf("foureyes: request %s denied", token)
+			return fmt.Errorf("foureyes: request %s denied (required approver: %s)", token, required)
 		}
 
 		fmt.Fprintf(os.Stderr, "\r%s waiting for approval (token: %s) [%ds remaining]",
@@ -312,7 +315,7 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 	// Timed out — clean up pending file
 	fmt.Fprintf(os.Stderr, "\r\033[K\u23F0 Request %s timed out.\n", token)
 	os.Remove(pendingFile) //nolint:errcheck
-	return fmt.Errorf("foureyes: request %s timed out after %ds", token, ttl)
+	return fmt.Errorf("foureyes: request %s timed out after %ds (required approver: %s)", token, ttl, required)
 }
 
 // RequestApproval creates a pending request and polls until approved, denied, or timed out.
@@ -439,19 +442,59 @@ func ApproveRequest(token string) error {
 	return defaultEngine.ApproveRequest(token)
 }
 
-// DenyRequest writes a denied marker and removes the pending file.
-func (e *Engine) DenyRequest(token string) error {
+// DenyRequestAs writes a denied marker after the same identity checks as
+// ApproveRequestAs. The requester cannot deny their own request. A configured
+// rule approver must match. A missing pending file fails closed and writes
+// nothing.
+func (e *Engine) DenyRequestAs(token, approver string) error {
 	if err := e.ensureFourEyesDirs(); err != nil {
 		return err
 	}
+	if !validApprovalToken(token) {
+		return fmt.Errorf("foureyes: invalid approval token")
+	}
+	if approver == "" {
+		return fmt.Errorf("foureyes: denying identity is unavailable")
+	}
+
+	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
+	data, err := os.ReadFile(pendingFile)
+	if err != nil {
+		return fmt.Errorf("foureyes: read pending request: %w", err)
+	}
+	var pending FourEyesPending
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return fmt.Errorf("foureyes: parse pending request: %w", err)
+	}
+	if pending.Token != "" && pending.Token != token {
+		return fmt.Errorf("foureyes: pending request token mismatch")
+	}
+	if pending.Requester != "" && approver == pending.Requester {
+		return fmt.Errorf("foureyes: requester %q cannot deny their own request", approver)
+	}
+	if pending.Rule.Approver != "" && approver != pending.Rule.Approver {
+		return fmt.Errorf("foureyes: request requires approver %q", pending.Rule.Approver)
+	}
+
 	deniedPath := filepath.Join(e.fourEyesDeniedDir(), token)
 	if err := os.WriteFile(deniedPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
 		return fmt.Errorf("foureyes: write denied marker: %w", err)
 	}
-	// Remove pending file (best effort)
-	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
-	os.Remove(pendingFile) //nolint:errcheck
+	if err := os.Remove(pendingFile); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("foureyes: remove pending request: %w", err)
+	}
 	return nil
+}
+
+// DenyRequest denies as the local OS user. Prefer DenyRequestAs when the
+// caller already has an approver identity.
+func (e *Engine) DenyRequest(token string) error {
+	return e.DenyRequestAs(token, approvalActor(""))
+}
+
+// DenyRequestAs denies a pending request as the named actor.
+func DenyRequestAs(token, approver string) error {
+	return defaultEngine.DenyRequestAs(token, approver)
 }
 
 // DenyRequest writes a denied marker and removes the pending file.

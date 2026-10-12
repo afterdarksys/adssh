@@ -33,15 +33,21 @@ control, with a programmable and AI-native operations shell.
 - Token-capable local `admin serve` HTTP API for sessions, gateways, approvals,
   explanations, and evidence.
 - Role-separated `admin-api.rego` starter policy bundle.
+- Admin HTTP refuses an empty API key. Comparison hashes both sides with SHA-256, then compares the digests. `POST /v1/approvals/approve` and `POST /v1/approvals/deny` exist. `GET /v1/approvals` lists the handler's engine.
+- Four-eyes denial and timeout name the required approver. `DenyRequestAs` rejects a bad token, an empty approver, self-deny, and a caller who is not the configured approver. The pending file stays until a matching deny.
+- Starlark `http_get`, `tcp_send`, and `dial_tls` refuse `skip_verify` before any dial and set TLS 1.3 as the minimum. `ADSSH_ALLOW_INSECURE_TLS` is not read.
+- `Session.RunShell` runs `GateProgram` before `Runner.Run`. `RunStarlark` executes on the session thread.
+- Policy examples `policy/examples/cert_principal.rego`, `lease_bounds.rego`, and `agent-destructive.rego`.
+- `docs/systemapi-embed.md` for the out-of-process systemapi break-glass path. In-process hosts stay on `docs/EMBEDDING.md`.
+- Defensive review in `docs/SECURITY_REVIEW.md` (2026-10-12). It is not a release sign-off.
 
 ## Next Up
 
 1. **Identity Hardening**
-   - Full OIDC authorization-code/device login flow.
-   - Cert principal policy examples.
+   - The systemapi control plane has username-first device login. adssh still imports OIDC JWTs and does not run that flow. Certificate principals are already session principals and are evaluated as `input.groups`. The example is `policy/examples/cert_principal.rego`.
 
 2. **Admin API Hardening**
-   - Extend HTTP API coverage to recordings, elevations, leases, and approval actions.
+   - Approve and deny HTTP actions are done. Recordings, elevations, and leases still have no list store.
    - MCP parity for the new `admin` and `identity` operations.
    - HTTP API audit event details and OpenAPI schema.
 
@@ -53,17 +59,16 @@ control, with a programmable and AI-native operations shell.
 4. **Lease Hardening**
    - Provider metadata in evidence bundles.
    - Stdin or file-descriptor injection in addition to env injection.
-   - More policy examples for lease TTL/source/target restrictions.
+   - TTL, source, and destination example: `policy/examples/lease_bounds.rego`.
 
 5. **Approval UX**
-   - Show active pending token and required approver directly in denial output.
+   - Denial and timeout errors name the required approver. The pending request still prints the token to the operator who asked.
    - Add optional webhook-driven approval links for gateway, lease, and elevation blocks.
    - Make `??` infer required role from structured policy metadata where available.
 
 6. **Agent Governance**
-   - Approval-required destructive agent actions.
+   - Approval-required destructive agent actions. `policy/bundles/ai-agent.rego` already denies a destructive MCP call unless `dry_run` is set or a human-approved elevation is present. `policy/examples/agent-destructive.rego` is the short form of that rule.
    - Agent-specific entitlements and session binding.
-   - Expanded MCP/AI-agent policy examples.
 
 7. **Docs Site**
    - Install and packaging docs.
@@ -73,8 +78,7 @@ control, with a programmable and AI-native operations shell.
    - Leases.
    - Recordings/evidence.
    - MCP/agent governance.
-   - Embedding.
+   - In-process embedding is `docs/EMBEDDING.md`. The systemapi out-of-process path is `docs/systemapi-embed.md`. A public docs site is still not built.
 
 8. **Security Review Pass**
-    - Focused review of gateway, lease, recording, elevation, and evidence paths
-      before tagging a release.
+   - Written in `docs/SECURITY_REVIEW.md`. Re-review gateway, lease, recording, elevation, and evidence before tagging a release. The 2026-10-12 note is not that sign-off.

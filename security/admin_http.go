@@ -1,6 +1,7 @@
 package security
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -39,12 +40,16 @@ func (h *adminHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/gateways":
 		writeAdminJSON(w, http.StatusOK, adminGatewaySnapshot())
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/approvals":
-		pending, err := ListPending()
+		pending, err := h.engine.ListPending()
 		if err != nil {
 			writeAdminError(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeAdminJSON(w, http.StatusOK, pending)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/approvals/approve":
+		h.handleApproval(w, r, true)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/approvals/deny":
+		h.handleApproval(w, r, false)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/explain":
 		h.handleExplain(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/evidence":
@@ -54,9 +59,12 @@ func (h *adminHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Threats: an empty admin key must not authenticate anyone, and a raw
+// compare must not leak the key through length. This does not store, rotate,
+// or scope the key. /healthz stays unauthenticated.
 func (h *adminHTTPHandler) authorized(r *http.Request) bool {
 	if h.apiKey == "" {
-		return true
+		return false
 	}
 	if constantTimeEqual(r.Header.Get("X-ADSSH-API-Key"), h.apiKey) {
 		return true
@@ -72,7 +80,9 @@ func constantTimeEqual(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	ah := sha256.Sum256([]byte(a))
+	bh := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ah[:], bh[:]) == 1
 }
 
 func (h *adminHTTPHandler) handleExplain(w http.ResponseWriter, r *http.Request) {
@@ -94,6 +104,38 @@ func (h *adminHTTPHandler) handleExplain(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeAdminJSON(w, http.StatusOK, explanation)
+}
+
+func (h *adminHTTPHandler) handleApproval(w http.ResponseWriter, r *http.Request, approve bool) {
+	var req struct {
+		Token    string `json:"token"`
+		Approver string `json:"approver"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeAdminError(w, http.StatusBadRequest, fmt.Errorf("invalid json: %w", err))
+		return
+	}
+	if !validApprovalToken(req.Token) {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid token"})
+		return
+	}
+	if req.Approver == "" {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": "approver is required"})
+		return
+	}
+	if approve {
+		if err := h.engine.ApproveRequestAs(req.Token, req.Approver); err != nil {
+			writeAdminError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeAdminJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "approved"})
+		return
+	}
+	if err := h.engine.DenyRequestAs(req.Token, req.Approver); err != nil {
+		writeAdminError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "denied"})
 }
 
 func (h *adminHTTPHandler) handleEvidence(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +186,7 @@ func writeAdminError(w http.ResponseWriter, status int, err error) {
 }
 
 func formatAdminHTTPStart(listen string, apiKey string) string {
-	auth := "disabled"
+	auth := "refused-empty-key"
 	if apiKey != "" {
 		auth = "token"
 	}

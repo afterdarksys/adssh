@@ -115,3 +115,11 @@ defaults), including `ADSSH_RESTRICTED`, `ADSSH_SERVE`, `ADSSH_POLICY`, `ADSSH_E
 `ADSSH_AUDIT_LOG`, `ADSSH_HISTORY`, `ADSSH_HOST_KEY`, `ADSSH_AUTHORIZED_KEYS`, `ADSSH_PROFILE`, and
 `ADSSH_RC`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
 `.adsshrc` files.
+
+## SAH suite
+
+**sah** means Service Automation Hum. This repository stays `adssh`.
+
+Suite rules are `AGENTS.md`. The local contract is `docs/sah-suite.md`. The cross-repo contract is `~/development/systemapi.io/docs/sah-suite.md`. If this file and `AGENTS.md` disagree about the suite, `AGENTS.md` wins. This file remains the architecture of the shell.
+
+Do not rename the module, the `adssh` and `adssh-mcp` binaries, `~/.adssh`, or the GitHub repo from a branding edit. GitHub would redirect a renamed repo. The Go module path would not.

@@ -11,16 +11,45 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// Threats: a caller-supplied skip_verify disables certificate checks and
+// allows a network MITM. These builtins refuse that flag before any dial.
+// They do not pin certificates or replace the system root pool. Responses
+// larger than maxNetRead are rejected.
+const maxNetRead = 1 << 20
+
+func refuseSkipVerify(skip bool) error {
+	if skip {
+		return fmt.Errorf("skip_verify is refused")
+	}
+	return nil
+}
+
+func tls13Config() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS13}
+}
+
+func readNetCapped(r io.Reader, what string) (string, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxNetRead+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > maxNetRead {
+		return "", fmt.Errorf("%s: response exceeds %d bytes", what, maxNetRead)
+	}
+	return string(body), nil
+}
+
 func builtinHTTPGet(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 	var url string
 	var skipVerify bool
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "url", &url, "skip_verify?", &skipVerify); err != nil {
 		return nil, err
 	}
-
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: skipVerify},
+	if err := refuseSkipVerify(skipVerify); err != nil {
+		return nil, err
 	}
+
+	tr := &http.Transport{TLSClientConfig: tls13Config()}
 	client := &http.Client{Transport: tr, Timeout: 10 * time.Second}
 
 	resp, err := client.Get(url)
@@ -28,11 +57,11 @@ func builtinHTTPGet(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 		return nil, fmt.Errorf("http_get error: %v", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readNetCapped(resp.Body, "http_get")
 	if err != nil {
 		return nil, err
 	}
-	return starlark.String(string(body)), nil
+	return starlark.String(body), nil
 }
 
 func builtinTCPSend(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -41,11 +70,14 @@ func builtinTCPSend(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "addr", &addr, "data", &data, "use_tls?", &useTLS, "skip_verify?", &skipVerify); err != nil {
 		return nil, err
 	}
+	if err := refuseSkipVerify(skipVerify); err != nil {
+		return nil, err
+	}
 
 	var conn net.Conn
 	var err error
 	if useTLS {
-		conn, err = tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: skipVerify})
+		conn, err = tls.Dial("tcp", addr, tls13Config())
 	} else {
 		conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
 	}
@@ -58,9 +90,17 @@ func builtinTCPSend(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 		return nil, fmt.Errorf("tcp write error: %v", err)
 	}
 
-	// Read response
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) // best-effort: a failed deadline surfaces on the read itself
-	resp, _ := io.ReadAll(conn)
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return nil, fmt.Errorf("tcp deadline error: %v", err)
+	}
+	limited := io.LimitReader(conn, maxNetRead+1)
+	resp, readErr := io.ReadAll(limited)
+	if len(resp) > maxNetRead {
+		return nil, fmt.Errorf("tcp_send: response exceeds %d bytes", maxNetRead)
+	}
+	if readErr != nil && len(resp) == 0 {
+		return nil, fmt.Errorf("tcp read error: %v", readErr)
+	}
 	return starlark.String(string(resp)), nil
 }
 
@@ -84,8 +124,11 @@ func builtinDialTLS(thread *starlark.Thread, b *starlark.Builtin, args starlark.
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr, "skip_verify?", &skipVerify); err != nil {
 		return nil, err
 	}
+	if err := refuseSkipVerify(skipVerify); err != nil {
+		return nil, err
+	}
 
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{InsecureSkipVerify: skipVerify})
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, tls13Config())
 	if err != nil {
 		return nil, fmt.Errorf("dial_tls error: %v", err)
 	}
