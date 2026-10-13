@@ -17,6 +17,7 @@ type governedCommand struct {
 	Env           map[string]string
 	UnsetEnv      []string
 	Stdin         io.Reader
+	ExtraFiles    []*os.File
 	MaxOutput     int
 	Lease         *LeaseClaim
 	Agent         *AgentClaim
@@ -56,6 +57,7 @@ func executeExternalCommand(ctx context.Context, command governedCommand) (comma
 	cmd := exec.CommandContext(ctx, command.Args[0], command.Args[1:]...)
 	cmd.Dir = command.Dir
 	cmd.Stdin = command.Stdin
+	cmd.ExtraFiles = command.ExtraFiles
 	cmd.Env = overlayEnvironment(os.Environ(), command.Env, command.UnsetEnv)
 
 	limit := command.MaxOutput

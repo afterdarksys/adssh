@@ -33,10 +33,11 @@ type sshGeneratedKey struct {
 
 func (identityBinary) Name() string { return "identity" }
 func (identityBinary) Description() string {
-	return "Import OIDC identity and issue short-lived SSH user certificates"
+	return "Log in with an opaque device bearer, import OIDC identity, and issue short-lived SSH user certificates"
 }
 func (identityBinary) Usage() string {
 	return `identity status [--json]
+identity device login --url URL --username USER [--token-file PATH] [--interval duration] [--timeout duration]
 identity oidc import (--token token|--token-file path|--env name) [--issuer iss] [--audience aud] [--jwks-url url|--discover] [--user-claim claim] [--group-claim claim]
 identity ssh-ca init --out ca_key
 identity ssh-ca issue --ca ca_key --pub user.pub --principal name [--principal group] --for duration --out user-cert.pub`
@@ -49,6 +50,10 @@ func (identityBinary) Run(ctx context.Context, args []string) error {
 	switch args[1] {
 	case "status":
 		return identityStatus(ctx, args[2:])
+	case "device":
+		if len(args) >= 3 && args[2] == "login" {
+			return identityDeviceLogin(ctx, args[3:])
+		}
 	case "oidc":
 		if len(args) >= 3 && args[2] == "import" {
 			return identityOIDCImport(ctx, args[3:])
@@ -64,6 +69,55 @@ func (identityBinary) Run(ctx context.Context, args []string) error {
 		}
 	}
 	return fmt.Errorf("identity: unsupported command\nusage: %s", identityBinary{}.Usage())
+}
+
+func identityDeviceLogin(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
+	req := DeviceLoginRequest{}
+	for i := 0; i < len(args); i++ {
+		needsValue := true
+		switch args[i] {
+		case "--url", "--username", "--token-file", "--interval", "--timeout":
+		default:
+			return fmt.Errorf("identity device login: unknown option %q", args[i])
+		}
+		if needsValue {
+			if i+1 >= len(args) {
+				return fmt.Errorf("identity device login: %s requires a value", args[i])
+			}
+			i++
+		}
+		switch args[i-1] {
+		case "--url":
+			req.URL = args[i]
+		case "--username":
+			req.Username = args[i]
+		case "--token-file":
+			req.TokenFile = args[i]
+		case "--interval":
+			interval, err := parseFlexibleDuration(args[i])
+			if err != nil {
+				return fmt.Errorf("identity device login: --interval must be a duration or seconds")
+			}
+			req.Interval = interval
+			req.IntervalSet = true
+		case "--timeout":
+			timeout, err := parseFlexibleDuration(args[i])
+			if err != nil {
+				return fmt.Errorf("identity device login: --timeout must be a duration or seconds")
+			}
+			req.Timeout = timeout
+		}
+	}
+	if req.URL == "" || req.Username == "" {
+		return fmt.Errorf("identity device login: --url and --username are required")
+	}
+	result, err := DeviceLogin(ctx, req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(hc.Stdout, "token_file=%s\nfingerprint=%s\n", result.TokenFile, result.Fingerprint)
+	return nil
 }
 
 func identityStatus(ctx context.Context, args []string) error {

@@ -1,11 +1,8 @@
 package security
 
 import (
-	"bytes"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -26,6 +23,7 @@ type FourEyesRule struct {
 // FourEyesPending represents a command held for approval.
 type FourEyesPending struct {
 	Token     string       `json:"token"`
+	RequestID string       `json:"request_id,omitempty"`
 	Command   string       `json:"command"`
 	Requester string       `json:"requester"`
 	Hostname  string       `json:"hostname"`
@@ -224,14 +222,8 @@ func globToRegexp(pattern string) string {
 	return `^(?s:` + quoted + `)$`
 }
 
-// generateToken creates a short deterministic token from cmd + current time.
-func generateToken(cmd string) string {
-	h := sha256.Sum256([]byte(cmd + time.Now().String()))
-	return fmt.Sprintf("%x", h[:])[:12]
-}
-
 // RequestApproval creates a pending request and polls until approved, denied, or timed out.
-// Prints the token prominently on stderr and shows a spinner while waiting.
+// The secret token stays in the pending file. Stderr shows the public request id.
 func (e *Engine) RequestApproval(cmd string, rule FourEyesRule) error {
 	return e.RequestApprovalForSession(cmd, rule, "")
 }
@@ -243,42 +235,32 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 		return err
 	}
 
-	token := generateToken(cmd)
-	hostname, _ := os.Hostname()
-	requester := approvalActor(sessionID)
-	if requester == "" {
-		requester = "unknown"
-	}
-
-	pending := FourEyesPending{
-		Token:     token,
-		Command:   cmd,
-		Requester: requester,
-		Hostname:  hostname,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Rule:      rule,
-	}
-
-	data, err := json.MarshalIndent(pending, "", "  ")
+	pending, pendingFile, err := e.createFourEyesPending(cmd, rule, sessionID)
 	if err != nil {
-		return fmt.Errorf("foureyes: marshal pending: %w", err)
+		return err
 	}
-	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
-	if err := os.WriteFile(pendingFile, data, 0600); err != nil {
-		return fmt.Errorf("foureyes: write pending: %w", err)
-	}
+	requestID := pending.RequestID
+	fmt.Fprint(os.Stderr, formatApprovalPrompt(pendingFile, requestID, rule.Approver))
 
 	required := rule.Approver
 	if required == "" {
 		required = "any distinct approver"
 	}
-	fmt.Fprintf(os.Stderr, "\n\U0001F510 4-eyes required. Token: %s\nRequired approver: %s\nRun: 4eyes approve %s\n\n", token, required, token)
-
-	// Send webhook notification if configured
-	// TODO(engine-config): read the webhook URL from EngineConfig instead of the process env.
-	if webhookURL := os.Getenv("ADSSH_4EYES_WEBHOOK"); webhookURL != "" {
-		go sendWebhookNotification(webhookURL, token, cmd, requester, hostname)
+	noticeApprover := rule.Approver
+	if noticeApprover == "" {
+		noticeApprover = "unspecified"
 	}
+	fingerprint := fingerprintSecret(pending.Token)
+	commandName := commandHead(cmd)
+	go func() {
+		_ = sendApprovalNotice(approvalNotice{
+			Event:            "approval_required",
+			Kind:             "foureyes",
+			Command:          commandName,
+			RequiredApprover: noticeApprover,
+			Fingerprint:      fingerprint,
+		})
+	}()
 
 	ttl := rule.TTL
 	if ttl <= 0 {
@@ -289,33 +271,30 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 	spinChars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spinIdx := 0
 
-	approvedPath := filepath.Join(e.fourEyesApprovedDir(), token)
-	deniedPath := filepath.Join(e.fourEyesDeniedDir(), token)
+	approvedPath := filepath.Join(e.fourEyesApprovedDir(), requestID)
+	deniedPath := filepath.Join(e.fourEyesDeniedDir(), requestID)
 
 	for time.Now().Before(deadline) {
 		remaining := int(time.Until(deadline).Seconds())
 
-		// Check approved
 		if _, err := os.Stat(approvedPath); err == nil {
-			fmt.Fprintf(os.Stderr, "\r\033[K\u2705 Request %s approved.\n", token)
+			fmt.Fprintf(os.Stderr, "\r\033[K\u2705 Request %s approved.\n", requestID)
 			return nil
 		}
-		// Check denied
 		if _, err := os.Stat(deniedPath); err == nil {
-			fmt.Fprintf(os.Stderr, "\r\033[K\u274C Request %s denied.\n", token)
-			return fmt.Errorf("foureyes: request %s denied (required approver: %s)", token, required)
+			fmt.Fprintf(os.Stderr, "\r\033[K\u274C Request %s denied.\n", requestID)
+			return fmt.Errorf("foureyes: request %s denied (required approver: %s)", requestID, required)
 		}
 
-		fmt.Fprintf(os.Stderr, "\r%s waiting for approval (token: %s) [%ds remaining]",
-			spinChars[spinIdx%len(spinChars)], token, remaining)
+		fmt.Fprintf(os.Stderr, "\r%s waiting for approval (request: %s) [%ds remaining]",
+			spinChars[spinIdx%len(spinChars)], requestID, remaining)
 		spinIdx++
 		time.Sleep(2 * time.Second)
 	}
 
-	// Timed out — clean up pending file
-	fmt.Fprintf(os.Stderr, "\r\033[K\u23F0 Request %s timed out.\n", token)
+	fmt.Fprintf(os.Stderr, "\r\033[K\u23F0 Request %s timed out.\n", requestID)
 	os.Remove(pendingFile) //nolint:errcheck
-	return fmt.Errorf("foureyes: request %s timed out after %ds (required approver: %s)", token, ttl, required)
+	return fmt.Errorf("foureyes: request %s timed out after %ds (required approver: %s)", requestID, ttl, required)
 }
 
 // RequestApproval creates a pending request and polls until approved, denied, or timed out.
@@ -323,33 +302,6 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 // Deprecated: use Engine methods; retained for the binary until the engine facade lands.
 func RequestApproval(cmd string, rule FourEyesRule) error {
 	return defaultEngine.RequestApproval(cmd, rule)
-}
-
-// sendWebhookNotification POSTs approval request details to a webhook URL.
-func sendWebhookNotification(webhookURL, token, cmd, requester, hostname string) {
-	payload := map[string]string{
-		"token":       token,
-		"command":     cmd,
-		"requester":   requester,
-		"hostname":    hostname,
-		"approve_cmd": "4eyes approve " + token,
-		"deny_cmd":    "4eyes deny " + token,
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("POST", webhookURL, bytes.NewBuffer(data))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	resp.Body.Close()
 }
 
 func approvalActor(sessionID string) string {
@@ -389,17 +341,9 @@ func (e *Engine) ApproveRequestAs(token, approver string) error {
 		return fmt.Errorf("foureyes: approving identity is unavailable")
 	}
 
-	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
-	data, err := os.ReadFile(pendingFile)
+	pending, pendingFile, markerName, err := e.locatePending(token)
 	if err != nil {
-		return fmt.Errorf("foureyes: read pending request: %w", err)
-	}
-	var pending FourEyesPending
-	if err := json.Unmarshal(data, &pending); err != nil {
-		return fmt.Errorf("foureyes: parse pending request: %w", err)
-	}
-	if pending.Token != "" && pending.Token != token {
-		return fmt.Errorf("foureyes: pending request token mismatch")
+		return err
 	}
 	if pending.Requester != "" && approver == pending.Requester {
 		return fmt.Errorf("foureyes: requester %q cannot approve their own request", approver)
@@ -408,7 +352,7 @@ func (e *Engine) ApproveRequestAs(token, approver string) error {
 		return fmt.Errorf("foureyes: request requires approver %q", pending.Rule.Approver)
 	}
 
-	approvedPath := filepath.Join(e.fourEyesApprovedDir(), token)
+	approvedPath := filepath.Join(e.fourEyesApprovedDir(), markerName)
 	marker, err := json.Marshal(map[string]string{
 		"approved_at": time.Now().UTC().Format(time.RFC3339),
 		"approver":    approver,
@@ -457,17 +401,9 @@ func (e *Engine) DenyRequestAs(token, approver string) error {
 		return fmt.Errorf("foureyes: denying identity is unavailable")
 	}
 
-	pendingFile := filepath.Join(e.fourEyesPendingDir(), token+".json")
-	data, err := os.ReadFile(pendingFile)
+	pending, pendingFile, markerName, err := e.locatePending(token)
 	if err != nil {
-		return fmt.Errorf("foureyes: read pending request: %w", err)
-	}
-	var pending FourEyesPending
-	if err := json.Unmarshal(data, &pending); err != nil {
-		return fmt.Errorf("foureyes: parse pending request: %w", err)
-	}
-	if pending.Token != "" && pending.Token != token {
-		return fmt.Errorf("foureyes: pending request token mismatch")
+		return err
 	}
 	if pending.Requester != "" && approver == pending.Requester {
 		return fmt.Errorf("foureyes: requester %q cannot deny their own request", approver)
@@ -476,7 +412,7 @@ func (e *Engine) DenyRequestAs(token, approver string) error {
 		return fmt.Errorf("foureyes: request requires approver %q", pending.Rule.Approver)
 	}
 
-	deniedPath := filepath.Join(e.fourEyesDeniedDir(), token)
+	deniedPath := filepath.Join(e.fourEyesDeniedDir(), markerName)
 	if err := os.WriteFile(deniedPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
 		return fmt.Errorf("foureyes: write denied marker: %w", err)
 	}

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +21,7 @@ import (
 	"github.com/afterdarksys/adssh/internal/agent"
 	"github.com/afterdarksys/adssh/internal/config"
 	"github.com/afterdarksys/adssh/internal/repl"
+	"github.com/afterdarksys/adssh/internal/sah"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/parser"
@@ -46,6 +49,7 @@ func main() {
 
 	var cmdFlag string // -c "expression"
 	doctorFlag := false
+	sahMode := false
 
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -80,9 +84,16 @@ func main() {
 		case (arg == "-c") && i+1 < len(os.Args):
 			cmdFlag = os.Args[i+1]
 			i++
-		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "":
+		case arg == "sah" && cfg.ScriptPath == "" && cmdFlag == "":
+			sahMode = true
+		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "" && !sahMode:
 			cfg.ScriptPath = arg
 		}
+	}
+
+	// Disabled sah/1 exits before the engine starts and before the frame is read.
+	if sahMode && !cfg.SAHEnabled {
+		os.Exit(sah.Handle(false, nil, os.Stdout, nil))
 	}
 
 	if doctorFlag {
@@ -127,6 +138,10 @@ func main() {
 	// and hash chain as the sessions opened below — until repl/ and starlarkext/
 	// accept an *engine.Engine directly.
 	security.SetDefaultEngine(eng.Security())
+
+	if sahMode {
+		os.Exit(runSAH(eng.Security(), sessionID))
+	}
 
 	if cfg.EntitlementsPath != "" {
 		eng.Security().LogEvent(fmt.Sprintf("Entitlements loaded from %s", cfg.EntitlementsPath))
@@ -377,6 +392,50 @@ func evalLineScript(sess *engine.Session, src string) error {
 	return nil
 }
 
+func runSAH(sec *security.Engine, sessionID string) int {
+	return sah.Handle(true, os.Stdin, os.Stdout, func(command []string) (string, string, int, error) {
+		return sahExecute(sec, sessionID, command)
+	})
+}
+
+func sahExecute(sec *security.Engine, sessionID string, command []string) (string, string, int, error) {
+	if sec == nil || !sec.PolicyLoaded() {
+		return "", "", 0, errors.New("policy_required")
+	}
+	argv0 := command[0]
+	base := argv0
+	if strings.Contains(argv0, "/") {
+		base = filepath.Base(argv0)
+	}
+	switch base {
+	case "adssh", "sah", "adssh-mcp":
+		return "", "", 0, errors.New("command_rejected")
+	}
+	if _, ok := sec.Lookup(argv0); ok {
+		return "", "", 0, errors.New("command_rejected")
+	}
+	if err := sec.AuthorizeCommand(command, sessionID); err != nil {
+		return "", "", 0, errors.New("policy_denied")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	out := security.RedactSensitiveText(stdout.String())
+	errOut := security.RedactSensitiveText(stderr.String())
+	if runErr == nil {
+		return out, errOut, 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return out, errOut, exitErr.ExitCode(), nil
+	}
+	return "", "", 0, errors.New("execute_failed")
+}
+
 func printHelp() {
 	fmt.Print(`adssh — programmable DevOps shell
 
@@ -411,6 +470,7 @@ VIRTUAL BINARIES (type 'vbins' for full list)
   mirror      Session supervisor         mirror list
   admin       Local admin API            admin sessions --json
   identity    OIDC / SSH CA identity     identity status
+  sah         sah/1 stdio (ADSSH_SAH)    ADSSH_SAH=1 adssh sah
   gateway     Policy TCP gateway         gateway start --target host:22
   lease       Command secret lease       lease --from vault:path?field=token --as TOKEN -- cmd
   elevate     Break-glass elevation      elevate request prod-admin --for 10m --reason INC
@@ -421,6 +481,7 @@ VIRTUAL BINARIES (type 'vbins' for full list)
   grant       Role escalation            grant request admin
 
 ENVIRONMENT VARIABLES
+  ADSSH_SAH               sah/1 stdio switch (1/true/yes; default off)
   ADSSH_RESTRICTED        Enable restricted mode (true/false)
   ADSSH_SERVE             SSH server address (:2222)
   ADSSH_POLICY            Path to Rego policy file

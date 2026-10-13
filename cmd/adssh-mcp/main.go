@@ -13,6 +13,7 @@ import (
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
+	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
 )
 
@@ -22,34 +23,77 @@ func init() {
 	resolve.AllowRecursion = true
 }
 
-func main() {
-	// 1. Load config from ADSSH_* env vars
-	cfg := config.LoadFromEnv()
+type preparedMCP struct {
+	cfg       config.AppConfig
+	eng       *engine.Engine
+	agent     mcpAgentConfig
+	sessionID string
+}
 
-	// 2. Parse MCP-specific CLI flags
+func main() {
+	prepared, exitCode, err := prepareMCPProcess(os.Args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adssh-mcp: %v\n", err)
+		os.Exit(exitCode)
+	}
+	defer sys.UnregisterSession(prepared.sessionID)
+
+	// TODO(engine-facade): the Starlark exec builtins (eval_starlark) and the
+	// run_shell interceptor still resolve the process-global default engine.
+	// Point the default at the engine we built so those tool paths authorize
+	// through the same policy and audit log as policyGate.
+	security.SetDefaultEngine(prepared.eng.Security())
+	if _, statErr := os.Stat(prepared.cfg.PolicyPath); statErr == nil {
+		prepared.eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", prepared.cfg.PolicyPath))
+	}
+
+	globals := starlark.StringDict{}
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: prepared.cfg.Restricted, Engine: prepared.eng.Security()})
+
+	prepared.eng.Security().LogEvent("adssh-mcp server starting")
+	if err := serveMCP(prepared.cfg, prepared.eng, globals, prepared.agent); err != nil {
+		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
+		sys.UnregisterSession(prepared.sessionID)
+		os.Exit(1)
+	}
+}
+
+// prepareMCPProcess binds one session id into the engine, the registry, and
+// the agent claim. The tools file is checked before the engine is built. A
+// missing file exits 2. A malformed policy still exits 1. The session is
+// registered only after the engine is created.
+func prepareMCPProcess(args []string) (preparedMCP, int, error) {
+	cfg := config.LoadFromEnv()
 	agentID := os.Getenv("ADSSH_AGENT_ID")
 	requireDryRun := strings.EqualFold(os.Getenv("ADSSH_AGENT_REQUIRE_DRY_RUN"), "true")
-	for i := 1; i < len(os.Args); i++ {
-		arg := os.Args[i]
+	toolsFile := selectAgentToolsFile(args, os.Getenv("ADSSH_AGENT_TOOLS_FILE"))
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
 		switch {
-		case (arg == "--policy") && i+1 < len(os.Args):
-			cfg.PolicyPath = os.Args[i+1]
+		case arg == "--policy" && i+1 < len(args):
+			cfg.PolicyPath = args[i+1]
 			i++
-		case (arg == "--agent-id") && i+1 < len(os.Args):
-			agentID = os.Args[i+1]
+		case arg == "--agent-id" && i+1 < len(args):
+			agentID = args[i+1]
 			i++
 		case arg == "--require-agent-dry-run":
 			requireDryRun = true
+		case arg == "--agent-tools-file" && i+1 < len(args):
+			i++
 		}
 	}
 	if agentID == "" {
 		agentID = fmt.Sprintf("mcp-%d", os.Getpid())
 	}
-
-	// 3. Build the security engine from configuration (fail-closed: a malformed
-	// policy aborts startup). As in the shell binary, this configures the audit
-	// log, HMAC chain, RBAC entitlements, restricted mode, and Rego policy the
-	// MCP server enforces.
+	loaded := mcpAgentConfig{}
+	if toolsFile != "" {
+		var err error
+		loaded, err = loadAgentTools(toolsFile)
+		if err != nil {
+			return preparedMCP{}, 2, fmt.Errorf("agent tools file: %w", err)
+		}
+	}
+	sessionID := fmt.Sprintf("mcp-%d", time.Now().UnixNano())
 	eng, err := engine.New(engine.Config{
 		EngineConfig: security.EngineConfig{
 			PolicyPath:       cfg.PolicyPath,
@@ -58,33 +102,25 @@ func main() {
 			AuditLogToken:    cfg.AuditToken,
 			ChainPath:        cfg.AuditLogPath + ".chain",
 			ChainKeyPath:     filepath.Join(config.XDGDataHome(), "audit.key"),
-			SessionID:        fmt.Sprintf("mcp-%d", time.Now().UnixNano()),
+			SessionID:        sessionID,
 			EntitlementsPath: cfg.EntitlementsPath,
 			Restricted:       cfg.Restricted,
 		},
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "adssh-mcp: %v\n", err)
-		os.Exit(1)
+		return preparedMCP{}, 1, err
 	}
-
-	// TODO(engine-facade): the Starlark exec builtins (eval_starlark) and the
-	// run_shell interceptor still resolve the process-global default engine.
-	// Point the default at the engine we built so those tool paths authorize
-	// through the same policy and audit log as policyGate.
-	security.SetDefaultEngine(eng.Security())
-	if _, statErr := os.Stat(cfg.PolicyPath); statErr == nil {
-		eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath))
-	}
-
-	// 4. Build Starlark env (shared across all tool calls)
-	globals := starlark.StringDict{}
-	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: cfg.Restricted, Engine: eng.Security()})
-
-	// 5. Start MCP server
-	eng.Security().LogEvent("adssh-mcp server starting")
-	if err := serveMCP(cfg, eng, globals, mcpAgentConfig{ID: agentID, RequireDryRun: requireDryRun}); err != nil {
-		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
-		os.Exit(1)
-	}
+	sys.RegisterSession(&sys.Session{ID: sessionID, User: agentID})
+	return preparedMCP{
+		cfg:       cfg,
+		eng:       eng,
+		sessionID: sessionID,
+		agent: mcpAgentConfig{
+			ID:              agentID,
+			RequireDryRun:   requireDryRun,
+			SessionID:       sessionID,
+			Tools:           loaded.Tools,
+			ToolsConfigured: loaded.ToolsConfigured,
+		},
+	}, 0, nil
 }

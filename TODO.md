@@ -40,45 +40,21 @@ control, with a programmable and AI-native operations shell.
 - Policy examples `policy/examples/cert_principal.rego`, `lease_bounds.rego`, and `agent-destructive.rego`.
 - `docs/systemapi-embed.md` for the out-of-process systemapi break-glass path. In-process hosts stay on `docs/EMBEDDING.md`.
 - Defensive review in `docs/SECURITY_REVIEW.md` (2026-10-12). It is not a release sign-off.
+- `ADSSH_SAH` is a default-off `sah/1` stdio switch. `go test -count=1 -timeout 180s ./internal/sah/ ./internal/config/ .` passed. The response field `handoff` stays `not_wired`. The provision → enroll → execute handoff is not wired.
+- `identity device login` is a client of systemapi `controlplane/oauth.js`. It stores an opaque bearer in a mode `0600` file and sets the session user with no groups. Covered by `go test -count=1 -timeout 180s ./security/`.
+- Admin list routes for recordings, elevations, and leases, an audit line on every non-healthz admin request, and `docs/openapi/admin.yaml`. Same `./security/` run. `GET /v1/approvals` still returns the approval token to an admin-key holder.
+- Release cut procedure in `docs/release.md`, `scripts/render-homebrew-formula.sh`, and a tag-gated SLSA job pinned to `generator_generic_slsa3.yml@v2.1.0`. The formula script was run into `/tmp` and the output was deleted. The tap repository is not created. The generator is unmaintained and the build is not hermetic. No attestation is checked in.
+- Lease delivery through the environment, stdin, or inherited fd 3, with `policy/examples/lease_bounds.rego`. Same `./security/` run. The evidence digest is the chain entries, computed before the lease view is attached.
+- Four-eyes prompts use the public request id. `ADSSH_4EYES_WEBHOOK` can notice a new request and a policy denial of `gateway`, `lease`, or `elevate`. `??` reads `required_role`. Same `./security/` run.
+- MCP tool allowlist, one session id bound at process start, and governed admin and identity tools. `go test -count=1 -timeout 180s ./cmd/adssh-mcp/` passed. `admin_*` and `identity_*` stay out of `policy/bundles/ai-agent.rego`.
+- Docs site source in `docs/site/` for install, architecture, policy, gateway, leases, recordings, and MCP. It is not hosted. In-process embedding remains `docs/EMBEDDING.md`. The systemapi child path remains `docs/systemapi-embed.md`.
+- Post-hardening re-review appended to `docs/SECURITY_REVIEW.md` (2026-10-12). It names the tests above. It is not a tag sign-off.
 
 ## Next Up
 
-1. **Identity Hardening**
-   - The systemapi control plane has username-first device login. adssh still imports OIDC JWTs and does not run that flow. Certificate principals are already session principals and are evaluated as `input.groups`. The example is `policy/examples/cert_principal.rego`.
+The items above are in the tree. Publishing is a morning step. Do not treat this list as done.
 
-2. **Admin API Hardening**
-   - Approve and deny HTTP actions are done. Recordings, elevations, and leases still have no list store.
-   - MCP parity for the new `admin` and `identity` operations.
-   - HTTP API audit event details and OpenAPI schema.
-
-3. **Release Hardening**
-   - Publish a dedicated Homebrew tap repository.
-   - Document GPG signing key setup and release cut procedure.
-   - Add signed SLSA provenance through GitHub OIDC/keyless signing.
-
-4. **Lease Hardening**
-   - Provider metadata in evidence bundles.
-   - Stdin or file-descriptor injection in addition to env injection.
-   - TTL, source, and destination example: `policy/examples/lease_bounds.rego`.
-
-5. **Approval UX**
-   - Denial and timeout errors name the required approver. The pending request still prints the token to the operator who asked.
-   - Add optional webhook-driven approval links for gateway, lease, and elevation blocks.
-   - Make `??` infer required role from structured policy metadata where available.
-
-6. **Agent Governance**
-   - Approval-required destructive agent actions. `policy/bundles/ai-agent.rego` already denies a destructive MCP call unless `dry_run` is set or a human-approved elevation is present. `policy/examples/agent-destructive.rego` is the short form of that rule.
-   - Agent-specific entitlements and session binding.
-
-7. **Docs Site**
-   - Install and packaging docs.
-   - Architecture.
-   - Policy authoring.
-   - Gateway/bastion mode.
-   - Leases.
-   - Recordings/evidence.
-   - MCP/agent governance.
-   - In-process embedding is `docs/EMBEDDING.md`. The systemapi out-of-process path is `docs/systemapi-embed.md`. A public docs site is still not built.
-
-8. **Security Review Pass**
-   - Written in `docs/SECURITY_REVIEW.md`. Re-review gateway, lease, recording, elevation, and evidence before tagging a release. The 2026-10-12 note is not that sign-off.
+- Tag and push are not done. GPG signing needs `secrets.GPG_PRIVATE_KEY` on the Actions run. The SLSA provenance job has not run.
+- The Homebrew tap repository is not created. Render the formula only from a real `SHA256SUMS`.
+- `docs/site/` is source. It is not a hosted site.
+- The provision → enroll → execute handoff is not wired. Do not mark it implemented.

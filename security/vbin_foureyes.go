@@ -17,8 +17,8 @@ import (
 //	4eyes add <pattern> [--approver user] [--ttl seconds]  — add a rule
 //	4eyes remove <pattern>                                  — remove a rule
 //	4eyes list                                              — show rules + pending
-//	4eyes approve <token>                                   — approve a pending request
-//	4eyes deny <token>                                      — deny a pending request
+//	4eyes approve <request-id>                              — approve a pending request
+//	4eyes deny <request-id>                                 — deny a pending request
 //	4eyes pending                                           — list all pending requests with age
 //	4eyes test <command>                                    — dry-run: would this require approval?
 type fourEyesBinary struct{}
@@ -100,7 +100,7 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 	// ── approve ────────────────────────────────────────────────────────────
 	case "approve":
 		if len(args) < 3 {
-			return fmt.Errorf("4eyes approve: usage: 4eyes approve <token>")
+			return fmt.Errorf("4eyes approve: usage: 4eyes approve <request-id>")
 		}
 		token := args[2]
 		if err := engineFromContext(ctx).ApproveRequestAs(token, approvalActor(SessionIDFromContext(ctx))); err != nil {
@@ -112,7 +112,7 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 	// ── deny ───────────────────────────────────────────────────────────────
 	case "deny":
 		if len(args) < 3 {
-			return fmt.Errorf("4eyes deny: usage: 4eyes deny <token>")
+			return fmt.Errorf("4eyes deny: usage: 4eyes deny <request-id>")
 		}
 		token := args[2]
 		if err := engineFromContext(ctx).DenyRequestAs(token, approvalActor(SessionIDFromContext(ctx))); err != nil {
@@ -131,8 +131,8 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 			fmt.Fprintf(hc.Stdout, "%sNo pending requests.%s\n", ansiGray, ansiReset)
 			return nil
 		}
-		fmt.Fprintf(hc.Stdout, "%s%-12s  %-10s  %-12s  %-20s  %s%s\n",
-			ansiBold, "TOKEN", "REQUESTER", "HOST", "SUBMITTED", "COMMAND", ansiReset)
+		fmt.Fprintf(hc.Stdout, "%s%-34s  %-10s  %-12s  %-20s  %s%s\n",
+			ansiBold, "ID", "REQUESTER", "HOST", "SUBMITTED", "COMMAND", ansiReset)
 		fmt.Fprintln(hc.Stdout, strings.Repeat("─", 80))
 		now := time.Now()
 		for _, p := range pending {
@@ -146,8 +146,8 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 			if len(cmd) > 30 {
 				cmd = cmd[:27] + "..."
 			}
-			fmt.Fprintf(hc.Stdout, "%s%-12s%s  %-10s  %-12s  %-20s  %s\n",
-				ansiYellow, p.Token, ansiReset,
+			fmt.Fprintf(hc.Stdout, "%s%-34s%s  %-10s  %-12s  %-20s  %s\n",
+				ansiYellow, pendingPublicID(p), ansiReset,
 				p.Requester, host,
 				age.String()+" ago",
 				cmd)
@@ -220,19 +220,20 @@ func fourEyesList(ctx context.Context) error {
 		fmt.Fprintf(hc.Stdout, "%sNone.%s\n\n", ansiGray, ansiReset)
 		return nil
 	}
-	fmt.Fprintf(hc.Stdout, "%s%-12s  %-10s  %s%s\n",
-		ansiBold, "TOKEN", "REQUESTER", "COMMAND", ansiReset)
+	fmt.Fprintf(hc.Stdout, "%s%-34s  %-10s  %s%s\n",
+		ansiBold, "ID", "REQUESTER", "COMMAND", ansiReset)
 	fmt.Fprintln(hc.Stdout, strings.Repeat("─", 60))
 	for _, p := range pending {
 		cmd := p.Command
 		if len(cmd) > 34 {
 			cmd = cmd[:31] + "..."
 		}
-		fmt.Fprintf(hc.Stdout, "%s%-12s%s  %-10s  %s\n",
-			ansiYellow, p.Token, ansiReset, p.Requester, cmd)
+		id := pendingPublicID(p)
+		fmt.Fprintf(hc.Stdout, "%s%-34s%s  %-10s  %s\n",
+			ansiYellow, id, ansiReset, p.Requester, cmd)
 		fmt.Fprintf(hc.Stdout, "   %s4eyes approve %s%s  |  %s4eyes deny %s%s\n",
-			ansiGreen, p.Token, ansiReset,
-			ansiRed, p.Token, ansiReset)
+			ansiGreen, id, ansiReset,
+			ansiRed, id, ansiReset)
 	}
 	fmt.Fprintln(hc.Stdout)
 	return nil
@@ -247,8 +248,8 @@ func printFourEyesHelp(ctx context.Context) error {
   4eyes add <pattern> [--approver user] [--ttl seconds]
   4eyes remove <pattern>
   4eyes list
-  4eyes approve <token>
-  4eyes deny <token>
+  4eyes approve <request-id>
+  4eyes deny <request-id>
   4eyes pending
   4eyes test <command>
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	osuser "os/user"
+	"regexp"
 	"time"
 
 	"github.com/afterdarksys/adssh/internal/sys"
@@ -14,21 +15,21 @@ import (
 
 // PolicyContext is the input document passed to OPA evaluation.
 type PolicyContext struct {
-	User      string          `json:"user"`
-	Groups    []string        `json:"groups"`
-	Command   string          `json:"command"`
-	Args      []string        `json:"args"`
+	User    string   `json:"user"`
+	Groups  []string `json:"groups"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
 	// Capabilities are the capability groups the command touches (net, cloud,
 	// fileops, proc, ...). Empty for shell-layer commands; populated for
 	// governed Starlark builtins by ClassifyCapabilities. Surfaced to Rego as
 	// input.capabilities so policies can gate whole classes of operation.
-	Capabilities []string     `json:"capabilities,omitempty"`
-	Time      string          `json:"time"`
-	SessionID string          `json:"session_id"`
-	Elevation *ElevationClaim `json:"elevation,omitempty"`
-	Gateway   *GatewayClaim   `json:"gateway,omitempty"`
-	Lease     *LeaseClaim     `json:"lease,omitempty"`
-	Agent     *AgentClaim     `json:"agent,omitempty"`
+	Capabilities []string        `json:"capabilities,omitempty"`
+	Time         string          `json:"time"`
+	SessionID    string          `json:"session_id"`
+	Elevation    *ElevationClaim `json:"elevation,omitempty"`
+	Gateway      *GatewayClaim   `json:"gateway,omitempty"`
+	Lease        *LeaseClaim     `json:"lease,omitempty"`
+	Agent        *AgentClaim     `json:"agent,omitempty"`
 }
 
 type ElevationClaim struct {
@@ -53,13 +54,15 @@ type LeaseClaim struct {
 	Destination string   `json:"destination"`
 	TTLSeconds  int64    `json:"ttl_seconds"`
 	Command     []string `json:"command"`
+	Delivery    string   `json:"delivery"`
 }
 
 type AgentClaim struct {
-	ID     string `json:"id"`
-	Kind   string `json:"kind"`
-	Risk   string `json:"risk"`
-	DryRun bool   `json:"dry_run"`
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Risk      string `json:"risk"`
+	DryRun    bool   `json:"dry_run"`
+	SessionID string `json:"session_id"`
 }
 
 type PolicyContextExtra struct {
@@ -108,23 +111,30 @@ func LoadPolicy(path string) error {
 // deny_reason is surfaced whenever the policy sets it, including alongside
 // allow==true (it is an advisory message; the boolean `allow` is authoritative).
 func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
+	allowed, reason, _, err := e.evaluatePolicy(pctx)
+	return allowed, reason, err
+}
+
+var roleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,64}$`)
+
+func (e *Engine) evaluatePolicy(pctx PolicyContext) (bool, string, string, error) {
 	e.policyMu.RLock()
 	defer e.policyMu.RUnlock()
 
 	// No policy loaded => allow-by-default (see contract above).
 	if e.preparedQuery == nil {
-		return true, "", nil
+		return true, "", "", nil
 	}
 
 	ctx := context.Background()
 	input := map[string]interface{}{
-		"user":       pctx.User,
-		"groups":     pctx.Groups,
-		"command":    pctx.Command,
-		"args":       pctx.Args,
+		"user":         pctx.User,
+		"groups":       pctx.Groups,
+		"command":      pctx.Command,
+		"args":         pctx.Args,
 		"capabilities": pctx.Capabilities,
-		"time":       pctx.Time,
-		"session_id": pctx.SessionID,
+		"time":         pctx.Time,
+		"session_id":   pctx.SessionID,
 	}
 	if pctx.Elevation != nil {
 		input["elevation"] = map[string]interface{}{
@@ -151,20 +161,22 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 			"destination": pctx.Lease.Destination,
 			"ttl_seconds": pctx.Lease.TTLSeconds,
 			"command":     pctx.Lease.Command,
+			"delivery":    pctx.Lease.Delivery,
 		}
 	}
 	if pctx.Agent != nil {
 		input["agent"] = map[string]interface{}{
-			"id":      pctx.Agent.ID,
-			"kind":    pctx.Agent.Kind,
-			"risk":    pctx.Agent.Risk,
-			"dry_run": pctx.Agent.DryRun,
+			"id":         pctx.Agent.ID,
+			"kind":       pctx.Agent.Kind,
+			"risk":       pctx.Agent.Risk,
+			"dry_run":    pctx.Agent.DryRun,
+			"session_id": pctx.Agent.SessionID,
 		}
 	}
 
 	results, err := e.preparedQuery.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
-		return false, "", fmt.Errorf("policy evaluation failed: %w", err)
+		return false, "", "", fmt.Errorf("policy evaluation failed: %w", err)
 	}
 
 	// From here a policy IS loaded, so the posture is DENY-BY-DEFAULT: any
@@ -175,15 +187,16 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 	// is the defensive "no decision" case, not the allow-all case; an allow-all
 	// policy carries `default allow = true` and produces allow==true below.)
 	if len(results) == 0 {
-		return false, "policy: no decision (empty result set)", nil
+		return false, "policy: no decision (empty result set)", "", nil
 	}
 
 	// The decision document must be an object (the adssh.authz package). Anything
 	// else is malformed — deny.
 	resultMap, ok := results[0].Expressions[0].Value.(map[string]interface{})
 	if !ok {
-		return false, "policy: malformed decision document", nil
+		return false, "policy: malformed decision document", "", nil
 	}
+	role := decisionRequiredRole(resultMap)
 
 	// deny_reason is advisory; extract it up front so denials can surface it.
 	denyReason := ""
@@ -197,15 +210,35 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 		if denyReason == "" {
 			denyReason = "policy: deny by default (no allow decision)"
 		}
-		return false, denyReason, nil
+		return false, denyReason, role, nil
 	}
 	allowed, isBool := allowVal.(bool)
 	if !isBool {
 		// FIX #2: a non-boolean `allow` must never be ignored — fail closed.
-		return false, "policy: non-boolean allow", nil
+		return false, "policy: non-boolean allow", role, nil
 	}
 
-	return allowed, denyReason, nil
+	return allowed, denyReason, role, nil
+}
+
+func decisionRequiredRole(resultMap map[string]interface{}) string {
+	if role, ok := roleFromValue(resultMap["required_role"]); ok {
+		return role
+	}
+	meta, _ := resultMap["metadata"].(map[string]interface{})
+	if meta == nil {
+		return ""
+	}
+	role, _ := roleFromValue(meta["required_role"])
+	return role
+}
+
+func roleFromValue(value interface{}) (string, bool) {
+	text, ok := value.(string)
+	if !ok || !roleNamePattern.MatchString(text) {
+		return "", false
+	}
+	return text, true
 }
 
 // EvaluatePolicy evaluates the loaded Rego policy against the given context.

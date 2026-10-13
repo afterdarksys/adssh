@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -18,9 +21,22 @@ import (
 )
 
 type mcpAgentConfig struct {
-	ID            string
-	RequireDryRun bool
+	ID              string
+	RequireDryRun   bool
+	SessionID       string
+	Tools           []string
+	ToolsConfigured bool
 }
+
+// Threats: a configured tools file is an allowlist bound at process start.
+// A missing, unreadable, non-regular, oversized, or malformed file fails
+// closed. An empty file denies every tool. Unset means policy still decides.
+// Tool arguments cannot add a name to the allowlist. This does not grant a
+// shell and does not wire provision, enroll, or execute.
+
+const agentToolsFileMaxBytes = 64 * 1024
+
+var agentToolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,64}$`)
 
 // serveMCP creates the MCP server, registers all tools, and starts stdio transport.
 // Every tool is gated by the engine's Rego policy via policyGate.
@@ -116,6 +132,8 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 		serializedHandler(toolMu, policyGate(eng, "audit_log", handleAuditLog(cfg.AuditLogPath), agent)),
 	)
 
+	registerGovernedAdminTools(s, toolMu, eng, agent)
+
 	eng.Security().LogEvent("adssh-mcp serving on stdio")
 	return server.ServeStdio(s)
 }
@@ -140,24 +158,93 @@ func policyGate(eng *engine.Engine, toolName string, handler server.ToolHandlerF
 		}
 	}
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if !agentToolEntitled(agent, toolName) {
+			return mcp.NewToolResultError("agent: tool is not entitled"), nil
+		}
 		args := append([]string{toolName}, policyArgs(req)...)
 		risk := classifyAgentRisk(toolName, req)
 		dryRun := requestDryRun(req)
 		if agent.RequireDryRun && risk == "destructive" && !dryRun {
 			return mcp.NewToolResultError("agent: destructive action requires dry_run=true"), nil
 		}
-		if err := sec.AuthorizeCommandWithExtra(args, "", security.PolicyContextExtra{
+		sessionID := ""
+		if agent.SessionID != "" {
+			sessionID = agent.SessionID
+			ctx = security.WithSessionID(ctx, agent.SessionID)
+		}
+		if err := sec.AuthorizeCommandWithExtra(args, sessionID, security.PolicyContextExtra{
 			Agent: &security.AgentClaim{
-				ID:     agent.ID,
-				Kind:   "mcp",
-				Risk:   risk,
-				DryRun: dryRun,
+				ID:        agent.ID,
+				Kind:      "mcp",
+				Risk:      risk,
+				DryRun:    dryRun,
+				SessionID: agent.SessionID,
 			},
 		}); err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		return handler(context.WithValue(ctx, mcpSecurityEngineContextKey{}, sec), req)
+		ctx = context.WithValue(ctx, mcpSecurityEngineContextKey{}, sec)
+		return handler(ctx, req)
 	}
+}
+
+func agentToolEntitled(agent mcpAgentConfig, toolName string) bool {
+	if !agent.ToolsConfigured {
+		return true
+	}
+	for _, name := range agent.Tools {
+		if name == toolName {
+			return true
+		}
+	}
+	return false
+}
+
+// selectAgentToolsFile returns the tools-file path. A present flag wins,
+// including an empty value, which means the allowlist is not configured.
+func selectAgentToolsFile(args []string, envValue string) string {
+	selected := ""
+	flagSeen := false
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--agent-tools-file" && i+1 < len(args) {
+			selected = args[i+1]
+			flagSeen = true
+			i++
+		}
+	}
+	if flagSeen {
+		return selected
+	}
+	return envValue
+}
+
+func loadAgentTools(path string) (mcpAgentConfig, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return mcpAgentConfig{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return mcpAgentConfig{}, errors.New("agent tools file must be a regular file")
+	}
+	if info.Size() > agentToolsFileMaxBytes {
+		return mcpAgentConfig{}, errors.New("agent tools file is too large")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return mcpAgentConfig{}, err
+	}
+	tools := []string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !agentToolNamePattern.MatchString(line) {
+			return mcpAgentConfig{}, errors.New("agent tools file: invalid tool name")
+		}
+		tools = append(tools, line)
+	}
+	return mcpAgentConfig{Tools: tools, ToolsConfigured: true}, nil
 }
 
 func requestDryRun(req mcp.CallToolRequest) bool {
@@ -176,12 +263,12 @@ func requestDryRun(req mcp.CallToolRequest) bool {
 }
 
 func classifyAgentRisk(toolName string, req mcp.CallToolRequest) string {
-	switch toolName {
-	case "list_sessions", "audit_log", "cloud_query":
+	switch {
+	case toolName == "list_sessions" || toolName == "audit_log" || toolName == "cloud_query" || toolName == "admin_explain" || toolName == "identity_status" || strings.HasPrefix(toolName, "admin_list_"):
 		return "read"
-	case "container_exec", "eval_starlark":
+	case toolName == "container_exec" || toolName == "eval_starlark" || toolName == "admin_approve" || toolName == "admin_deny" || toolName == "identity_device_login":
 		return "mutable"
-	case "run_shell":
+	case toolName == "run_shell":
 		command, _ := req.GetArguments()["command"].(string)
 		if shellCommandLooksDestructive(command) {
 			return "destructive"

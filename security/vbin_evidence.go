@@ -23,16 +23,17 @@ type EvidenceFilter struct {
 }
 
 type EvidenceBundle struct {
-	Version      int            `json:"version"`
-	GeneratedAt  string         `json:"generated_at"`
-	Verified     bool           `json:"verified"`
-	Ledger       string         `json:"ledger"`
-	ChainHead    string         `json:"chain_head,omitempty"`
-	DigestSHA256 string         `json:"digest_sha256"`
-	Filter       EvidenceFilter `json:"filter"`
-	Entries      []ChainEntry   `json:"entries"`
-	Recordings   []RecordingRef `json:"recordings,omitempty"`
-	GatewayLog   *GatewayLogRef `json:"gateway_log,omitempty"`
+	Version      int             `json:"version"`
+	GeneratedAt  string          `json:"generated_at"`
+	Verified     bool            `json:"verified"`
+	Ledger       string          `json:"ledger"`
+	ChainHead    string          `json:"chain_head,omitempty"`
+	DigestSHA256 string          `json:"digest_sha256"`
+	Filter       EvidenceFilter  `json:"filter"`
+	Entries      []ChainEntry    `json:"entries"`
+	Recordings   []RecordingRef  `json:"recordings,omitempty"`
+	GatewayLog   *GatewayLogRef  `json:"gateway_log,omitempty"`
+	Leases       []LeaseEvidence `json:"leases,omitempty"`
 }
 
 type RecordingRef struct {
@@ -135,6 +136,7 @@ func (e *Engine) BuildEvidence(filter EvidenceFilter) (EvidenceBundle, error) {
 		Entries:      entries,
 		Recordings:   recordings,
 		GatewayLog:   gatewayLog,
+		Leases:       leasesFromEntries(entries),
 	}, nil
 }
 

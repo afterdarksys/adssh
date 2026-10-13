@@ -133,12 +133,28 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 	// whole classes (cloud, fileops, proc, ...). Nil for shell-layer commands;
 	// populated for governed Starlark builtins (starlark.* paths).
 	pctx.Capabilities = ClassifyCapabilities(args[0])
-	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
+	allowed, reason, requiredRole, policyErr := e.evaluatePolicy(pctx)
 	if policyErr != nil {
 		e.rememberDeniedCommand(sessionID, args)
 		return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
 	}
 	if !allowed {
+		if args[0] == "gateway" || args[0] == "lease" || args[0] == "elevate" {
+			approver := requiredRole
+			if approver == "" {
+				approver = "unspecified"
+			}
+			commandName := args[0]
+			go func() {
+				_ = sendApprovalNotice(approvalNotice{
+					Event:            "policy_denied",
+					Kind:             commandName,
+					Command:          commandName,
+					RequiredApprover: approver,
+					Fingerprint:      fingerprintSecret(commandName),
+				})
+			}()
+		}
 		e.LogPolicyDecision(pctx.User, cmd, false, reason)
 		e.rememberDeniedCommand(sessionID, args)
 		if reason != "" {

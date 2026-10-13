@@ -12,14 +12,15 @@ type ExplanationStage struct {
 }
 
 type CommandExplanation struct {
-	Outcome   string             `json:"outcome"`
-	User      string             `json:"user,omitempty"`
-	Groups    []string           `json:"groups,omitempty"`
-	SessionID string             `json:"session_id,omitempty"`
-	Command   string             `json:"command"`
-	Args      []string           `json:"args,omitempty"`
-	Stages    []ExplanationStage `json:"stages"`
-	NextSteps []string           `json:"next_steps,omitempty"`
+	Outcome      string             `json:"outcome"`
+	User         string             `json:"user,omitempty"`
+	Groups       []string           `json:"groups,omitempty"`
+	SessionID    string             `json:"session_id,omitempty"`
+	RequiredRole string             `json:"required_role,omitempty"`
+	Command      string             `json:"command"`
+	Args         []string           `json:"args,omitempty"`
+	Stages       []ExplanationStage `json:"stages"`
+	NextSteps    []string           `json:"next_steps,omitempty"`
 }
 
 // ExplainCommand evaluates every governance stage without executing the
@@ -42,7 +43,10 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 		explanation.Outcome = "denied"
 	}
 
-	allowed, reason, err := e.EvaluatePolicy(pctx)
+	allowed, reason, role, err := e.evaluatePolicy(pctx)
+	if role != "" {
+		explanation.RequiredRole = role
+	}
 	switch {
 	case err != nil:
 		deny("policy", err.Error())
@@ -110,7 +114,11 @@ func suggestNextSteps(explanation CommandExplanation) []string {
 		switch stage.Name {
 		case "policy":
 			if stage.Status == "denied" {
-				steps = append(steps, `request the required role with: elevate request <role> --for 10m --reason "<ticket/reason>"`)
+				role := explanation.RequiredRole
+				if role == "" {
+					role = "<role>"
+				}
+				steps = append(steps, fmt.Sprintf(`request the required role with: elevate request %s --for 10m --reason "<ticket/reason>"`, role))
 			}
 		case "entitlements":
 			if stage.Status == "denied" {

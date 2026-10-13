@@ -19,16 +19,18 @@ type leaseBinary struct{}
 
 func (leaseBinary) Name() string { return "lease" }
 func (leaseBinary) Description() string {
-	return "Inject an environment, private-file, or vault-backed secret into one governed command with a bounded TTL"
+	return "Inject a secret into one governed command through the environment, stdin, or an inherited file descriptor, with a bounded TTL"
 }
 func (leaseBinary) Usage() string {
-	return "lease --from env:NAME|file:path|vault:path?field=KEY|aws-sm:name?region=REGION|azure-kv:vault/name|gcp-sm:project/name --as DEST [--ttl duration] -- command [args...]"
+	return "lease --from env:NAME|file:path|vault:path?field=KEY|aws-sm:name?region=REGION|azure-kv:vault/name|gcp-sm:project/name --via env|stdin|fd [--as DEST] [--ttl duration] -- command [args...]"
 }
 
 func (leaseBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	source := ""
 	destination := ""
+	asSet := false
+	via := "env"
 	ttl := 5 * time.Minute
 	delimiter := -1
 	for i := 1; i < len(args); i++ {
@@ -49,6 +51,13 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 			}
 			i++
 			destination = args[i]
+			asSet = true
+		case "--via":
+			if i+1 >= len(args) {
+				return fmt.Errorf("lease: --via requires env, stdin, or fd")
+			}
+			i++
+			via = args[i]
 		case "--ttl":
 			if i+1 >= len(args) {
 				return fmt.Errorf("lease: --ttl requires a duration")
@@ -63,11 +72,30 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 			return fmt.Errorf("lease: unknown option %q", args[i])
 		}
 	}
-	if source == "" || destination == "" || delimiter < 0 || delimiter+1 >= len(args) {
-		return fmt.Errorf("lease: usage: %s", leaseBinary{}.Usage())
+	switch via {
+	case "env", "stdin", "fd":
+	default:
+		return fmt.Errorf("lease: --via must be env, stdin, or fd")
 	}
-	if !validEnvironmentName(destination) {
-		return fmt.Errorf("lease: invalid destination environment variable %q", destination)
+	if via == "env" {
+		if !asSet || destination == "" || delimiter < 0 || delimiter+1 >= len(args) || source == "" {
+			return fmt.Errorf("lease: usage: %s", leaseBinary{}.Usage())
+		}
+		if !validEnvironmentName(destination) {
+			return fmt.Errorf("lease: invalid destination environment variable %q", destination)
+		}
+	} else {
+		if asSet {
+			return fmt.Errorf("lease: --as is only valid with --via env")
+		}
+		if source == "" || delimiter < 0 || delimiter+1 >= len(args) {
+			return fmt.Errorf("lease: usage: %s", leaseBinary{}.Usage())
+		}
+		if via == "stdin" {
+			destination = "stdin"
+		} else {
+			destination = "fd:3"
+		}
 	}
 	sourceKind, sourceName, found := strings.Cut(source, ":")
 	if !found || sourceName == "" {
@@ -85,11 +113,12 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 		Destination: destination,
 		TTLSeconds:  int64(ttl.Seconds()),
 		Command:     commandArgs,
+		Delivery:    via,
 	}
 	eng := engineFromContext(ctx)
 	sessionID := SessionIDFromContext(ctx)
-	eng.LogEvent(fmt.Sprintf("LEASE_REQUEST id=%s session=%s source_type=%s source=%s as=%s ttl=%s command=%s",
-		leaseID, sessionID, sourceKind, sourceName, destination, ttl, strings.Join(commandArgs, " ")))
+	eng.LogEvent(fmt.Sprintf("LEASE_REQUEST id=%s session=%s source_type=%s source=%s as=%s delivery=%s ttl=%s command=%s",
+		leaseID, sessionID, sourceKind, sourceName, destination, via, ttl, strings.Join(commandArgs, " ")))
 	if err := eng.AuthorizeCommandWithExtra(commandArgs, sessionID, PolicyContextExtra{Lease: leaseClaim}); err != nil {
 		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=policy-denied", leaseID))
 		return err
@@ -104,24 +133,48 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=empty-secret", leaseID))
 		return fmt.Errorf("lease: secret source is empty")
 	}
-	if bytes.IndexByte(secret, 0) >= 0 {
+	if via == "env" && bytes.IndexByte(secret, 0) >= 0 {
 		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=nul-secret", leaseID))
 		return fmt.Errorf("lease: secret contains a NUL byte and cannot be placed in an environment variable")
 	}
 
 	leaseCtx, cancel := context.WithTimeout(ctx, ttl)
 	defer cancel()
-	secretValue := string(secret)
 	var unsetEnv []string
+	env := map[string]string{}
+	var stdin io.Reader
+	var extra []*os.File
 	if sourceKind == "env" {
 		unsetEnv = []string{sourceName}
+	}
+	switch via {
+	case "env":
+		env[destination] = string(secret)
+	case "stdin":
+		stdin = bytes.NewReader(secret)
+	case "fd":
+		readEnd, writeEnd, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=delivery-error", leaseID))
+			return fmt.Errorf("lease: open secret pipe: %w", pipeErr)
+		}
+		secretCopy := append([]byte(nil), secret...)
+		go func() {
+			defer zeroBytes(secretCopy)
+			_, _ = writeEnd.Write(secretCopy)
+			_ = writeEnd.Close()
+		}()
+		extra = []*os.File{readEnd}
+		defer readEnd.Close()
 	}
 	eng.LogEvent(fmt.Sprintf("LEASE_GRANT id=%s", leaseID))
 	result, err := eng.runGovernedCommand(leaseCtx, sessionID, governedCommand{
 		Args:          commandArgs,
 		Dir:           hc.Dir,
-		Env:           map[string]string{destination: secretValue},
+		Env:           env,
 		UnsetEnv:      unsetEnv,
+		Stdin:         stdin,
+		ExtraFiles:    extra,
 		Lease:         leaseClaim,
 		Preauthorized: true,
 	}, nil)

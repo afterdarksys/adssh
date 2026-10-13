@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -30,6 +31,13 @@ func (h *adminHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
+	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	h.serveAuthorized(rec, r)
+	h.engine.LogEvent(fmt.Sprintf("ADMIN_HTTP method=%s path=%s status=%d key_fp=%s",
+		r.Method, r.URL.Path, rec.status, presentedKeyFingerprint(r)))
+}
+
+func (h *adminHTTPHandler) serveAuthorized(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(r) {
 		writeAdminJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
@@ -54,9 +62,66 @@ func (h *adminHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleExplain(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/evidence":
 		h.handleEvidence(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/recordings":
+		items, err := h.engine.ListRecordings()
+		writeAdminList(w, items, err)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/elevations":
+		items, err := h.engine.ListElevations()
+		writeAdminList(w, items, err)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/leases":
+		items, err := h.engine.ListLeases()
+		writeAdminList(w, items, err)
 	default:
 		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	}
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	wrote  bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.wrote {
+		return
+	}
+	s.wrote = true
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if !s.wrote {
+		s.WriteHeader(http.StatusOK)
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func presentedKeyFingerprint(r *http.Request) string {
+	key := r.Header.Get("X-ADSSH-API-Key")
+	if key == "" {
+		auth := r.Header.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			key = strings.TrimPrefix(auth, "Bearer ")
+		}
+	}
+	if key == "" {
+		return "absent"
+	}
+	return fingerprintSecret(key)
+}
+
+func writeAdminList(w http.ResponseWriter, value any, err error) {
+	if err != nil {
+		if errors.Is(err, errChainUnavailable) {
+			writeAdminJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "chain_unavailable"})
+			return
+		}
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, value)
 }
 
 // Threats: an empty admin key must not authenticate anyone, and a raw

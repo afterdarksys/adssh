@@ -30,8 +30,11 @@ import (
 //	                           (no token => agent refuses to start; fail closed)
 //	ADSSH_AGENT_TASKS=/path    Instrumentation task allowlist YAML
 //	                           (default: ~/.adssh/instrument-tasks.yaml)
+//	ADSSH_SAH=1                Enable the sah/1 stdio subcommand (default off).
+//	                           Unset, "on", and any other value stay off.
 type AppConfig struct {
 	Restricted         bool
+	SAHEnabled         bool
 	ServeAddr          string
 	ScriptPath         string
 	IsLoginShell       bool
@@ -60,6 +63,7 @@ func LoadFromEnv() AppConfig {
 
 	cfg := AppConfig{
 		Restricted:         isTruthy(os.Getenv("ADSSH_RESTRICTED")),
+		SAHEnabled:         isTruthy(os.Getenv("ADSSH_SAH")),
 		ServeAddr:          os.Getenv("ADSSH_SERVE"),
 		EntitlementsPath:   os.Getenv("ADSSH_ENTITLEMENTS"),
 		PolicyPath:         envOr("ADSSH_POLICY", filepath.Join(cfgDir, "policy.rego")),

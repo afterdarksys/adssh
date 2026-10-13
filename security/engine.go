@@ -237,3 +237,16 @@ func (e *Engine) compilePolicy(name string, data []byte) error {
 	e.preparedQuery = &query
 	return nil
 }
+
+// PolicyLoaded reports whether a Rego policy is installed. The shell's
+// allow-by-default posture stays in EvaluatePolicy. Callers that must fail
+// closed, including sah/1 execute, check this instead of treating a nil
+// policy as allow.
+func (e *Engine) PolicyLoaded() bool {
+	if e == nil {
+		return false
+	}
+	e.policyMu.RLock()
+	defer e.policyMu.RUnlock()
+	return e.preparedQuery != nil
+}

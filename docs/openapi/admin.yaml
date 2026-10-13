@@ -1,0 +1,115 @@
+openapi: 3.0.3
+info:
+  title: adssh local admin API
+  version: "0.0.0"
+  description: |
+    Local admin HTTP API served by `adssh admin serve`. This is not a second
+    public API. The default listen address is 127.0.0.1:8787. `--listen` can
+    bind a wider address. Every path except /healthz requires the admin API
+    key. The key is compared by SHA-256 of both sides, then a constant-time
+    compare. Audit events record key_fp, the SHA-256 fingerprint, and do not
+    record the key or the request body.
+
+    GET /v1/approvals returns the pending handler objects, including the
+    approval token, to a caller who already holds the admin API key. The MCP
+    tool admin_list_approvals does not. Anyone who can read the 0600 pending
+    file can also read the token.
+paths:
+  /healthz:
+    get:
+      summary: Unauthenticated liveness. Not written to the admin audit event.
+      responses:
+        "200":
+          description: ok
+  /v1/sessions:
+    get:
+      summary: Active sessions.
+      responses:
+        "200":
+          description: Session list.
+        "401":
+          description: Missing or wrong API key.
+  /v1/gateways:
+    get:
+      summary: Gateway listeners started by this process.
+      responses:
+        "200":
+          description: Gateway list.
+        "401":
+          description: Missing or wrong API key.
+  /v1/approvals:
+    get:
+      summary: Pending four-eyes requests, including the stored token.
+      responses:
+        "200":
+          description: Pending requests from this handler's engine.
+        "401":
+          description: Missing or wrong API key.
+  /v1/approvals/approve:
+    post:
+      summary: Approve one pending request as a distinct approver.
+      responses:
+        "200":
+          description: Approved.
+        "400":
+          description: Invalid token, empty approver, self-approval, or wrong approver.
+        "401":
+          description: Missing or wrong API key.
+  /v1/approvals/deny:
+    post:
+      summary: Deny one pending request as a distinct approver.
+      responses:
+        "200":
+          description: Denied.
+        "400":
+          description: Invalid token, empty approver, self-deny, or wrong approver.
+        "401":
+          description: Missing or wrong API key.
+  /v1/explain:
+    post:
+      summary: Explain a command without executing it.
+      responses:
+        "200":
+          description: Explanation, including required_role when the policy sets one.
+        "400":
+          description: Missing command or invalid JSON.
+        "401":
+          description: Missing or wrong API key.
+  /v1/evidence:
+    post:
+      summary: Export a verified evidence bundle.
+      responses:
+        "200":
+          description: Bundle. The digest covers chain entries. Lease metadata is attached after the digest.
+        "400":
+          description: Chain missing, unverified, or invalid filter.
+        "401":
+          description: Missing or wrong API key.
+  /v1/recordings:
+    get:
+      summary: Regular JSONL recording files. Symlinks are skipped. A missing directory is an empty list.
+      responses:
+        "200":
+          description: Recording list.
+        "401":
+          description: Missing or wrong API key.
+  /v1/elevations:
+    get:
+      summary: Elevation history from a verified chain, plus active in-memory elevations when that chain file exists.
+      responses:
+        "200":
+          description: Elevation list. A missing chain file is an empty list.
+        "401":
+          description: Missing or wrong API key.
+        "503":
+          description: chain_unavailable when no chain path is configured.
+  /v1/leases:
+    get:
+      summary: Lease request metadata from a verified chain. Command text and secret values are not included.
+      responses:
+        "200":
+          description: Lease list. A missing chain file is an empty list. An old request without delivery is reported as env.
+        "401":
+          description: Missing or wrong API key.
+        "503":
+          description: chain_unavailable when no chain path is configured.

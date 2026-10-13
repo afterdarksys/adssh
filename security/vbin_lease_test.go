@@ -3,8 +3,10 @@ package security
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -16,13 +18,51 @@ func TestLeaseHelperProcess(t *testing.T) {
 	if os.Getenv("ADSSH_LEASE_HELPER") != "1" {
 		return
 	}
-	if os.Getenv("TOKEN") != "super-secret" {
-		os.Exit(3)
+	switch os.Getenv("ADSSH_LEASE_HELPER_MODE") {
+	case "", "env":
+		if os.Getenv("TOKEN") != "super-secret" {
+			os.Exit(3)
+		}
+		if _, inherited := os.LookupEnv("ADSSH_LEASE_SOURCE"); inherited {
+			os.Exit(4)
+		}
+		os.Exit(0)
+	case "stdin":
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			os.Exit(5)
+		}
+		if os.Getenv("ADSSH_LEASE_EXPECT_NUL") == "1" {
+			if !bytes.Equal(data, []byte("super-\x00secret")) {
+				os.Exit(6)
+			}
+			os.Exit(0)
+		}
+		if string(data) != "super-secret" {
+			os.Exit(6)
+		}
+		os.Exit(0)
+	case "fd":
+		leaseFD := os.NewFile(3, "lease-secret")
+		data, err := io.ReadAll(leaseFD)
+		_ = leaseFD.Close()
+		if err != nil {
+			os.Exit(7)
+		}
+		if raw := os.Getenv("ADSSH_LEASE_EXPECT_LEN"); raw != "" {
+			want, convErr := strconv.Atoi(raw)
+			if convErr != nil || len(data) != want {
+				os.Exit(8)
+			}
+			os.Exit(0)
+		}
+		if string(data) != "super-secret" {
+			os.Exit(8)
+		}
+		os.Exit(0)
+	default:
+		os.Exit(9)
 	}
-	if _, inherited := os.LookupEnv("ADSSH_LEASE_SOURCE"); inherited {
-		os.Exit(4)
-	}
-	os.Exit(0)
 }
 
 func runLeaseVBin(t *testing.T, eng *Engine, args []string) (string, error) {

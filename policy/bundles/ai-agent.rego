@@ -8,6 +8,8 @@ default allow = false
 default deny_reason = "AI agent policy denied this operation"
 
 safe_commands := {"ls", "cat", "pwd", "jq", "yq", "http", "why", "??", "audit", "evidence"}
+# admin_* and identity_* tools are intentionally absent from mcp_tools.
+# A tool that is not listed here fails closed.
 mcp_tools := {"eval_starlark", "run_shell", "list_sessions", "cloud_query", "audit_log"}
 
 allow {
