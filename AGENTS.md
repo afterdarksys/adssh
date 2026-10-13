@@ -1,6 +1,6 @@
 # AGENTS.md
 
-adssh is the execution shell. The brand is sah (Service Automation Hum). This repo stays on the development name.
+adssh is the execution shell. The brand is sah (Service Automation Hub). The hub encompasses the platform and the suite of utilities. This repo stays on the development name.
 
 Architecture of the shell, MCP server, policy, and build commands is `CLAUDE.md`. Suite membership is `docs/sah-suite.md`. The cross-repo contract is `~/development/systemapi.io/docs/sah-suite.md`. If this file and `CLAUDE.md` disagree about the suite, this file wins. `CLAUDE.md` still wins for how the shell is built.
 

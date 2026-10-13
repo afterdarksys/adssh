@@ -2,7 +2,7 @@
 
 Date: 2026-10-12
 
-`adssh` is the development name of the shell. The brand is **sah**, short for **Service Automation Hum**.
+`adssh` is the development name of the shell. The brand is **sah**, short for **Service Automation Hub**. The hub encompasses the platform and the suite of utilities.
 
 These directories exist under `~/development/`. Created 2026-10-12. On 2026-10-12 Ryan asked for the defined tools to be built. `opensah`, `sahlink`, `sahconnect`, and `sahapi` contain those tools. `sahcore` is still unassigned and is documentation only.
 

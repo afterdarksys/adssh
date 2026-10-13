@@ -2,7 +2,7 @@
 
 These pages are the source for a docs site. They are not hosted. Publishing them is a separate morning step.
 
-adssh is the execution shell in the SAH suite. SAH means Service Automation Hum. The development name stays `adssh`. The binary stays `adssh`, the MCP binary stays `adssh-mcp`, the module stays `github.com/afterdarksys/adssh`, config stays `~/.adssh`, and the GitHub repository stays `afterdarksys/adssh`.
+adssh is the execution shell in the SAH suite. SAH means Service Automation Hub. The hub encompasses the platform and the suite of utilities. The development name stays `adssh`. The binary stays `adssh`, the MCP binary stays `adssh-mcp`, the module stays `github.com/afterdarksys/adssh`, config stays `~/.adssh`, and the GitHub repository stays `afterdarksys/adssh`.
 
 The suite contract is `docs/sah-suite.md` in this repository and `docs/sah-suite.md` in systemapi. If a brochure README and that contract disagree, the contract wins.
 

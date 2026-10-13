@@ -118,7 +118,7 @@ defaults), including `ADSSH_RESTRICTED`, `ADSSH_SERVE`, `ADSSH_POLICY`, `ADSSH_E
 
 ## SAH suite
 
-**sah** means Service Automation Hum. This repository stays `adssh`.
+**sah** means Service Automation Hub. The hub encompasses the platform and the suite of utilities. This repository stays `adssh`.
 
 Suite rules are `AGENTS.md`. The local contract is `docs/sah-suite.md`. The cross-repo contract is `~/development/systemapi.io/docs/sah-suite.md`. If this file and `AGENTS.md` disagree about the suite, `AGENTS.md` wins. This file remains the architecture of the shell.
 
