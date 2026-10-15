@@ -421,6 +421,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// 4b. Shell history slice
 	shellHistory := make([]string, 0, 256)
 
+	// Bracketed paste is filtered before the line editor. The runner keeps the
+	// original reader so a foreground command still reads the real stdin.
+	heldPaste := &pasteState{}
+	editorIn := newPasteReader(in, heldPaste)
+
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:            "adssh> ",
 		HistoryFile:       historyFile,
@@ -429,7 +434,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		HistorySearchFold: true,
 		AutoComplete:      &adsshCompleter{globals: globals},
 		Listener:          newAdsshListener(&shellHistory),
-		Stdin:             in,
+		Stdin:             editorIn,
 		Stdout:            out,
 		Stderr:            errOut,
 	})
@@ -540,6 +545,13 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// (interp.New always resolves runner.Dir to the process cwd when unset).
 	dirs.Init(runner.Dir)
 
+	// Ask the terminal to bracket pastes. A pipe has no way to mark a paste,
+	// so the filter stays idle unless this session's output is a real tty.
+	if tty := bracketPasteTTY(out); tty != nil {
+		_, _ = io.WriteString(tty, "\x1b[?2004h")
+		defer func() { _, _ = io.WriteString(tty, "\x1b[?2004l") }()
+	}
+
 	// 4c. REPL start time for $SECONDS
 	replStart := time.Now()
 
@@ -596,6 +608,20 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+
+		// Review tokens and safepaste run before history, alias, or dispatch.
+		// A held paste is not a command until the operator runs it.
+		if handlePasteLine(line, heldPaste, pasteRunner{
+			state:    sessState,
+			runner:   runner,
+			thread:   thread,
+			globals:  globals,
+			out:      out,
+			errOut:   errOut,
+			markBusy: commandRunning.Store,
+		}) {
 			continue
 		}
 

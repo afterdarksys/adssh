@@ -120,6 +120,8 @@ adssh> greet("world")
 "hello world"
 ```
 
+A bracketed paste that contains a newline is held. The editor inserts `[paste held: N lines]` and does not run it. `safepaste show` prints the paste, `safepaste run` executes it through the same policy gate as a typed command, and `safepaste drop` discards it. A paste with a control byte other than tab or newline, or a paste over 1 MiB, is discarded. A terminal that does not bracket pastes looks the same as typing.
+
 ## Starlark namespaces
 
 | Namespace | What it does |
