@@ -509,6 +509,7 @@ VIRTUAL BINARIES (type 'vbins' for full list)
 
 ENVIRONMENT VARIABLES
   ADSSH_SAH               sah/1 stdio switch (1/true/yes; default off)
+  ADSSH_GIT_PROMPT        Git branch in the \g prompt escape (1/true/yes/on; default off)
   ADSSH_RESTRICTED        Enable restricted mode (true/false)
   ADSSH_SERVE             SSH server address (:2222)
   ADSSH_GUARD             SSH listener jail switch (off/on; unset follows guard.yaml)

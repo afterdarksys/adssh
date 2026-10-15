@@ -245,7 +245,7 @@ func jobIDArg(args []string) (int, error) {
 // expandPrompt expands bash/zsh-style prompt escape sequences. cwd is the
 // session's current working directory (the runner's Dir), so per-session
 // prompts reflect each session's own cwd rather than the process cwd.
-func expandPrompt(template string, globals starlark.StringDict, thread *starlark.Thread, cwd string) string {
+func expandPrompt(template string, globals starlark.StringDict, thread *starlark.Thread, cwd string, git *gitPromptCache) string {
 	home, _ := os.UserHomeDir()
 
 	hostname, _ := os.Hostname()
@@ -314,6 +314,8 @@ func expandPrompt(template string, globals starlark.StringDict, thread *starlark
 				result.WriteString(time.Now().Format("Mon Jan 02"))
 			case 'e':
 				result.WriteString("\x1b")
+			case 'g':
+				result.WriteString(git.segment())
 			case '[', ']':
 				// non-printing markers — strip
 			default:
@@ -558,23 +560,27 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// 4n. EXIT trap variable
 	trapExit := ""
 
+	// Git branch in \g is off unless ADSSH_GIT_PROMPT or `set gitprompt on`.
+	gitPrompt := gitPromptFromEnv(os.Getenv("ADSSH_GIT_PROMPT"))
+
 	for {
 		// 4c. Update $SECONDS and $RANDOM each iteration.
 		globals["SECONDS"] = starlark.MakeInt(int(time.Since(replStart).Seconds()))
 		globals["RANDOM"] = starlark.MakeInt(rand.Intn(32768))
 
-		// Determine dynamic prompt
+		// Determine dynamic prompt. One cache covers PROMPT and RPROMPT.
 		prompt := "adssh> "
+		gitSeg := &gitPromptCache{enabled: gitPrompt, cwd: runner.Dir}
 		if val, ok := globals["PROMPT"]; ok {
 			if s, ok := val.(starlark.String); ok {
-				prompt = expandPrompt(string(s), globals, thread, runner.Dir)
+				prompt = expandPrompt(string(s), globals, thread, runner.Dir, gitSeg)
 			}
 		}
 
 		// 4m. RPROMPT
 		if rpVal, ok := globals["RPROMPT"]; ok {
 			if rpStr, ok := rpVal.(starlark.String); ok && string(rpStr) != "" {
-				rp := expandPrompt(string(rpStr), globals, thread, runner.Dir)
+				rp := expandPrompt(string(rpStr), globals, thread, runner.Dir, gitSeg)
 				if rp != "" {
 					_, cols, err := sys.GetTerminalSize(int(os.Stdout.Fd()))
 					if err == nil {
@@ -690,6 +696,21 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			if info, err := os.Stat(line); err == nil && info.IsDir() {
 				line = "cd " + line
 			}
+		}
+
+		// set gitprompt is the prompt switch. It is not the shell set builtin.
+		if next, ok, gerr := applyGitPrompt(line, gitPrompt); ok {
+			if gerr != nil {
+				fmt.Fprintf(errOut, "%v\n", gerr)
+			} else {
+				gitPrompt = next
+				state := "off"
+				if gitPrompt {
+					state = "on"
+				}
+				fmt.Fprintf(out, "gitprompt %s\n", state)
+			}
+			continue
 		}
 
 		// 4n. trap builtin interception.

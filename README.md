@@ -124,6 +124,8 @@ A bracketed paste that contains a newline is held. The editor inserts `[paste he
 
 Shell `if`/`then`/`else`/`fi` runs as a shell program. A one-line form is `if true; then echo yes; else echo no; fi`. Brace blocks run on exit status: `if true { echo yes } else { echo no }` and `try { false } catch { echo recovered }`. Catch runs only after a non-zero exit status. A policy denial stays a denial. Starlark `if expr:` stays Starlark.
 
+`\g` in `PROMPT` or `RPROMPT` shows the current git branch. It stays empty until `ADSSH_GIT_PROMPT=1` or `set gitprompt on`. `set gitprompt off` turns it off again. A dirty work tree adds `*`. A directory that is not a repository, a status that takes longer than 200ms, or any git error leaves the segment empty.
+
 ## Starlark namespaces
 
 | Namespace | What it does |
