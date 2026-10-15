@@ -8,6 +8,7 @@ func init() {
 	}
 	Register(whyBinary{})
 	Register(runbookBinary{})
+	Register(pluginBinary{})
 	Register(parBinary{})
 	Register(evidenceBinary{})
 	Register(leaseBinary{})

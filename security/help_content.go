@@ -389,6 +389,7 @@ file I/O, process execution, plugin loading, and terminal control.`,
 				{Command: "sys.exec_json(['jq', '.key', 'file.json'])", Description: "exec, parse JSON output"},
 				{Command: `sys.parallel(["echo a", "echo b"], jobs=2)`, Description: "run gated command strings together"},
 				{Command: "sys.load_plugin('/path/to/plugin.so')", Description: "load a plugin"},
+				{Command: `sys.load_plugins(names=["hello"])`, Description: "load checked Starlark plugins"},
 				{Command: "sys.register_command('myfn', handler)", Description: "register custom command"},
 			},
 			SeeAlso: []string{"plugins", "hooks"},
@@ -756,10 +757,13 @@ Load a plugin from Starlark:
   sys.load_plugin("/path/to/plugin.so")
 
 Once loaded, the plugin's exported Starlark values are available in the
-globals dict under the plugin's Name().`,
+globals dict under the plugin's Name().
+
+Starlark plugins live in ~/.adssh/plugins/<name>/ as manifest.yaml and plugin.star. Nothing loads until plugin load <name> or sys.load_plugins. Restricted mode refuses that load. A Go .so still uses sys.load_plugin.`,
 			Examples: []HelpExample{
 				{Command: `sys.load_plugin("/opt/adssh/plugins/mycloud.so")`, Description: "load a plugin"},
 				{Command: `plugins["mycloud"].list_resources()`, Description: "use a loaded plugin"},
+				{Command: `plugin load hello`, Description: "load a checked Starlark plugin"},
 			},
 			SeeAlso: []string{"sys", "vbin", "starlark"},
 			Tags:    []string{"plugins", "extensions", "shared library", "so", "load_plugin"},

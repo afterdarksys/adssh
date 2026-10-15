@@ -70,7 +70,7 @@ var vbinNames = map[string]struct{}{
 	"gateway": {}, "lease": {}, "elevate": {}, "??": {}, "cmdgen": {},
 	"package": {}, "darkscan": {}, "grant": {}, "vbins": {}, "cm": {},
 	"evidence": {}, "4eyes": {}, "why": {}, "proc": {}, "par": {}, "nav": {},
-	"help": {}, "pick": {}, "audit": {}, "runbook": {}, "memforensics": {}, "guard": {},
+	"help": {}, "pick": {}, "audit": {}, "runbook": {}, "plugin": {}, "memforensics": {}, "guard": {},
 	"from": {}, "where": {}, "select": {}, "to": {},
 }
 

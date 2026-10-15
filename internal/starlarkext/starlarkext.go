@@ -124,6 +124,7 @@ func SetupExtensions(opts ExtensionOptions) {
 	_ = sysDict.SetKey(starlark.String("load_agent"), createLoadAgent(env))
 	if !restricted {
 		_ = sysDict.SetKey(starlark.String("load_plugin"), createLoadPlugin(env))
+		_ = sysDict.SetKey(starlark.String("load_plugins"), createLoadPlugins(env))
 		_ = sysDict.SetKey(starlark.String("read_file"), starlark.NewBuiltin("read_file", builtinReadFile))
 		_ = sysDict.SetKey(starlark.String("write_file"), starlark.NewBuiltin("write_file", builtinWriteFile))
 		_ = sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", createExecCmd(opts)))

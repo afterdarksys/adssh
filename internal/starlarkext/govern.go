@@ -9,6 +9,16 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// session bags stay raw dicts so the shell and plugin loader can type-assert them.
+func sessionBag(name string) bool {
+	switch name {
+	case "__custom_commands__", "__aliases__", "__completers__", "plugins":
+		return true
+	default:
+		return false
+	}
+}
+
 // GovernStarlarkGlobals wraps Starlark-callable values so every builtin reached
 // through a script, profile, REPL, -c invocation, or MCP eval is independently
 // authorized by the configured security engine.
@@ -18,6 +28,10 @@ func GovernStarlarkGlobals(sec *security.Engine, globals starlark.StringDict) st
 	}
 	governed := make(starlark.StringDict, len(globals))
 	for name, value := range globals {
+		if sessionBag(name) {
+			governed[name] = value
+			continue
+		}
 		governed[name] = GovernStarlarkValue(sec, "starlark."+name, value)
 	}
 	return governed
@@ -30,6 +44,9 @@ func GovernStarlarkGlobalsInPlace(sec *security.Engine, globals starlark.StringD
 		return
 	}
 	for name, value := range globals {
+		if sessionBag(name) {
+			continue
+		}
 		globals[name] = GovernStarlarkValue(sec, "starlark."+name, value)
 	}
 }

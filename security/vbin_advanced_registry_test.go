@@ -9,7 +9,7 @@ func TestAdvancedVBinsAreRegisteredAndDiscoverable(t *testing.T) {
 	}
 	for _, name := range []string{
 		"pick", "nav", "from", "where", "select", "to",
-		"why", "runbook", "par", "evidence", "lease",
+		"why", "runbook", "plugin", "par", "evidence", "lease",
 	} {
 		vbin, ok := eng.Lookup(name)
 		if !ok {

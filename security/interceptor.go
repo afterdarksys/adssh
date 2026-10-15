@@ -703,7 +703,7 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 						}
 					}
 				}
-				return e.DispatchVBin(WithSessionID(ctx, sessionID), vb, args)
+				return e.DispatchVBin(WithVBinSession(WithSessionID(ctx, sessionID), restricted, globals), vb, args)
 			}
 
 			// 3. Restricted mode checks before falling through to the real shell

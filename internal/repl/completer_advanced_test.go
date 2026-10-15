@@ -5,6 +5,7 @@ import "testing"
 func TestAdvancedVBinSubcommandCompletions(t *testing.T) {
 	wants := map[string][]string{
 		"runbook": {"list", "show", "run"},
+		"plugin":  {"list", "load", "reload"},
 		"from":    {"json", "jsonl", "csv"},
 		"to":      {"json", "jsonl", "csv", "table"},
 	}

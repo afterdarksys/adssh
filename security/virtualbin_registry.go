@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"go.starlark.net/starlark"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -104,6 +105,35 @@ func dispatchVBin(ctx context.Context, vb VirtualBinary, args []string) error {
 type vbinContextKey string
 
 const sessionIDCtxKey vbinContextKey = "sessionID"
+
+const vbinSessionCtxKey vbinContextKey = "vbinSession"
+
+type vbinSession struct {
+	Restricted bool
+	Globals    starlark.StringDict
+}
+
+// WithVBinSession stores the shell session a virtual binary may read.
+// A nil context becomes Background before the value is stored.
+func WithVBinSession(ctx context.Context, restricted bool, globals starlark.StringDict) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, vbinSessionCtxKey, vbinSession{Restricted: restricted, Globals: globals})
+}
+
+// VBinSession reports the session stored by WithVBinSession.
+// It returns false when ctx is nil or the value is absent.
+func VBinSession(ctx context.Context) (restricted bool, globals starlark.StringDict, ok bool) {
+	if ctx == nil {
+		return false, nil, false
+	}
+	sess, ok := ctx.Value(vbinSessionCtxKey).(vbinSession)
+	if !ok {
+		return false, nil, false
+	}
+	return sess.Restricted, sess.Globals, true
+}
 
 type engineContextKeyType string
 
