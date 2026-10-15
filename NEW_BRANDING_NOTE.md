@@ -14,6 +14,8 @@ These directories exist under `~/development/`. Created 2026-10-12. On 2026-10-1
 
 The `adssh` binary, module path `github.com/afterdarksys/adssh`, import paths, binaries `adssh` and `adssh-mcp`, and the GitHub repository stay on the development name until a move is explicit. A brand rename is not required for the SAH utilities to exist. GitHub will redirect a renamed repo. The Go module path will not.
 
+Owned hub domains, recorded 2026-10-13, are the Domains section of `~/development/systemapi.io/docs/sah-suite.md`. Read that section before naming a public URL. Nothing is published on those names yet.
+
 Current code, until that move:
 
 - Shell: `~/development/adssh`

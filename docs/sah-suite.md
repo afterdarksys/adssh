@@ -4,6 +4,8 @@ Status: 2026-10-12. The suite contract is `~/development/systemapi.io/docs/sah-s
 
 adssh is the execution shell. The brand word is sah (Service Automation Hub). The hub encompasses the platform and the suite of utilities. This repository is not renamed. The binary stays `adssh`, the MCP binary stays `adssh-mcp`, the module stays `github.com/afterdarksys/adssh`, config stays `~/.adssh`, and the GitHub repo stays `afterdarksys/adssh`.
 
+Owned hub domains are the Domains section of the suite contract. Nothing is published on those names yet.
+
 `admin serve` is the local admin HTTP API. It is not a second public API.
 
 `identity oidc import` verifies an already-issued OIDC JWT. It does not accept the opaque device-login bearer. `identity device login` is a client of the systemapi control plane at `controlplane/oauth.js`. It stores that bearer in a 0600 file and sets the session user with no groups. An Authentik access token is not that bearer. The authorization server stays in systemapi.
