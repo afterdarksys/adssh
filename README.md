@@ -160,7 +160,7 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `gateway` | Policy-audited local TCP gateway for SSH and internal services |
 | `pick` | Charm-powered fuzzy selector for arguments, stdin, or JSON choices |
 | `nav` | Interactive three-column file navigator with previews |
-| `from` / `where` / `select` / `to` | JSONL structured-data pipeline |
+| `from` / `where` / `select` / `to` | JSONL pipeline for JSON, YAML, CSV, and struct-shaped JSON |
 | `why` | Side-effect-free policy/RBAC/CM/four-eyes explanation |
 | `??` | Explain the last blocked command in the current session |
 | `runbook` | Typed Starlark runbooks with governed argv-only steps |
@@ -179,6 +179,7 @@ nav ~/src
 
 # Structured pipelines remain ordinary POSIX byte streams (JSONL internally)
 cat services.json | from json | where 'row["cpu"] > 50' | select name,cpu | to table
+cat services.yaml | from yaml | to struct name:string,cpu:int
 
 # Explain governance without executing or opening an approval request
 why -- kubectl delete namespace production

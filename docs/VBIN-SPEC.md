@@ -229,7 +229,7 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `cm` | `security/vbin_cm.go` | Change-management workflow |
 | `pick` | `security/vbin_pick.go` | Charm-powered fuzzy selector for arguments, stdin lines, and JSON choices |
 | `nav` | `security/vbin_nav.go` | Three-column file navigator with parent/current/preview panes |
-| `from`, `where`, `select`, `to` | `security/vbin_structured.go` | JSONL structured pipeline with JSON/CSV adapters and Starlark predicates |
+| `from`, `where`, `select`, `to` | `security/vbin_structured.go` | JSONL structured pipeline with JSON, YAML, CSV, and struct-shaped JSON adapters |
 | `why` | `security/vbin_why.go` | Side-effect-free explanation of every governance stage |
 | `??` | `security/vbin_denial.go` | Last-denial explanation for the current session |
 | `runbook` | `security/vbin_runbook.go` | Typed Starlark procedures whose argv-only steps are independently governed |

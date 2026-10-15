@@ -2,21 +2,31 @@ package security
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"go.starlark.net/starlark"
+	"gopkg.in/yaml.v3"
 	"mvdan.cc/sh/v3/interp"
 )
 
+// Threats: a YAML alias expands before the record cap is applied, so an alias
+// node is rejected before expansion. YAML input larger than 1 MiB is refused.
+// The struct format is JSON. Unknown fields, a mismatched type, a missing
+// field, and trailing bytes fail closed. encoding/gob is not accepted.
+
 const (
 	structuredMaxInput   = 64 << 20
+	structuredMaxYAML    = 1 << 20
 	structuredMaxRecord  = 1 << 20
 	structuredMaxRecords = 100000
 )
@@ -27,13 +37,13 @@ func (b structuredBinary) Name() string { return b.name }
 func (b structuredBinary) Description() string {
 	switch b.name {
 	case "from":
-		return "Decode JSON, JSONL, or CSV into a JSONL structured stream"
+		return "Decode JSON, JSONL, CSV, YAML, or struct-shaped JSON into a JSONL stream"
 	case "where":
 		return "Filter JSONL records with a Starlark predicate"
 	case "select":
 		return "Project fields from JSONL records"
 	case "to":
-		return "Encode JSONL records as JSON, JSONL, CSV, or a table"
+		return "Encode JSONL records as JSON, JSONL, CSV, YAML, struct-shaped JSON, or a table"
 	default:
 		return "Structured data pipeline command"
 	}
@@ -41,13 +51,13 @@ func (b structuredBinary) Description() string {
 func (b structuredBinary) Usage() string {
 	switch b.name {
 	case "from":
-		return "from <json|jsonl|csv>"
+		return "from <json|jsonl|ndjson|csv|yaml|struct> [field:type,...]"
 	case "where":
 		return "where <starlark-expression-using-row>"
 	case "select":
 		return "select <field[,field...]>"
 	case "to":
-		return "to <json|jsonl|csv|table>"
+		return "to <json|jsonl|ndjson|csv|table|yaml|struct> [field:type,...]"
 	default:
 		return b.name
 	}
@@ -57,10 +67,11 @@ func (b structuredBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	switch b.name {
 	case "from":
-		if len(args) != 2 {
-			return fmt.Errorf("from: usage: %s", b.Usage())
+		spec, err := structuredSpec(args, "from")
+		if err != nil {
+			return err
 		}
-		return structuredFrom(hc.Stdin, hc.Stdout, args[1])
+		return structuredFrom(hc.Stdin, hc.Stdout, args[1], spec)
 	case "where":
 		if len(args) < 2 {
 			return fmt.Errorf("where: usage: %s", b.Usage())
@@ -72,16 +83,31 @@ func (b structuredBinary) Run(ctx context.Context, args []string) error {
 		}
 		return structuredSelect(hc.Stdin, hc.Stdout, strings.Split(args[1], ","))
 	case "to":
-		if len(args) != 2 {
-			return fmt.Errorf("to: usage: %s", b.Usage())
+		spec, err := structuredSpec(args, "to")
+		if err != nil {
+			return err
 		}
-		return structuredTo(hc.Stdin, hc.Stdout, args[1])
+		return structuredTo(hc.Stdin, hc.Stdout, args[1], spec)
 	default:
 		return fmt.Errorf("structured: unsupported command %q", b.name)
 	}
 }
 
-func structuredFrom(input io.Reader, output io.Writer, format string) error {
+func structuredSpec(args []string, command string) (string, error) {
+	usage := structuredBinary{name: command}.Usage()
+	if len(args) < 2 || len(args) > 3 {
+		return "", fmt.Errorf("%s: usage: %s", command, usage)
+	}
+	if len(args) == 3 && strings.ToLower(args[1]) != "struct" {
+		return "", fmt.Errorf("%s: usage: %s", command, usage)
+	}
+	if len(args) == 3 {
+		return args[2], nil
+	}
+	return "", nil
+}
+
+func structuredFrom(input io.Reader, output io.Writer, format string, spec string) error {
 	switch strings.ToLower(format) {
 	case "json":
 		decoder := json.NewDecoder(io.LimitReader(input, structuredMaxInput))
@@ -140,6 +166,10 @@ func structuredFrom(input io.Reader, output io.Writer, format string) error {
 				return err
 			}
 		}
+	case "yaml":
+		return structuredFromYAML(input, output)
+	case "struct":
+		return structuredFromStruct(input, output, spec)
 	default:
 		return fmt.Errorf("from: unsupported format %q", format)
 	}
@@ -193,7 +223,7 @@ func structuredSelect(input io.Reader, output io.Writer, fields []string) error 
 	})
 }
 
-func structuredTo(input io.Reader, output io.Writer, format string) error {
+func structuredTo(input io.Reader, output io.Writer, format string, spec string) error {
 	var records []any
 	if err := scanJSONL(input, func(record any) error {
 		records = append(records, record)
@@ -239,9 +269,429 @@ func structuredTo(input io.Reader, output io.Writer, format string) error {
 			return fmt.Errorf("to table: %w", err)
 		}
 		return writeTable(output, objects, fields)
+	case "yaml":
+		return structuredToYAML(output, records)
+	case "struct":
+		return structuredToStruct(output, records, spec)
 	default:
 		return fmt.Errorf("to: unsupported format %q", format)
 	}
+}
+
+func structuredFromYAML(input io.Reader, output io.Writer) error {
+	raw, err := readAtMost(input, structuredMaxYAML)
+	if err != nil {
+		return fmt.Errorf("from yaml: %w", err)
+	}
+	if len(raw) > structuredMaxYAML {
+		return fmt.Errorf("from yaml: input exceeds 1 MiB")
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	var records []any
+	for {
+		var node yaml.Node
+		err := decoder.Decode(&node)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("from yaml: %w", err)
+		}
+		if err := rejectYAMLAliases(&node); err != nil {
+			return err
+		}
+		var value any
+		if err := node.Decode(&value); err != nil {
+			return fmt.Errorf("from yaml: %w", err)
+		}
+		records, err = appendStructuredValue(records, value, true)
+		if err != nil {
+			return fmt.Errorf("from yaml: %w", err)
+		}
+		if len(records) > structuredMaxRecords {
+			return fmt.Errorf("from yaml: record limit %d exceeded", structuredMaxRecords)
+		}
+	}
+	for _, record := range records {
+		if err := writeJSONLine(output, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectYAMLAliases(node *yaml.Node) error {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == yaml.AliasNode || node.Alias != nil {
+		return fmt.Errorf("from yaml: aliases are not allowed")
+	}
+	for _, child := range node.Content {
+		if err := rejectYAMLAliases(child); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func structuredToYAML(output io.Writer, records []any) error {
+	values := make([]any, len(records))
+	for i, record := range records {
+		converted, err := valueForYAML(record)
+		if err != nil {
+			return err
+		}
+		values[i] = converted
+	}
+	encoder := yaml.NewEncoder(output)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(values); err != nil {
+		_ = encoder.Close()
+		return fmt.Errorf("to yaml: %w", err)
+	}
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("to yaml: %w", err)
+	}
+	return nil
+}
+
+type structField struct {
+	name string
+	kind string
+}
+
+func structuredFromStruct(input io.Reader, output io.Writer, spec string) error {
+	fields, err := parseStructSpec(spec)
+	if err != nil {
+		return fmt.Errorf("from struct: %w", err)
+	}
+	raw, err := readAtMost(input, structuredMaxInput)
+	if err != nil {
+		return fmt.Errorf("from struct: %w", err)
+	}
+	if len(raw) > structuredMaxInput {
+		return fmt.Errorf("from struct: input exceeds 64 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return fmt.Errorf("from struct: %w", err)
+	}
+	if err := rejectTrailingJSON(decoder); err != nil {
+		return fmt.Errorf("from struct: %w", err)
+	}
+	records, err := appendStructuredValue(nil, value, false)
+	if err != nil {
+		return fmt.Errorf("from struct: %w", err)
+	}
+	if len(records) > structuredMaxRecords {
+		return fmt.Errorf("from struct: record limit %d exceeded", structuredMaxRecords)
+	}
+	for i, record := range records {
+		if err := checkStructRecord(record, fields); err != nil {
+			return fmt.Errorf("from struct: record %d: %w", i+1, err)
+		}
+	}
+	for _, record := range records {
+		if err := writeJSONLine(output, record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func structuredToStruct(output io.Writer, records []any, spec string) error {
+	fields, err := parseStructSpec(spec)
+	if err != nil {
+		return fmt.Errorf("to struct: %w", err)
+	}
+	for i, record := range records {
+		if err := checkStructRecord(record, fields); err != nil {
+			return fmt.Errorf("to struct: record %d: %w", i+1, err)
+		}
+	}
+	encoder := json.NewEncoder(output)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(records); err != nil {
+		return fmt.Errorf("to struct: %w", err)
+	}
+	return nil
+}
+
+func parseStructSpec(spec string) ([]structField, error) {
+	if strings.TrimSpace(spec) == "" {
+		return nil, nil
+	}
+	parts := strings.Split(spec, ",")
+	fields := make([]structField, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		name, kind, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok || name == "" || kind == "" {
+			return nil, fmt.Errorf("field spec must be name:type")
+		}
+		if !structNameOK(name) {
+			return nil, fmt.Errorf("invalid field name %q", name)
+		}
+		kind = strings.ToLower(kind)
+		switch kind {
+		case "string", "int", "float", "bool", "object", "array", "any":
+		default:
+			return nil, fmt.Errorf("unknown type %q", kind)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("duplicate field %q", name)
+		}
+		seen[name] = true
+		fields = append(fields, structField{name: name, kind: kind})
+	}
+	return fields, nil
+}
+
+func structNameOK(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if i == 0 && !(r == '_' || unicode.IsLetter(r)) {
+			return false
+		}
+		if i > 0 && !(r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return true
+}
+
+func checkStructRecord(record any, fields []structField) error {
+	object, ok := record.(map[string]any)
+	if !ok {
+		return fmt.Errorf("type mismatch: want object, got %T", record)
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, field := range fields {
+		value, found := object[field.name]
+		if !found {
+			return fmt.Errorf("missing field %q", field.name)
+		}
+		if err := checkStructValue(value, field.kind); err != nil {
+			return fmt.Errorf("field %q: %w", field.name, err)
+		}
+		seen[field.name] = true
+	}
+	for key := range object {
+		if !seen[key] {
+			return fmt.Errorf("unknown field %q", key)
+		}
+	}
+	return nil
+}
+
+func checkStructValue(value any, kind string) error {
+	switch kind {
+	case "any":
+		return nil
+	case "string":
+		if _, ok := value.(string); ok {
+			return nil
+		}
+	case "bool":
+		if _, ok := value.(bool); ok {
+			return nil
+		}
+	case "int":
+		if structIntOK(value) {
+			return nil
+		}
+	case "float":
+		if structFloatOK(value) {
+			return nil
+		}
+	case "object":
+		if _, ok := value.(map[string]any); ok {
+			return nil
+		}
+	case "array":
+		if _, ok := value.([]any); ok {
+			return nil
+		}
+	default:
+		return fmt.Errorf("unknown type %q", kind)
+	}
+	return fmt.Errorf("type mismatch: want %s, got %T", kind, value)
+}
+
+func structIntOK(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	text := string(number)
+	if text == "" || strings.ContainsAny(text, ".eE") {
+		return false
+	}
+	_, err := strconv.ParseInt(text, 10, 64)
+	return err == nil
+}
+
+func structFloatOK(value any) bool {
+	number, ok := value.(json.Number)
+	if !ok {
+		return false
+	}
+	parsed, err := strconv.ParseFloat(string(number), 64)
+	return err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
+}
+
+func rejectTrailingJSON(decoder *json.Decoder) error {
+	var extra any
+	err := decoder.Decode(&extra)
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("trailing data: %w", err)
+	}
+	return fmt.Errorf("trailing data")
+}
+
+func appendStructuredValue(records []any, value any, fromYAML bool) ([]any, error) {
+	var err error
+	if fromYAML {
+		value, err = normalizeYAMLValue(value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if items, ok := value.([]any); ok {
+		if fromYAML {
+			normalized := make([]any, len(items))
+			for i, item := range items {
+				normalized[i], err = normalizeYAMLValue(item)
+				if err != nil {
+					return nil, err
+				}
+			}
+			return append(records, normalized...), nil
+		}
+		return append(records, items...), nil
+	}
+	return append(records, value), nil
+}
+
+func normalizeYAMLValue(value any) (any, error) {
+	switch value := value.(type) {
+	case nil, bool, string:
+		return value, nil
+	case int:
+		return json.Number(strconv.Itoa(value)), nil
+	case int64:
+		return json.Number(strconv.FormatInt(value, 10)), nil
+	case uint64:
+		if value > uint64(math.MaxInt64) {
+			return nil, fmt.Errorf("integer out of range")
+		}
+		return json.Number(strconv.FormatUint(value, 10)), nil
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return nil, fmt.Errorf("non-finite number")
+		}
+		return json.Number(strconv.FormatFloat(value, 'f', -1, 64)), nil
+	case json.Number:
+		return value, nil
+	case []any:
+		items := make([]any, len(value))
+		for i, item := range value {
+			converted, err := normalizeYAMLValue(item)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = converted
+		}
+		return items, nil
+	case map[string]any:
+		object := make(map[string]any, len(value))
+		for key, item := range value {
+			converted, err := normalizeYAMLValue(item)
+			if err != nil {
+				return nil, err
+			}
+			object[key] = converted
+		}
+		return object, nil
+	case map[any]any:
+		object := make(map[string]any, len(value))
+		for key, item := range value {
+			name, ok := key.(string)
+			if !ok {
+				return nil, fmt.Errorf("mapping keys must be strings")
+			}
+			converted, err := normalizeYAMLValue(item)
+			if err != nil {
+				return nil, err
+			}
+			object[name] = converted
+		}
+		return object, nil
+	default:
+		return nil, fmt.Errorf("unsupported value %T", value)
+	}
+}
+
+func valueForYAML(value any) (any, error) {
+	switch value := value.(type) {
+	case nil, bool, string:
+		return value, nil
+	case json.Number:
+		text := string(value)
+		if !strings.ContainsAny(text, ".eE") {
+			parsed, err := strconv.ParseInt(text, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("to yaml: integer: %w", err)
+			}
+			return parsed, nil
+		}
+		parsed, err := strconv.ParseFloat(text, 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return nil, fmt.Errorf("to yaml: non-finite number")
+		}
+		return parsed, nil
+	case []any:
+		items := make([]any, len(value))
+		for i, item := range value {
+			converted, err := valueForYAML(item)
+			if err != nil {
+				return nil, err
+			}
+			items[i] = converted
+		}
+		return items, nil
+	case map[string]any:
+		object := make(map[string]any, len(value))
+		for key, item := range value {
+			converted, err := valueForYAML(item)
+			if err != nil {
+				return nil, err
+			}
+			object[key] = converted
+		}
+		return object, nil
+	default:
+		return nil, fmt.Errorf("to yaml: unsupported value %T", value)
+	}
+}
+
+func readAtMost(input io.Reader, limit int) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(input, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 func scanJSONL(input io.Reader, visit func(any) error) error {
