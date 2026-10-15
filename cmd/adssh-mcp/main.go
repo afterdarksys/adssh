@@ -12,6 +12,7 @@ import (
 
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
+	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
@@ -43,6 +44,16 @@ func main() {
 	// Point the default at the engine we built so those tool paths authorize
 	// through the same policy and audit log as policyGate.
 	security.SetDefaultEngine(prepared.eng.Security())
+	guard.SetRecorder(func(ev guard.Event) {
+		prepared.eng.Security().LogEvent(fmt.Sprintf("GUARD action=%s addr=%s reason=%s", ev.Action, ev.Addr, ev.Reason))
+	})
+	if err := guard.Configure(guard.Options{
+		ConfigPath: prepared.cfg.GuardConfigPath,
+		StatePath:  prepared.cfg.GuardStatePath,
+		Switch:     prepared.cfg.GuardSwitch,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "adssh-mcp: guard: %v\n", err)
+	}
 	if _, statErr := os.Stat(prepared.cfg.PolicyPath); statErr == nil {
 		prepared.eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", prepared.cfg.PolicyPath))
 	}

@@ -83,6 +83,8 @@ func AdminHTTPPaths() []string {
 		"/v1/recordings",
 		"/v1/elevations",
 		"/v1/leases",
+		"/v1/guard",
+		"/v1/guard/unban",
 	}
 }
 

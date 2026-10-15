@@ -113,3 +113,25 @@ paths:
           description: Missing or wrong API key.
         "503":
           description: chain_unavailable when no chain path is configured.
+  /v1/guard:
+    get:
+      summary: SSH listener jail status, effective config, and active bans.
+      responses:
+        "200":
+          description: Status. Readable when the jail is tripped.
+        "401":
+          description: Missing or wrong API key.
+  /v1/guard/unban:
+    post:
+      summary: Remove one ban. Body is {"addr":"<ip or host:port>"}.
+      responses:
+        "200":
+          description: Ban removed. Body is {"ok":true,"addr":"<canonical ip>"}.
+        "400":
+          description: Empty, invalid, or unknown-field body.
+        "401":
+          description: Missing or wrong API key.
+        "404":
+          description: Address is not banned.
+        "500":
+          description: The ban file could not be updated.

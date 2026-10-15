@@ -98,6 +98,7 @@ func TestHandleRejectsBeforeExec(t *testing.T) {
 		{"adssh", `{"v":1,"id":"a","type":"execute","command":["/tmp/adssh","sah"]}`, "command_rejected"},
 		{"sah", `{"v":1,"id":"a","type":"execute","command":["sah"]}`, "command_rejected"},
 		{"vbin", `{"v":1,"id":"a","type":"execute","command":["lease","--from","env:X"]}`, "command_rejected"},
+		{"guard", `{"v":1,"id":"a","type":"execute","command":["guard","status"]}`, "command_rejected"},
 		{"nul", "{\"v\":1,\"id\":\"a\",\"type\":\"execute\",\"command\":[\"echo\",\"a\\u0000b\"]}", "command_rejected"},
 		{"too many", `{"v":1,"id":"a","type":"execute","command":["x","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","26","27","28","29","30","31","32"]}`, "command_rejected"},
 	}

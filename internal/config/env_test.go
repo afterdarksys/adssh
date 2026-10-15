@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSAHEnabledFailClosed(t *testing.T) {
 	t.Setenv("ADSSH_SAH", "")
@@ -18,5 +21,21 @@ func TestSAHEnabledFailClosed(t *testing.T) {
 		if !LoadFromEnv().SAHEnabled {
 			t.Fatalf("%q did not enable the switch", v)
 		}
+	}
+}
+
+func TestGuardSwitchStoredRaw(t *testing.T) {
+	t.Setenv("ADSSH_GUARD", "off")
+	t.Setenv("ADSSH_GUARD_CONFIG", "")
+	t.Setenv("ADSSH_GUARD_STATE", "")
+	cfg := LoadFromEnv()
+	if cfg.GuardSwitch != "off" {
+		t.Fatalf("switch %q", cfg.GuardSwitch)
+	}
+	if !strings.HasSuffix(cfg.GuardConfigPath, "guard.yaml") {
+		t.Fatalf("config %s", cfg.GuardConfigPath)
+	}
+	if !strings.HasSuffix(cfg.GuardStatePath, "guard-state.json") {
+		t.Fatalf("state %s", cfg.GuardStatePath)
 	}
 }

@@ -233,6 +233,11 @@ lease --from aws-sm:prod/deploy-token?region=us-east-1 --as TOKEN -- deploy --to
 - **Local admin API** — `admin sessions/gateways/approvals/explain/evidence`
   exposes the current operational state through governed VBINs, and
   `admin serve` exposes the same surfaces over a token-capable local HTTP API.
+- **SSH listener jail** — failed handshakes and connection rate on `adssh --serve`
+  are counted from `~/.adssh/guard.yaml`. Bans are stored in
+  `~/.adssh/guard-state.json`. Manage them with `guard` or with
+  `GET /v1/guard` and `POST /v1/guard/unban` on the local admin API.
+  See `docs/guard.md`.
 
 Example policy (allow everything except `rm -rf`):
 ```rego
@@ -327,6 +332,9 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 |---|---|---|
 | `ADSSH_RESTRICTED` | off | Enable restricted mode |
 | `ADSSH_SERVE` | — | SSH server address |
+| `ADSSH_GUARD` | follows `guard.yaml` | SSH listener jail switch (`off` forces off, `on` forces on) |
+| `ADSSH_GUARD_CONFIG` | `~/.adssh/guard.yaml` | Jail config |
+| `ADSSH_GUARD_STATE` | `~/.adssh/guard-state.json` | Ban file |
 | `ADSSH_POLICY` | — | Rego policy file path |
 | `ADSSH_ENTITLEMENTS` | — | RBAC entitlements YAML |
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |

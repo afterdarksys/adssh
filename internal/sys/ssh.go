@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/creack/pty"
 	"golang.org/x/crypto/ssh"
 )
@@ -182,6 +183,9 @@ func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionSta
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("permission denied: only root can enable the SSH server")
 	}
+	if err := guard.Ready(); err != nil {
+		return fmt.Errorf("guard: %v", err)
+	}
 
 	authorizedKeys, err := loadAuthorizedKeys(authorizedKeysPath)
 	if err != nil {
@@ -277,11 +281,20 @@ func (c *CtrlCInterceptor) Read(p []byte) (n int, err error) {
 }
 
 func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start SessionStarter, authorizeGateway GatewayAuthorizer) {
+	peer := nConn.RemoteAddr().String()
+	decision := guard.Admit(peer)
+	if !decision.Allow {
+		log.Printf("guard: refused addr=%s reason=%s", peer, decision.Reason)
+		_ = nConn.Close()
+		return
+	}
 	conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
 	if err != nil {
+		guard.NoteHandshake(peer, false)
 		log.Printf("Failed to handshake: %v", err)
 		return
 	}
+	guard.NoteHandshake(peer, true)
 	fp := conn.Permissions.Extensions["pubkey-fp"]
 	log.Printf("New SSH connection from %s (%s) key=%s", conn.RemoteAddr(), conn.ClientVersion(), fp)
 

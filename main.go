@@ -20,6 +20,7 @@ import (
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/agent"
 	"github.com/afterdarksys/adssh/internal/config"
+	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/afterdarksys/adssh/internal/repl"
 	"github.com/afterdarksys/adssh/internal/sah"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
@@ -138,6 +139,19 @@ func main() {
 	// and hash chain as the sessions opened below — until repl/ and starlarkext/
 	// accept an *engine.Engine directly.
 	security.SetDefaultEngine(eng.Security())
+	guard.SetRecorder(func(ev guard.Event) {
+		eng.Security().LogEvent(fmt.Sprintf("GUARD action=%s addr=%s reason=%s", ev.Action, ev.Addr, ev.Reason))
+	})
+	if err := guard.Configure(guard.Options{
+		ConfigPath: cfg.GuardConfigPath,
+		StatePath:  cfg.GuardStatePath,
+		Switch:     cfg.GuardSwitch,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: guard: %v\n", err)
+		if cfg.ServeAddr != "" {
+			os.Exit(1)
+		}
+	}
 
 	if sahMode {
 		os.Exit(runSAH(eng.Security(), sessionID))
@@ -473,6 +487,7 @@ VIRTUAL BINARIES (type 'vbins' for full list)
   sah         sah/1 stdio (ADSSH_SAH)    ADSSH_SAH=1 adssh sah
   gateway     Policy TCP gateway         gateway start --target host:22
   lease       Command secret lease       lease --from vault:path?field=token --as TOKEN -- cmd
+  guard       SSH listener jail          guard status
   elevate     Break-glass elevation      elevate request prod-admin --for 10m --reason INC
   ??          Last denial explainer      ??
   cmdgen      Cloud CLI generator        cmdgen aws ec2 create instance_type=t3.micro
@@ -484,6 +499,9 @@ ENVIRONMENT VARIABLES
   ADSSH_SAH               sah/1 stdio switch (1/true/yes; default off)
   ADSSH_RESTRICTED        Enable restricted mode (true/false)
   ADSSH_SERVE             SSH server address (:2222)
+  ADSSH_GUARD             SSH listener jail switch (off/on; unset follows guard.yaml)
+  ADSSH_GUARD_CONFIG      Jail config (default: ~/.adssh/guard.yaml)
+  ADSSH_GUARD_STATE       Ban file (default: ~/.adssh/guard-state.json)
   ADSSH_POLICY            Path to Rego policy file
   ADSSH_ENTITLEMENTS      Path to entitlements YAML
   ADSSH_AUDIT_LOG         Audit log path (default: ~/.adssh/audit.log)
@@ -624,6 +642,36 @@ func runDoctor(cfg config.AppConfig) int {
 		addPathCheck("authorized_keys", cfg.AuthorizedKeysPath, false)
 	}
 
+	if off, on, err := guard.ParseSwitch(cfg.GuardSwitch); err != nil {
+		add("FAIL", "guard switch", err.Error())
+	} else if off {
+		add("OK", "guard switch", "forced off")
+	} else if on {
+		add("OK", "guard switch", "forced on")
+	} else {
+		add("OK", "guard switch", "follows guard.yaml")
+	}
+	if info, err := os.Lstat(cfg.GuardConfigPath); err != nil && os.IsNotExist(err) {
+		add("WARN", "guard config", fmt.Sprintf("%s does not exist; defaults apply", cfg.GuardConfigPath))
+	} else if err != nil {
+		add("FAIL", "guard config", fmt.Sprintf("%s: %v", cfg.GuardConfigPath, err))
+	} else if err := guard.CheckConfig(cfg.GuardConfigPath); err != nil {
+		add("FAIL", "guard config", err.Error())
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		add("FAIL", "guard config", fmt.Sprintf("%s is a symlink", cfg.GuardConfigPath))
+	} else {
+		add("OK", "guard config", cfg.GuardConfigPath)
+	}
+	if err := guard.CheckState(cfg.GuardStatePath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			add("OK", "guard state", "no ban file yet")
+		} else {
+			add("FAIL", "guard state", err.Error())
+		}
+	} else {
+		add("OK", "guard state", cfg.GuardStatePath)
+	}
+
 	for _, tool := range []string{"ssh", "git", "docker", "kubectl"} {
 		if path, err := exec.LookPath(tool); err == nil {
 			add("OK", "host tool: "+tool, path)
@@ -706,6 +754,22 @@ default deny_reason = ""
 `,
 
 		"instrument-tasks.yaml": defaultInstrumentTasks,
+
+		"guard.yaml": `# SSH listener jail. See docs/guard.md.
+# Manage with the guard command (status, config, list, unban, reload)
+# or the local admin API (GET /v1/guard, POST /v1/guard/unban).
+# This file is not a firewall rule.
+enabled: true
+find_time: 10m
+max_retry: 5
+ban_time: 1h
+rate_limit: 30
+rate_window: 1m
+max_entries: 10000
+ignore:
+  - 127.0.0.0/8
+  - ::1/128
+`,
 	}
 
 	rcPath := filepath.Join(home, ".adsshrc")

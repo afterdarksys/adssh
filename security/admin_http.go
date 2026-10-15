@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/afterdarksys/adssh/internal/sys"
 )
 
@@ -71,6 +73,10 @@ func (h *adminHTTPHandler) serveAuthorized(w http.ResponseWriter, r *http.Reques
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/leases":
 		items, err := h.engine.ListLeases()
 		writeAdminList(w, items, err)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/guard":
+		writeAdminJSON(w, http.StatusOK, guard.Status())
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/guard/unban":
+		h.handleGuardUnban(w, r)
 	default:
 		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": "not found"})
 	}
@@ -215,6 +221,38 @@ func (h *adminHTTPHandler) handleEvidence(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeAdminJSON(w, http.StatusOK, bundle)
+}
+
+func (h *adminHTTPHandler) handleGuardUnban(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Addr string `json:"addr"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return
+	}
+	key, err := guard.Unban(req.Addr)
+	if err == nil {
+		writeAdminJSON(w, http.StatusOK, map[string]any{"ok": true, "addr": key})
+		return
+	}
+	switch {
+	case errors.Is(err, guard.ErrBadPeer):
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": "bad_peer"})
+	case errors.Is(err, guard.ErrNotBanned):
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": "not_banned"})
+	case errors.Is(err, guard.ErrInactive):
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": "guard is not active"})
+	default:
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": "guard_unavailable"})
+	}
 }
 
 func adminGatewaySnapshot() []map[string]any {

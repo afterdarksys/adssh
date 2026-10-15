@@ -28,4 +28,6 @@ The design sentence "computeapi provisions, the machine enrolls through systemap
 
 `admin serve` is the local admin HTTP API. It is not a second public API. The default listen address is `127.0.0.1:8787`. `--listen` can bind a wider address.
 
+The SSH listener jail is `docs/guard.md`.
+
 The Homebrew tap is not published. The SLSA workflow has not produced a signed attestation. `package-release.sh` writes `provenance.json` and `slsa-provenance.intoto.json` as local metadata. Those files are not a signed attestation.

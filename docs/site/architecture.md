@@ -30,7 +30,9 @@ systemapi starts adssh as a child. The break-glass policy is `default allow = tr
 
 `admin serve` listens on `127.0.0.1:8787` unless `--listen` is set. `--listen` can bind a non-loopback address. The API key is then the only authenticator besides `/healthz`.
 
-Routes: `/healthz`, `/v1/sessions`, `/v1/gateways`, `/v1/approvals`, `/v1/approvals/approve`, `/v1/approvals/deny`, `/v1/explain`, `/v1/evidence`, `/v1/recordings`, `/v1/elevations`, `/v1/leases`. The schema is `docs/openapi/admin.yaml`.
+Routes: `/healthz`, `/v1/sessions`, `/v1/gateways`, `/v1/approvals`, `/v1/approvals/approve`, `/v1/approvals/deny`, `/v1/explain`, `/v1/evidence`, `/v1/recordings`, `/v1/elevations`, `/v1/leases`, `/v1/guard`, `/v1/guard/unban`. The schema is `docs/openapi/admin.yaml`.
+
+The SSH listener jail counts failed handshakes and connection rate on `adssh --serve`. `GET /v1/guard` reports the effective config and active bans. `POST /v1/guard/unban` removes one ban. The operator document is `docs/guard.md`.
 
 `/healthz` is unauthenticated and is not audited. Every other request is audited with method, path, status, and the SHA-256 fingerprint of the API key. The body and the query string are not logged. An empty API key is refused. The compare hashes both sides with SHA-256 and then compares the digests.
 

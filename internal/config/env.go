@@ -32,6 +32,11 @@ import (
 //	                           (default: ~/.adssh/instrument-tasks.yaml)
 //	ADSSH_SAH=1                Enable the sah/1 stdio subcommand (default off).
 //	                           Unset, "on", and any other value stay off.
+//	ADSSH_GUARD=off            SSH listener jail switch. Stored raw.
+//	                           off forces the jail off. on forces it on.
+//	                           Unset follows guard.yaml. Any other value fails closed.
+//	ADSSH_GUARD_CONFIG=/path  Jail config (default: ~/.adssh/guard.yaml)
+//	ADSSH_GUARD_STATE=/path   Ban file (default: ~/.adssh/guard-state.json)
 type AppConfig struct {
 	Restricted         bool
 	SAHEnabled         bool
@@ -51,6 +56,9 @@ type AppConfig struct {
 	AgentServeAddr     string
 	AgentToken         string
 	AgentTasksPath     string
+	GuardSwitch        string
+	GuardConfigPath    string
+	GuardStatePath     string
 }
 
 // LoadFromEnv populates an AppConfig from ADSSH_* environment variables,
@@ -78,6 +86,9 @@ func LoadFromEnv() AppConfig {
 		AgentServeAddr:     os.Getenv("ADSSH_AGENT_SERVE"),
 		AgentToken:         os.Getenv("ADSSH_AGENT_TOKEN"),
 		AgentTasksPath:     envOr("ADSSH_AGENT_TASKS", filepath.Join(cfgDir, "instrument-tasks.yaml")),
+		GuardSwitch:        os.Getenv("ADSSH_GUARD"),
+		GuardConfigPath:    envOr("ADSSH_GUARD_CONFIG", filepath.Join(cfgDir, "guard.yaml")),
+		GuardStatePath:     envOr("ADSSH_GUARD_STATE", filepath.Join(cfgDir, "guard-state.json")),
 	}
 	return cfg
 }
