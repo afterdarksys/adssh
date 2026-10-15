@@ -698,6 +698,73 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			continue
 		}
 
+		// Brace if/try and an incomplete POSIX if keep reading. A finished
+		// Starlark line returns here so the block below can still continue it.
+		buf, abort, eof, synErr := readPending(rl, line, prompt, out)
+		if synErr != nil {
+			fmt.Fprintf(errOut, "%v\n", synErr)
+			continue
+		}
+		if abort {
+			continue
+		}
+		if eof {
+			break
+		}
+		if parser.ClassifyFlow(buf).Kind == parser.FlowReady {
+			ctx := context.Background()
+			if val, ok := globals["SESSION_ID"]; ok {
+				if sessionIDStr, ok := val.(starlark.String); ok {
+					if session := sys.GetSession(string(sessionIDStr)); session != nil {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithCancel(context.Background())
+						session.SetContext(ctx, cancel)
+						session.SetCurrentCommand(buf)
+					}
+				}
+			}
+
+			callHook(globals, "__preexec__", starlark.Tuple{starlark.String(buf)})
+
+			commandRunning.Store(true)
+			runErr := RunFlow(buf, FlowExec{
+				Gate: func(node syntax.Node) error {
+					return security.GateProgramSession(sessState, node)
+				},
+				Runner: runner,
+				Ctx:    ctx,
+			})
+			commandRunning.Store(false)
+
+			exitCode := 0
+			if runErr != nil {
+				if exitErr, ok := runErr.(interp.ExitStatus); ok {
+					exitCode = int(exitErr)
+				} else if runErr != context.Canceled && !strings.Contains(runErr.Error(), "context canceled") {
+					exitCode = 1
+				}
+			}
+			globals["?"] = starlark.MakeInt(exitCode)
+
+			if val, ok := globals["SESSION_ID"]; ok {
+				if sessionIDStr, ok := val.(starlark.String); ok {
+					if session := sys.GetSession(string(sessionIDStr)); session != nil {
+						session.SetContext(context.Background(), nil)
+						session.SetCurrentCommand("")
+					}
+				}
+			}
+			if runErr != nil {
+				if runErr != context.Canceled && !strings.Contains(runErr.Error(), "context canceled") {
+					fmt.Fprintf(errOut, "Command error: %v\n", runErr)
+				}
+			}
+
+			callHook(globals, "__postcmd__", starlark.Tuple{starlark.String(buf), starlark.MakeInt(exitCode)})
+			continue
+		}
+		line = buf
+
 		mode := parser.DetermineMode(line)
 
 		if mode == parser.ModeStarlark {

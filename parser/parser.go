@@ -26,8 +26,20 @@ func DetermineMode(line string) EvalMode {
 		return ModeShell
 	}
 
+	// `if expr:` stays Starlark. POSIX if/then and brace if stay on the shell
+	// parser. A bare `if` or `if(` misses this keyword and falls through.
+	if ifKeyword(trimmed) {
+		if posixIfBeforeBrace(trimmed) {
+			return ModeShell
+		}
+		if starlarkIf(trimmed) {
+			return ModeStarlark
+		}
+		return ModeShell
+	}
+
 	// Heuristics for Starlark
-	if strings.HasPrefix(trimmed, "def ") || strings.HasPrefix(trimmed, "for ") || strings.HasPrefix(trimmed, "if ") || strings.HasPrefix(trimmed, "print(") {
+	if strings.HasPrefix(trimmed, "def ") || strings.HasPrefix(trimmed, "for ") || strings.HasPrefix(trimmed, "print(") {
 		return ModeStarlark
 	}
 

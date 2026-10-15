@@ -122,6 +122,8 @@ adssh> greet("world")
 
 A bracketed paste that contains a newline is held. The editor inserts `[paste held: N lines]` and does not run it. `safepaste show` prints the paste, `safepaste run` executes it through the same policy gate as a typed command, and `safepaste drop` discards it. A paste with a control byte other than tab or newline, or a paste over 1 MiB, is discarded. A terminal that does not bracket pastes looks the same as typing.
 
+Shell `if`/`then`/`else`/`fi` runs as a shell program. A one-line form is `if true; then echo yes; else echo no; fi`. Brace blocks run on exit status: `if true { echo yes } else { echo no }` and `try { false } catch { echo recovered }`. Catch runs only after a non-zero exit status. A policy denial stays a denial. Starlark `if expr:` stays Starlark.
+
 ## Starlark namespaces
 
 | Namespace | What it does |

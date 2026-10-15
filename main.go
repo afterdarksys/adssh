@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -15,6 +14,7 @@ import (
 
 	"go.starlark.net/resolve"
 	"go.starlark.net/starlark"
+	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/afterdarksys/adssh/engine"
@@ -338,6 +338,33 @@ func main() {
 func evalOnce(sess *engine.Session, src string) error {
 	security.LogCommand(src, "")
 
+	flow := parser.ClassifyFlow(src)
+	switch flow.Kind {
+	case parser.FlowReady:
+		err := repl.RunFlow(src, repl.FlowExec{
+			Gate:   sess.GateProgram,
+			Runner: sess.Runner,
+			Ctx:    context.Background(),
+		})
+		status := 0
+		if err != nil {
+			if es, ok := err.(interp.ExitStatus); ok {
+				status = int(es)
+				sess.Globals["?"] = starlark.MakeInt(status)
+				return es
+			}
+			sess.Globals["?"] = starlark.MakeInt(1)
+			return err
+		}
+		sess.Globals["?"] = starlark.MakeInt(status)
+		return nil
+	case parser.FlowIncomplete, parser.FlowSyntax:
+		if flow.Err != nil {
+			return flow.Err
+		}
+		return errors.New("flow: not a block")
+	}
+
 	mode := parser.DetermineMode(src)
 
 	if mode == parser.ModeStarlark {
@@ -362,6 +389,9 @@ func evalOnce(sess *engine.Session, src string) error {
 	} else if strings.HasPrefix(src, "$ ") {
 		src = strings.TrimSpace(src[2:])
 	}
+	if parser.ShellIncomplete(src) {
+		return parser.ErrIncompleteShell
+	}
 	f, parseErr := syntax.NewParser().Parse(strings.NewReader(src), "")
 	if parseErr != nil {
 		return fmt.Errorf("parse error: %v", parseErr)
@@ -376,34 +406,16 @@ func evalOnce(sess *engine.Session, src string) error {
 }
 
 func evalLineScript(sess *engine.Session, src string) error {
-	scanner := bufio.NewScanner(strings.NewReader(src))
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if line == "exit" || line == "quit" {
-			return nil
-		}
-		ignoreError := false
-		if strings.HasPrefix(line, "-") {
-			ignoreError = true
-			line = strings.TrimSpace(line[1:])
-		}
-		if err := evalOnce(sess, line); err != nil {
-			if ignoreError {
+	return repl.AccumulateScript(src, func(chunk string, line int, ignore bool) error {
+		if err := evalOnce(sess, chunk); err != nil {
+			if ignore {
 				fmt.Fprintln(sess.Err, err)
-				continue
+				return nil
 			}
-			return fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", line, err)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return nil
+		return nil
+	})
 }
 
 func runSAH(sec *security.Engine, sessionID string) int {

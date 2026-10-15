@@ -108,6 +108,14 @@ func TestDetermineMode(t *testing.T) {
 		{name: "whitespace only spaces", input: "   ", want: ModeShell},
 		{name: "whitespace only tabs", input: "\t\t", want: ModeShell},
 		{name: "command with trailing newline-like whitespace", input: "  ls -la  ", want: ModeShell},
+
+		{name: "posix if one line", input: "if true; then echo yes; else echo no; fi", want: ModeShell},
+		{name: "posix if colon after then", input: "if true; then echo:", want: ModeShell},
+		{name: "starlark if with trailing comment", input: "if x > 5:  # keep", want: ModeStarlark},
+		{name: "brace if", input: "if true { echo hi }", want: ModeShell},
+		{name: "brace if no space", input: "if{ echo hi }", want: ModeShell},
+		{name: "brace if tab", input: "if\ttrue { echo hi }", want: ModeShell},
+		{name: "quoted then stays brace shaped", input: `if echo "then" { echo hi }`, want: ModeShell},
 	}
 
 	for _, tc := range cases {
