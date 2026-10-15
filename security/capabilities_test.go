@@ -38,6 +38,7 @@ func TestClassifyCapabilities(t *testing.T) {
 		{"sys write_file", "starlark.sys.write_file", []string{CapFileops}},
 		{"sys exec_cmd", "starlark.sys.exec_cmd", []string{CapProc, CapStdio}},
 		{"sys exec_json", "starlark.sys.exec_json", []string{CapProc, CapStdio}},
+		{"sys parallel", "starlark.sys.parallel", []string{CapProc, CapStdio}},
 		{"sys getenv", "starlark.sys.getenv", []string{CapStdio}},
 		{"sys unknown fn", "starlark.sys.something_new", []string{CapStdio}},
 		{"sys no fn", "starlark.sys", []string{CapStdio}},

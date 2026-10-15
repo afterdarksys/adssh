@@ -42,7 +42,7 @@ var starlarkNamespaces = []string{
 
 // starlarkNamespaceKeys maps namespace → list of method/sub-namespace names.
 var starlarkNamespaceKeys = map[string][]string{
-	"sys":    {"getenv", "setenv", "load_plugin", "read_file", "write_file", "exec_cmd", "exec_async", "exec_json", "register_command"},
+	"sys":    {"getenv", "setenv", "load_plugin", "read_file", "write_file", "exec_cmd", "exec_async", "exec_json", "parallel", "register_command"},
 	"net":    {"tcp_send", "http_get"},
 	"crypto": {"md5", "sha256"},
 	"data":   {"json_parse", "json_dump", "yaml_parse", "yaml_dump"},

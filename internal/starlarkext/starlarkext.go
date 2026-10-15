@@ -129,6 +129,7 @@ func SetupExtensions(opts ExtensionOptions) {
 		_ = sysDict.SetKey(starlark.String("exec_cmd"), starlark.NewBuiltin("exec_cmd", createExecCmd(opts)))
 		_ = sysDict.SetKey(starlark.String("exec_async"), starlark.NewBuiltin("exec_async", createExecAsync(opts)))
 		_ = sysDict.SetKey(starlark.String("exec_json"), starlark.NewBuiltin("exec_json", createExecJSON(opts)))
+		_ = sysDict.SetKey(starlark.String("parallel"), starlark.NewBuiltin("parallel", createParallel(opts)))
 		_ = sysDict.SetKey(starlark.String("register_command"), createRegisterCommand(env))
 		_ = sysDict.SetKey(starlark.String("register_completer"), createRegisterCompleter(env))
 	}

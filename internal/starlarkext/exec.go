@@ -147,7 +147,7 @@ func resolveExecParams(opts ExtensionOptions, timeoutSecs, maxOutput int) execPa
 // interceptors with a timeout and a capped output buffer. It returns the captured
 // output and a fail-closed error on parse failure, policy denial, timeout, output
 // overrun, or a non-zero command result. It is the single implementation behind
-// exec_cmd, exec_json and exec_async.
+// exec_cmd, exec_json, exec_async, and parallel.
 func runGatedShell(ctx context.Context, p execParams, cmdStr string) (string, error) {
 	prog, err := syntax.NewParser().Parse(strings.NewReader(cmdStr), "")
 	if err != nil {

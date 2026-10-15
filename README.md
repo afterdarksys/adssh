@@ -137,12 +137,14 @@ Shell `if`/`then`/`else`/`fi` runs as a shell program. A one-line form is `if tr
 | `github` | repos, PRs, issues, releases, workflows |
 | `containers` | exec (audited), list, audit, replay, clean |
 | `data` | json_parse/dump, yaml_parse/dump |
-| `sys` | exec_cmd, exec_async, read_file, write_file, getenv, load_plugin |
+| `sys` | exec_cmd, exec_async, parallel, read_file, write_file, getenv, load_plugin |
 | `net` | tcp_send, http_get |
 | `crypto` | md5, sha256 |
 | `re` | match (RE2), pcre_match |
 | `sec` | audit, is_restricted, file_hash, check_policy |
 | `i18n` | load, set_lang, T |
+
+`sys.parallel` runs a list of command strings with a bounded number of goroutines. Each string goes through the same gate as `sys.exec_cmd`. The call returns stdout in input order. A denial, a non-zero exit, a timeout, or an output overrun fails the call. A list that is empty, too long, or not all strings runs nothing. Restricted mode does not provide `parallel`. `par` remains the shell tool that stamps one argv template across items.
 
 ## Virtual binaries
 

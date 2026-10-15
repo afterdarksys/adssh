@@ -121,7 +121,7 @@ func sysCapabilities(fn string) []string {
 	switch fn {
 	case "read_file", "write_file":
 		return []string{CapFileops}
-	case "exec_cmd", "exec_async", "exec_json", "load_plugin", "load_agent":
+	case "exec_cmd", "exec_async", "exec_json", "parallel", "load_plugin", "load_agent":
 		return []string{CapProc, CapStdio}
 	case "register_command", "register_completer":
 		return []string{CapStdio}
