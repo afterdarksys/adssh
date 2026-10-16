@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/afterdarksys/adssh/internal/attachproto"
 	"github.com/afterdarksys/adssh/internal/sys"
 )
 
@@ -159,7 +160,7 @@ func (f *attachFixture) attachDial(t *testing.T, key, id string, q url.Values, u
 	}
 	if upgrade {
 		req.Header.Set("Connection", "Upgrade")
-		req.Header.Set("Upgrade", sys.AttachProtocol)
+		req.Header.Set("Upgrade", attachproto.AttachProtocol)
 	}
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := req.Write(conn); err != nil {
@@ -176,7 +177,7 @@ func (f *attachFixture) attachDial(t *testing.T, key, id string, q url.Values, u
 		conn.Close()
 		return attachResult{status: resp.StatusCode, body: string(body)}
 	}
-	if !strings.EqualFold(resp.Header.Get("Upgrade"), sys.AttachProtocol) {
+	if !strings.EqualFold(resp.Header.Get("Upgrade"), attachproto.AttachProtocol) {
 		t.Fatalf("101 without Upgrade: %v", resp.Header)
 	}
 	_ = conn.SetDeadline(time.Time{})
@@ -212,17 +213,17 @@ func readUntil(t *testing.T, res attachResult, want string, timeout time.Duratio
 	defer func() { _ = res.conn.SetReadDeadline(time.Time{}) }()
 	var out strings.Builder
 	for {
-		typ, payload, err := sys.ReadAttachFrame(res.br)
+		typ, payload, err := attachproto.ReadAttachFrame(res.br)
 		if err != nil {
 			t.Fatalf("read frame (have %q): %v", out.String(), err)
 		}
 		switch typ {
-		case sys.AttachFrameOut:
+		case attachproto.AttachFrameOut:
 			out.Write(payload)
 			if want != "" && strings.Contains(out.String(), want) {
 				return out.String(), ""
 			}
-		case sys.AttachFrameClose:
+		case attachproto.AttachFrameClose:
 			var c struct {
 				Reason string `json:"reason"`
 			}
@@ -320,7 +321,7 @@ func TestAttachViewStreamsOutputAndAudits(t *testing.T) {
 	if reason != "" {
 		t.Fatalf("closed early: %s", reason)
 	}
-	if err := sys.WriteAttachFrame(res.conn, sys.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
+	if err := attachproto.WriteAttachFrame(res.conn, attachproto.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, reason := readUntil(t, res, "", 5*time.Second); reason != "detach" {
@@ -344,13 +345,13 @@ func TestAttachViewStreamsOutputAndAudits(t *testing.T) {
 
 func TestAttachViewRefusesInput(t *testing.T) {
 	f := newAttachFixture(t, "attach-view-in", attachOptions{})
-	for _, typ := range []byte{sys.AttachFrameIn, sys.AttachFrameResize} {
+	for _, typ := range []byte{attachproto.AttachFrameIn, attachproto.AttachFrameResize} {
 		res := f.attachOK(t, testAdminKey("viewer"), attachQuery("alice", "view", "support", "look"))
 		payload := []byte("view-keystroke")
-		if typ == sys.AttachFrameResize {
+		if typ == attachproto.AttachFrameResize {
 			payload = []byte(`{"cols":100,"rows":30}`)
 		}
-		if err := sys.WriteAttachFrame(res.conn, typ, payload); err != nil {
+		if err := attachproto.WriteAttachFrame(res.conn, typ, payload); err != nil {
 			t.Fatal(err)
 		}
 		if _, reason := readUntil(t, res, "", 5*time.Second); reason != "view_only" {
@@ -409,7 +410,7 @@ func TestAttachRWSupportNeedsOwnerApproval(t *testing.T) {
 
 	// Keystrokes reach the session's terminal.
 	const keys = "secret-keystroke-xyzzy\r"
-	if err := sys.WriteAttachFrame(res.conn, sys.AttachFrameIn, []byte(keys)); err != nil {
+	if err := attachproto.WriteAttachFrame(res.conn, attachproto.AttachFrameIn, []byte(keys)); err != nil {
 		t.Fatal(err)
 	}
 	_ = f.ptyRead.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -418,7 +419,7 @@ func TestAttachRWSupportNeedsOwnerApproval(t *testing.T) {
 		t.Fatalf("pty got %q (%v), want %q", got, err, keys)
 	}
 	// A resize is accepted in rw (the pipe cannot be resized; the attach stays up).
-	if err := sys.WriteAttachFrame(res.conn, sys.AttachFrameResize, []byte(`{"cols":100,"rows":30}`)); err != nil {
+	if err := attachproto.WriteAttachFrame(res.conn, attachproto.AttachFrameResize, []byte(`{"cols":100,"rows":30}`)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -432,7 +433,7 @@ func TestAttachRWSupportNeedsOwnerApproval(t *testing.T) {
 		t.Fatalf("second rw = %d %s", res2.status, res2.body)
 	}
 
-	if err := sys.WriteAttachFrame(res.conn, sys.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
+	if err := attachproto.WriteAttachFrame(res.conn, attachproto.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, reason := readUntil(t, res, "", 5*time.Second); reason != "detach" {
@@ -479,7 +480,7 @@ func TestAttachRWInvestigationNeedsSecondKey(t *testing.T) {
 		t.Fatalf("second key approval = %d %s", rec.Code, rec.Body.String())
 	}
 	res := f.attachOK(t, testAdminKey("ops"), q)
-	if err := sys.WriteAttachFrame(res.conn, sys.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
+	if err := attachproto.WriteAttachFrame(res.conn, attachproto.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, reason := readUntil(t, res, "", 5*time.Second); reason != "detach" {
@@ -554,7 +555,7 @@ func TestSnoopNotifyPolicyAndLock(t *testing.T) {
 		t.Setenv("ADSSH_SNOOP_NOTIFY_LOCK", c.lock)
 		t.Setenv("ADSSH_SNOOP_NOTIFY", c.def)
 		res := f.attachOK(t, testAdminKey("viewer"), attachQuery("alice", "view", c.purpose, "case"))
-		if err := sys.WriteAttachFrame(res.conn, sys.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
+		if err := attachproto.WriteAttachFrame(res.conn, attachproto.AttachFrameClose, []byte(`{"reason":"detach"}`)); err != nil {
 			t.Fatal(err)
 		}
 		readUntil(t, res, "", 5*time.Second)

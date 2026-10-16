@@ -18,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/afterdarksys/adssh/internal/attachproto"
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/creack/pty"
 )
@@ -185,7 +186,7 @@ func (h *adminHTTPHandler) serveAttach(w http.ResponseWriter, r *http.Request, p
 	fail := func(status int, code string) { refuse(status, map[string]any{"error": code}) }
 
 	if !headerHasToken(r.Header, "Connection", "upgrade") ||
-		!strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), sys.AttachProtocol) {
+		!strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), attachproto.AttachProtocol) {
 		fail(http.StatusBadRequest, "bad_upgrade")
 		return
 	}
@@ -325,7 +326,7 @@ func (h *adminHTTPHandler) serveAttach(w http.ResponseWriter, r *http.Request, p
 	_ = conn.SetDeadline(time.Time{})
 	_ = conn.SetWriteDeadline(time.Now().Add(attachWriteTimeout))
 	_, err = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: " +
-		sys.AttachProtocol + "\r\n\r\n")
+		attachproto.AttachProtocol + "\r\n\r\n")
 	if err == nil {
 		err = brw.Flush()
 	}
@@ -584,9 +585,9 @@ func (o *attachOut) Write(p []byte) (int, error) {
 
 func writeAttachOut(conn net.Conn, b []byte) error {
 	for len(b) > 0 {
-		n := min(len(b), sys.AttachMaxFrame)
+		n := min(len(b), attachproto.AttachMaxFrame)
 		_ = conn.SetWriteDeadline(time.Now().Add(attachWriteTimeout))
-		if err := sys.WriteAttachFrame(conn, sys.AttachFrameOut, b[:n]); err != nil {
+		if err := attachproto.WriteAttachFrame(conn, attachproto.AttachFrameOut, b[:n]); err != nil {
 			return err
 		}
 		b = b[n:]
@@ -631,7 +632,7 @@ func runAttach(session *sys.Session, a *attachEntry, conn net.Conn, br *bufio.Re
 		defer close(readerDone)
 		defer inW.Close()
 		for {
-			typ, payload, err := sys.ReadAttachFrame(br)
+			typ, payload, err := attachproto.ReadAttachFrame(br)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					a.end("client_closed")
@@ -642,10 +643,10 @@ func runAttach(session *sys.Session, a *attachEntry, conn net.Conn, br *bufio.Re
 			}
 			touch()
 			switch typ {
-			case sys.AttachFrameClose:
+			case attachproto.AttachFrameClose:
 				a.end("detach")
 				return
-			case sys.AttachFrameIn:
+			case attachproto.AttachFrameIn:
 				if !a.rw {
 					a.end("view_only")
 					return
@@ -654,7 +655,7 @@ func runAttach(session *sys.Session, a *attachEntry, conn net.Conn, br *bufio.Re
 					a.end("input_closed")
 					return
 				}
-			case sys.AttachFrameResize:
+			case attachproto.AttachFrameResize:
 				if !a.rw {
 					a.end("view_only")
 					return
@@ -701,7 +702,7 @@ func runAttach(session *sys.Session, a *attachEntry, conn net.Conn, br *bufio.Re
 	payload, err := json.Marshal(map[string]string{"reason": a.reason})
 	if err == nil {
 		_ = conn.SetWriteDeadline(time.Now().Add(attachWriteTimeout))
-		_ = sys.WriteAttachFrame(conn, sys.AttachFrameClose, payload) // best-effort: the client may be gone
+		_ = attachproto.WriteAttachFrame(conn, attachproto.AttachFrameClose, payload) // best-effort: the client may be gone
 	}
 	_ = conn.Close()
 	<-readerDone
