@@ -16,7 +16,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,22 +31,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/afterdarksys/adssh/internal/attachproto"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
-// adssh-attach/1 framing: 4-byte big-endian payload length, 1 type byte,
-// payload. These mirror internal/sys/attach_frame.go; TestFrameConstantsMatch
-// fails if they drift. adsshadm does not import internal/sys, because that
-// package's init turns any binary run with --session-child into a command
-// launcher, which an admin client has no business carrying.
+// adssh-attach/1 framing comes from internal/attachproto, the package the
+// server uses, so the two cannot drift. It imports nothing from adssh and has
+// no init. adsshadm must never import internal/sys: that package's init turns
+// any binary run with --session-child into a command launcher
+// (TestShippedBinaryDoesNotImportInternalSys).
 const (
-	attachProtocol = "adssh-attach/1"
-	frameOut       = byte(0x10) // server -> client: raw terminal output
-	frameIn        = byte(0x11) // client -> server: raw input (rw only)
-	frameResize    = byte(0x12) // client -> server: {"cols":N,"rows":N} (rw only)
-	frameClose     = byte(0x13) // either way: {"reason":"..."}
-	maxFrame       = 1 << 20
+	attachProtocol = attachproto.AttachProtocol
+	frameOut       = attachproto.AttachFrameOut    // server -> client: raw terminal output
+	frameIn        = attachproto.AttachFrameIn     // client -> server: raw input (rw only)
+	frameResize    = attachproto.AttachFrameResize // client -> server: {"cols":N,"rows":N} (rw only)
+	frameClose     = attachproto.AttachFrameClose  // either way: {"reason":"..."}
+	maxFrame       = attachproto.AttachMaxFrame
 	detachKey      = 0x1d // Ctrl-]
 	maxReason      = 512
 )
@@ -268,31 +268,11 @@ func attachRefusal(req snoopRequest, code, requestID string) string {
 }
 
 func writeFrame(w io.Writer, typ byte, payload []byte) error {
-	if len(payload) > maxFrame {
-		return errors.New("attach: frame too large")
-	}
-	buf := make([]byte, 5+len(payload))
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(payload)))
-	buf[4] = typ
-	copy(buf[5:], payload)
-	_, err := w.Write(buf)
-	return err
+	return attachproto.WriteAttachFrame(w, typ, payload)
 }
 
 func readFrame(r io.Reader) (byte, []byte, error) {
-	var hdr [5]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return 0, nil, err
-	}
-	n := binary.BigEndian.Uint32(hdr[:4])
-	if n > maxFrame {
-		return 0, nil, errors.New("attach: frame too large")
-	}
-	payload := make([]byte, n)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return 0, nil, err
-	}
-	return hdr[4], payload, nil
+	return attachproto.ReadAttachFrame(r)
 }
 
 // pump copies frames from the server to out until close, and keystrokes from
@@ -352,7 +332,8 @@ func pump(conn io.Writer, frames io.Reader, in io.Reader, stopIn func(), out io.
 			if errors.Is(err, io.EOF) {
 				return "connection closed", nil
 			}
-			return "", err
+			_ = send(frameClose, []byte(`{"reason":"protocol"}`))
+			return "", fmt.Errorf("attach: %w", err)
 		}
 		switch typ {
 		case frameOut:

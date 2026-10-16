@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
 )
 
@@ -566,29 +565,6 @@ func TestCompleterOffersCommandsAndLiveValues(t *testing.T) {
 	got, _ = c.Do([]rune("guard "), 6)
 	if len(got) != 1 || string(got[0]) != "unban " {
 		t.Fatalf("guard completion %q", got)
-	}
-}
-
-// The test binary may import internal/sys; the shipped adsshadm must not.
-func TestFrameConstantsMatchServer(t *testing.T) {
-	if attachProtocol != sys.AttachProtocol || maxFrame != sys.AttachMaxFrame ||
-		frameOut != sys.AttachFrameOut || frameIn != sys.AttachFrameIn ||
-		frameResize != sys.AttachFrameResize || frameClose != sys.AttachFrameClose {
-		t.Fatal("adsshadm's adssh-attach/1 constants differ from internal/sys/attach_frame.go")
-	}
-	var buf bytes.Buffer
-	if err := writeFrame(&buf, frameIn, []byte("ls\r")); err != nil {
-		t.Fatal(err)
-	}
-	typ, p, err := sys.ReadAttachFrame(&buf)
-	if err != nil || typ != frameIn || string(p) != "ls\r" {
-		t.Fatalf("server cannot read the client's frame: %v %x %q", err, typ, p)
-	}
-	if err := sys.WriteAttachFrame(&buf, sys.AttachFrameOut, []byte("hi")); err != nil {
-		t.Fatal(err)
-	}
-	if typ, p, err := readFrame(&buf); err != nil || typ != frameOut || string(p) != "hi" {
-		t.Fatalf("client cannot read the server's frame: %v %x %q", err, typ, p)
 	}
 }
 
