@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -66,13 +65,34 @@ const (
 	extCertKeyID  = "adssh-cert-key-id"
 )
 
-// q quotes a client-controlled value for a key=value record and caps it.
-func q(s string) string {
-	if len(s) > 128 {
-		s = s[:128]
+// EncodeAuditValue percent-encodes v for a key=value audit record: every
+// byte outside [A-Za-z0-9._@:+/,~-] becomes %XX, so the value carries no
+// space, quote, or '='. Quoting is not enough: the chain's secret redaction
+// matches key=[^\s]+ and would swallow a closing quote, letting a crafted
+// login name hide the fields after it. Client-controlled values are capped at
+// 256 bytes before encoding.
+func EncodeAuditValue(v string) string { return encodeAudit(v, 256) }
+
+func encodeAudit(v string, max int) string {
+	if max > 0 && len(v) > max {
+		v = v[:max]
 	}
-	return strconv.Quote(s)
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("._@:+/,~-", c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
 }
+
+// q encodes a client-controlled value; qFull encodes a server-built value
+// (principals, fingerprint lists) without truncating it.
+func q(v string) string     { return encodeAudit(v, 256) }
+func qFull(v string) string { return encodeAudit(v, 0) }
 
 // authRecord gathers one connection's authentication attempts.
 type authRecord struct {
@@ -141,8 +161,9 @@ func containsString(list []string, s string) bool {
 
 const (
 	loginFailWindow  = time.Minute
-	loginFailBurst   = 5
-	loginFailSources = 4096
+	loginFailBurst   = 5    // per source per window
+	loginFailGlobal  = 60   // all sources per window: rotating addresses cannot flood the chain
+	loginFailSources = 4096 // tracked sources before the table resets
 )
 
 type failWindow struct {
@@ -152,9 +173,11 @@ type failWindow struct {
 }
 
 var (
-	loginFailMu  sync.Mutex
-	loginFailSrc = map[string]*failWindow{}
-	loginFailNow = time.Now
+	loginFailMu     sync.Mutex
+	loginFailSrc    = map[string]*failWindow{}
+	loginFailNow    = time.Now
+	loginFailAll    failWindow
+	loginFailAllNew = true
 )
 
 // allowLoginFailRecord reports whether a failure from host may be written to
@@ -163,6 +186,16 @@ func allowLoginFailRecord(host string) (bool, int) {
 	loginFailMu.Lock()
 	defer loginFailMu.Unlock()
 	now := loginFailNow()
+	if loginFailAllNew || now.Sub(loginFailAll.start) >= loginFailWindow {
+		if !loginFailAllNew && loginFailAll.suppressed > 0 {
+			slog.Warn("ssh login failures not written to the audit chain (global rate limit)", "count", loginFailAll.suppressed)
+		}
+		loginFailAll, loginFailAllNew = failWindow{start: now}, false
+	}
+	if loginFailAll.count >= loginFailGlobal {
+		loginFailAll.suppressed++
+		return false, 0
+	}
 	w := loginFailSrc[host]
 	if w == nil || now.Sub(w.start) >= loginFailWindow {
 		suppressed := 0
@@ -170,24 +203,37 @@ func allowLoginFailRecord(host string) (bool, int) {
 			suppressed = w.suppressed
 		}
 		if w == nil && len(loginFailSrc) >= loginFailSources {
+			dropped := 0
+			for _, old := range loginFailSrc {
+				dropped += old.suppressed
+			}
+			slog.Warn("ssh login-failure table reset (wide scan)", "sources", len(loginFailSrc), "unreported_suppressed", dropped)
 			loginFailSrc = map[string]*failWindow{} // bounded memory under a wide scan
 		}
 		loginFailSrc[host] = &failWindow{start: now, count: 1}
+		loginFailAll.count++
 		return true, suppressed
 	}
 	if w.count < loginFailBurst {
 		w.count++
+		loginFailAll.count++
 		return true, 0
 	}
 	w.suppressed++
 	return false, 0
 }
 
+// hostOf is the rate-limit key for a peer: the IPv4 address, or the IPv6 /64
+// (one host usually owns a whole /64, so per-address keys are free to rotate).
 func hostOf(peer string) string {
-	if h, _, err := net.SplitHostPort(peer); err == nil {
-		return h
+	h := peer
+	if hh, _, err := net.SplitHostPort(peer); err == nil {
+		h = hh
 	}
-	return peer
+	if ip := net.ParseIP(h); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	}
+	return h
 }
 
 // recordLoginFailure summarizes a connection whose handshake failed.
@@ -197,17 +243,19 @@ func recordLoginFailure(peer string, rec *authRecord, handshakeErr error) {
 	reasons := append([]string(nil), rec.reasons...)
 	fps := append([]string(nil), rec.keyFPs...)
 	rec.mu.Unlock()
+	if attempts == 0 {
+		// Never tried to authenticate: a probe or scan, not a login.
+		slog.Debug("ssh connection closed before authentication", "addr", peer, "error", handshakeErr)
+		return
+	}
 	slog.Info("ssh login failed", "addr", peer, "user", user, "attempts", attempts,
 		"keys", strings.Join(fps, ","), "reasons", strings.Join(reasons, "; "), "error", handshakeErr)
-	if attempts == 0 {
-		return // never tried to authenticate: a probe, not a login
-	}
 	ok, suppressed := allowLoginFailRecord(hostOf(peer))
 	if !ok {
 		slog.Debug("ssh login failure not written to the audit chain (rate limit)", "addr", peer)
 		return
 	}
-	event := fmt.Sprintf("SSH_LOGIN_FAIL addr=%s user=%s attempts=%d keys=%s", peer, q(user), attempts, q(strings.Join(fps, ",")))
+	event := fmt.Sprintf("SSH_LOGIN_FAIL addr=%s user=%s attempts=%d keys=%s", peer, q(user), attempts, qFull(strings.Join(fps, ",")))
 	if suppressed > 0 {
 		event += fmt.Sprintf(" suppressed_before=%d", suppressed)
 	}
@@ -223,7 +271,7 @@ func loginOKEvent(conn *ssh.ServerConn) string {
 		conn.RemoteAddr(), q(conn.User()), q(string(conn.ClientVersion())), ext[extAuthMethod], ext[extPubkeyFP])
 	if ext[extAuthMethod] == "cert" {
 		event += fmt.Sprintf(" cert_key_fp=%s ca_fp=%s serial=%s key_id=%s principals=%s",
-			ext[extCertKeyFP], ext[extCertCAFP], ext[extCertSerial], q(ext[extCertKeyID]), q(ext[principalsExtension]))
+			ext[extCertKeyFP], ext[extCertCAFP], ext[extCertSerial], q(ext[extCertKeyID]), qFull(ext[principalsExtension]))
 	}
 	return event
 }

@@ -3,6 +3,7 @@ package sys
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -112,7 +113,7 @@ func TestLoginOKIsAuditedWithFingerprint(t *testing.T) {
 	}
 	defer client.Close()
 	ev := audit.waitFor(t, "SSH_LOGIN_OK")
-	for _, want := range []string{`user="alice"`, "method=publickey", "key_fp=" + ssh.FingerprintSHA256(key.PublicKey())} {
+	for _, want := range []string{"user=alice", "method=publickey", "key_fp=" + ssh.FingerprintSHA256(key.PublicKey())} {
 		if !strings.Contains(ev, want) {
 			t.Errorf("%q lacks %q", ev, want)
 		}
@@ -136,7 +137,7 @@ func TestLoginFailIsAuditedOncePerConnection(t *testing.T) {
 	if n := len(audit.matching("SSH_LOGIN_FAIL")); n != 1 {
 		t.Fatalf("%d SSH_LOGIN_FAIL events for one connection, want 1", n)
 	}
-	for _, want := range []string{`user="alice"`, ssh.FingerprintSHA256(bad1.PublicKey()), ssh.FingerprintSHA256(bad2.PublicKey())} {
+	for _, want := range []string{"user=alice", ssh.FingerprintSHA256(bad1.PublicKey()), ssh.FingerprintSHA256(bad2.PublicKey())} {
 		if !strings.Contains(ev, want) {
 			t.Errorf("%q lacks %q", ev, want)
 		}
@@ -205,7 +206,7 @@ func TestSessionStartAndEndAreAudited(t *testing.T) {
 	}
 	start := audit.waitFor(t, "SSH_SESSION_START")
 	end := audit.waitFor(t, "SSH_SESSION_END")
-	if !strings.Contains(start, `user="alice"`) || !strings.Contains(end, "exit=-1 reason=error") {
+	if !strings.Contains(start, "user=alice") || !strings.Contains(end, "exit=-1 reason=error") {
 		t.Fatalf("start %q end %q", start, end)
 	}
 }
@@ -214,9 +215,13 @@ func TestLoginFailRecordsAreRateLimitedPerSource(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	loginFailMu.Lock()
 	origNow, origSrc := loginFailNow, loginFailSrc
-	loginFailNow, loginFailSrc = func() time.Time { return now }, map[string]*failWindow{}
+	loginFailNow, loginFailSrc, loginFailAllNew = func() time.Time { return now }, map[string]*failWindow{}, true
 	loginFailMu.Unlock()
-	t.Cleanup(func() { loginFailMu.Lock(); loginFailNow, loginFailSrc = origNow, origSrc; loginFailMu.Unlock() })
+	t.Cleanup(func() {
+		loginFailMu.Lock()
+		loginFailNow, loginFailSrc, loginFailAllNew = origNow, origSrc, true
+		loginFailMu.Unlock()
+	})
 
 	for i := 0; i < loginFailBurst; i++ {
 		if ok, _ := allowLoginFailRecord("198.51.100.7"); !ok {
@@ -239,14 +244,43 @@ func TestLoginFailRecordsAreRateLimitedPerSource(t *testing.T) {
 }
 
 func TestClientControlledFieldsCannotForgeFields(t *testing.T) {
-	if got := q(`alice key_fp=SHA256:forged`); got != `"alice key_fp=SHA256:forged"` {
-		t.Fatalf("q = %s", got)
+	for _, in := range []string{`alice key_fp=SHA256:forged`, `x token="`, "x\n SSH_LOGIN_OK user=\"root\"", `a'b`, "100%"} {
+		got := q(in)
+		if strings.ContainsAny(got, " =\"'\n\t") {
+			t.Errorf("q(%q) = %q still carries a separator", in, got)
+		}
 	}
-	if got := q(strings.Repeat("a", 500)); len(got) > 132 {
-		t.Fatalf("q did not cap: %d bytes", len(got))
+	if got := q(strings.Repeat("a", 500)); len(got) != 256 {
+		t.Fatalf("q did not cap client values: %d bytes", len(got))
 	}
-	if got := q("x\n SSH_LOGIN_OK user=\"root\""); strings.Contains(got, "\n") {
-		t.Fatalf("q left a newline: %s", got)
+	long := strings.Repeat("p", 500)
+	if got := qFull(long); got != long {
+		t.Fatal("qFull truncated a server-built value")
+	}
+}
+
+func TestLoginFailGlobalCap(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	loginFailMu.Lock()
+	origNow, origSrc := loginFailNow, loginFailSrc
+	loginFailNow, loginFailSrc, loginFailAllNew = func() time.Time { return now }, map[string]*failWindow{}, true
+	loginFailMu.Unlock()
+	t.Cleanup(func() {
+		loginFailMu.Lock()
+		loginFailNow, loginFailSrc, loginFailAllNew = origNow, origSrc, true
+		loginFailMu.Unlock()
+	})
+	allowed := 0
+	for i := 0; i < loginFailGlobal*3; i++ {
+		if ok, _ := allowLoginFailRecord(fmt.Sprintf("198.51.%d.%d", i/250, i%250)); ok {
+			allowed++
+		}
+	}
+	if allowed != loginFailGlobal {
+		t.Fatalf("rotating sources wrote %d records in one window, want %d", allowed, loginFailGlobal)
+	}
+	if hostOf("[2001:db8:1:2:aaaa::1]:22") != hostOf("[2001:db8:1:2:bbbb::9]:22") {
+		t.Fatal("IPv6 addresses in one /64 are limited separately")
 	}
 }
 

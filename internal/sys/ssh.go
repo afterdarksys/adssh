@@ -100,6 +100,9 @@ type SSHServerOptions struct {
 	// PermitRoot allows a login as "root" or as any name that resolves to
 	// uid 0. The key or certificate must still be bound to that name.
 	PermitRoot bool
+	// RevokedKeysPath, when set, names the revocation file checked on every
+	// login (ssh_revoke.go). A missing or malformed file refuses logins.
+	RevokedKeysPath string
 	// Audit records SSH_LOGIN_OK, SSH_LOGIN_FAIL, SSH_SESSION_START, and
 	// SSH_SESSION_END in the audit chain (see ssh_audit.go). A failed write
 	// refuses the login or session. Nil records nothing.
@@ -212,6 +215,10 @@ func loginIsRoot(name string) (bool, error) {
 }
 
 func publicKeyCallback(keys authorizedKeySet, opts SSHServerOptions) func(ssh.ConnMetadata, ssh.PublicKey) (*ssh.Permissions, error) {
+	var revoked *revocationChecker
+	if opts.RevokedKeysPath != "" {
+		revoked = newRevocationChecker(opts.RevokedKeysPath)
+	}
 	checker := &ssh.CertChecker{
 		IsUserAuthority: func(key ssh.PublicKey) bool {
 			return keys.authorities[string(key.Marshal())]
@@ -246,6 +253,13 @@ func publicKeyCallback(keys authorizedKeySet, opts SSHServerOptions) func(ssh.Co
 				if !validSessionToken(principal) {
 					return nil, fmt.Errorf("ssh: certificate has an invalid principal")
 				}
+			}
+		}
+		if revoked != nil {
+			if err := revoked.check(key); err != nil {
+				noteAuthKey(conn.RemoteAddr().String(), presentedFP)
+				slog.Warn("ssh login refused: revocation", "addr", conn.RemoteAddr().String(), "user", conn.User(), "key_fp", presentedFP, "reason", err)
+				return nil, err
 			}
 		}
 		authed, err := checker.Authenticate(conn, key)
@@ -397,6 +411,11 @@ func EnableSSHWithOptions(address, hostKeyPath, authorizedKeysPath string, opts 
 		)
 	}
 
+	if opts.RevokedKeysPath != "" {
+		if _, err := newRevocationChecker(opts.RevokedKeysPath).current(); err != nil {
+			return fmt.Errorf("revoked keys: %v", err)
+		}
+	}
 	config := &ssh.ServerConfig{PublicKeyCallback: publicKeyCallback(authorizedKeys, opts), AuthLogCallback: authLogCallback}
 
 	signer, err := loadOrGenerateHostKey(hostKeyPath)
@@ -561,7 +580,9 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, slots chan st
 	peer := nConn.RemoteAddr().String()
 	decision := guard.Admit(peer)
 	if !decision.Allow {
-		slog.Warn("ssh connection refused by guard", "addr", peer, "reason", decision.Reason)
+		// Debug: a banned address reconnecting would otherwise flood the log.
+		// The ban itself is logged when the guard records it.
+		slog.Debug("ssh connection refused by guard", "addr", peer, "reason", decision.Reason)
 		_ = nConn.Close()
 		return
 	}
@@ -755,6 +776,14 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 				return
 			}
 		}
+		// Fail closed: a session that cannot be recorded does not start, and
+		// no session output flows before the record is written.
+		if err := auditSSH(fmt.Sprintf("SSH_SESSION_START session=%s user=%s addr=%s", sessionID, q(name), peer)); err != nil {
+			slog.Error("ssh session refused: audit write failed", "session", sessionID, "addr", peer, "user", name, "error", err)
+			_, _ = channel.Write([]byte("adssh: session refused: the audit log is unavailable\r\n"))  // best-effort
+			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1})) // best-effort
+			return
+		}
 		go func() { _, _ = io.Copy(outCast, ptyMaster) }() // best-effort: stream ends on session close
 		// EOF on the client's stdin does not end a pty session.
 		go func() { _, _ = io.Copy(ptyMaster, channel) }() // best-effort
@@ -765,11 +794,6 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 			<-requestsDone
 			_ = ptyMaster.Close()
 		}()
-		// Fail closed: a session that cannot be recorded does not start.
-		if err := auditSSH(fmt.Sprintf("SSH_SESSION_START session=%s user=%s addr=%s", sessionID, q(name), peer)); err != nil {
-			slog.Error("ssh session refused: audit write failed", "session", sessionID, "addr", peer, "user", name, "error", err)
-			return
-		}
 		began := time.Now()
 		slog.Info("ssh session start", "session", sessionID, "addr", peer, "user", name)
 		// The starter blocks until the session process exits.

@@ -302,7 +302,7 @@ func main() {
 				return nil, err
 			}
 			if err := enableSSHWithHangup(func() error {
-				return sys.EnableSSHWithOptions(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer)
+				return sys.EnableSSHWithOptions(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, RevokedKeysPath: os.Getenv("ADSSH_REVOKED_KEYS"), Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer)
 			}); err != nil {
 				return nil, err
 			}
@@ -338,7 +338,7 @@ func main() {
 	}
 
 	if cfg.ServeAddr != "" {
-		if err := sys.EnableSSHWithOptions(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer); err != nil {
+		if err := sys.EnableSSHWithOptions(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, RevokedKeysPath: os.Getenv("ADSSH_REVOKED_KEYS"), Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start SSH server: %v\n", err)
 			os.Exit(1)
 		}
@@ -665,6 +665,7 @@ ENVIRONMENT VARIABLES
   ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
   ADSSH_RC                RC script (default: ~/.adsshrc)
   ADSSH_ADMIN_KEYS        admin serve named-key file, enterprise build (0600 name=key; approve/deny/unban)
+  ADSSH_REVOKED_KEYS      SSH revocation file: SHA256:<fp>, serial:<n>, keyid:<id> per line (fails closed)
   ADSSH_LOG_LEVEL         Listener log level: error|warn|info|debug (default info; stderr)
   ADSSH_LOG_FORMAT        Listener log format: text|json (default text)
   ADSSH_SNOOP_NOTIFY      Snoop attach notice default for support (on|off; default on)
