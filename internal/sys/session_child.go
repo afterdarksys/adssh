@@ -67,6 +67,13 @@ func runSessionChild(args []string) error {
 		}
 		specs = append(specs, a)
 	}
+	// A caught signal is reset to the default by execve; an ignored one is
+	// not. Notify replaces an inherited SIG_IGN with the runtime handler.
+	// It starts the runtime's signal thread, so it must run before the
+	// limits: RLIMIT_NPROC counts every thread the user owns system-wide,
+	// and once it is applied a busy host has no room for one more thread,
+	// so pthread_create fails and the login dies with SIGABRT.
+	signal.Notify(make(chan os.Signal, 1), sessionDefaultSignals...)
 	for _, spec := range specs {
 		key, val, ok := strings.Cut(spec, "=")
 		if !ok {
@@ -91,9 +98,6 @@ func runSessionChild(args []string) error {
 	if len(argv) == 0 {
 		argv = []string{target}
 	}
-	// A caught signal is reset to the default by execve; an ignored one is
-	// not. Notify replaces an inherited SIG_IGN with the runtime handler.
-	signal.Notify(make(chan os.Signal, 1), sessionDefaultSignals...)
 	return execProcess(target, argv, os.Environ())
 }
 

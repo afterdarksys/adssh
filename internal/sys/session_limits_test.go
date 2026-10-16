@@ -451,3 +451,16 @@ func TestSessionChildRestoresDefaultSignals(t *testing.T) {
 		}
 	}
 }
+
+// RLIMIT_NPROC counts every thread the user owns system-wide. The child must
+// not need a new thread after applying it, or a login on a busy host aborts
+// in pthread_create before the shell starts.
+func TestSessionChildStartsUnderTinyNPROC(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is not available")
+	}
+	out, err := sessionChildCmd(t, []string{"nproc=1"}, "/bin/sh", "sh", "-c", "echo started").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "started" {
+		t.Fatalf("session child under nproc=1: err=%v out=%q", err, out)
+	}
+}
