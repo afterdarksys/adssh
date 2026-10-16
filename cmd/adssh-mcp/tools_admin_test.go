@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -193,33 +192,6 @@ func TestIdentityStatusOmitsTokenAndElevation(t *testing.T) {
 	}
 }
 
-func TestAdminListApprovalsOmitsToken(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	pending := filepath.Join(home, ".adssh", "foureyes", "pending")
-	if err := os.MkdirAll(pending, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	const token = "super-secret-approval-token"
-	body := []byte(`{"token":"` + token + `","request_id":"abc123","command":"rm","requester":"alice","hostname":"h","timestamp":"t","rule":{"pattern":"rm *","approver":"bob","ttl":10}}`)
-	if err := os.WriteFile(filepath.Join(pending, "abc123.json"), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := engine.New(engine.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.WithValue(context.Background(), mcpSecurityEngineContextKey{}, eng.Security())
-	result, err := handleAdminListApprovals()(ctx, mcp.CallToolRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
-	if result.IsError || strings.Contains(text, token) || strings.Contains(text, `"token"`) || !strings.Contains(text, "abc123") {
-		t.Fatalf("approvals = %#v %s", result, text)
-	}
-}
-
 func TestIdentityDeviceLoginRequiresSessionAndRejectsBadInterval(t *testing.T) {
 	eng, err := engine.New(engine.Config{})
 	if err != nil {
@@ -259,29 +231,6 @@ func TestIdentityDeviceLoginRequiresSessionAndRejectsBadInterval(t *testing.T) {
 	}})
 	if err != nil || absent.IntervalSet {
 		t.Fatalf("absent interval = %+v %v", absent, err)
-	}
-}
-
-func TestAdminExplainDoesNotExecute(t *testing.T) {
-	eng, err := engine.New(engine.Config{EngineConfig: security.EngineConfig{PolicySource: []byte(`
-package adssh.authz
-default allow = false
-required_role := "ops"
-`)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.WithValue(context.Background(), mcpSecurityEngineContextKey{}, eng.Security())
-	result, err := handleAdminExplain()(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{
-		Arguments: map[string]any{"command": "rm -rf /tmp/adssh-explain-test"},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := result.Content[0].(mcp.TextContent).Text
-	var explanation security.CommandExplanation
-	if result.IsError || json.Unmarshal([]byte(text), &explanation) != nil || explanation.Outcome != "denied" || explanation.RequiredRole != "ops" {
-		t.Fatalf("explain = %#v %s", result, text)
 	}
 }
 
@@ -335,9 +284,6 @@ func TestAdminToolsCannotApproveOrDeny(t *testing.T) {
 		if _, ok := tools[name]; ok {
 			t.Fatalf("tool %s is still registered", name)
 		}
-	}
-	if _, ok := tools["admin_list_approvals"]; !ok {
-		t.Fatal("read-only approval list is missing")
 	}
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "pending"), 0o700); err != nil {

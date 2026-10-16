@@ -5,10 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,31 +16,6 @@ import (
 
 // These tests prove that each audited action below does not happen when its
 // audit record cannot be written: breakChain makes every later append fail.
-
-func TestAdminHTTPReadFailsClosedWhenAuditFails(t *testing.T) {
-	session := &sys.Session{ID: "admin-audit-fail", User: "alice"}
-	registerTestSession(t, session)
-	eng, chain, _ := chainEngine(t)
-	breakChain(t, eng, chain)
-	rec := adminDo(t, NewAdminHTTPHandler(eng, "secret"), http.MethodGet, "/v1/sessions", "", "secret")
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("read with broken audit = %d %s", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "admin-audit-fail") {
-		t.Fatalf("unaudited response disclosed session data: %s", rec.Body.String())
-	}
-}
-
-func TestAdminHTTPUnbanFailsClosedWhenAuditFails(t *testing.T) {
-	eng, chain, _ := chainEngine(t)
-	breakChain(t, eng, chain)
-	h := NewAdminHTTPHandlerWithKeys(eng, "", []AdminKey{{Name: "bob", Key: testAdminKey("bob")}})
-	// guard is inactive here, so reaching guard.Unban would answer 500.
-	rec := adminDo(t, h, http.MethodPost, "/v1/guard/unban", `{"addr":"192.0.2.1"}`, testAdminKey("bob"))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unban with broken audit = %d %s", rec.Code, rec.Body.String())
-	}
-}
 
 func TestMirrorKillFailsClosedWhenAuditFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

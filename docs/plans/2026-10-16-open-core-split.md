@@ -2,22 +2,22 @@
 
 Ryan approved: the core under Apache 2.0, the enterprise layer under BSL 1.1 in `ee/` (`ee/LICENSE`, `docs/LICENSING.md`). Until the code is split, a release cannot carry these licenses honestly, because enterprise code still lives in core packages. The split comes before v0.10.0.
 
-## Mechanism
+## Mechanism (revised 2026-10-16, Ryan: "careful afternoon, we aren't trying to break shit")
 
-- Enterprise code moves into packages under `ee/` (for example `ee/admin`, `ee/foureyes`, `ee/grid`). It registers itself from `init()`, the same way the virtual binaries and the grid vbins already do.
-- The core defines the hooks those packages fill: an approval gate the interceptor consults, an admin route table, and an identity provider registry. With nothing registered, the core behaves as a plain governed shell. Four-eyes and change-management checks become no-ops, and the admin API is absent.
-- Two builds. `adssh` (core, Apache) does not import `ee/`. `adssh` built with the `ee` build tag, or a separate `cmd/adssh-enterprise`, blank-imports `ee/...`. Distributions ship the core build, and customers get the enterprise build.
-- A CI check fails if any core package imports `ee/`.
-- `ee/` lives at the repo root, not under `internal/`, so `cmd/adssh-enterprise` can import it. `ee` packages import `security`; `security` never imports `ee`.
-- Every place the core lists enterprise commands by name becomes a registry the `ee` packages fill from `init()`: the listener Run table in `ssh_monitor.go`, `help_content.go`, and the REPL completer. Otherwise the core build still knows the enterprise commands exist.
-- Moving exported symbols out of `security` breaks the v0.9.0 embedder API. v0.10.0 is a breaking release, and `docs/EMBEDDING.md` changes with it.
-- Docs and policy follow their code into `ee/`: `policy/bundles/admin-api.rego`, `docs/openapi/admin.yaml`, and the matching parts of `docs/SECURITY_REVIEW.md`.
+- Enterprise source stays in its package and is named `*_ee.go` / `*_ee_test.go`, each file starting with `//go:build ee`. The n8n `.ee.` convention, in Go form. `ee/LICENSE` covers these files and everything under `ee/`.
+- Separate enterprise binaries live under `ee/` (`ee/cmd/adsshadm`).
+- Two builds from one tree. `go build` is the Apache core and compiles no `_ee.go` file. `go build -tags ee` is the enterprise build. Binary names stay `adssh` and `adssh-mcp`; the release script will ship enterprise tarballs separately (wave 3).
+- The compiler is the guard: if core code uses anything defined in an `_ee.go` file, the core build stops compiling. CI also fails if `go list -deps` of the core binaries shows an `_ee.go` file or an `ee/` package, and it builds, vets, lints, and race-tests the `ee` variant.
+- Helpers that core code shares with enterprise files live in core files (`security/shared_core.go`, `security/testhelpers_test.go`).
+- Where core must call into enterprise code, core keeps a hook the `_ee.go` file fills from `init()`: `enterpriseToolRegistrars` in `cmd/adssh-mcp`. Safeguards stay in core and run in every build, e.g. `ForbidFourEyesDecisions` in the MCP server.
+- Why not separate `ee/` packages: the admin code uses about 25 unexported `security` internals. Moving it out would have meant exporting them, which turns internals into public API and breaks the v0.9.0 embedder surface. With build tags, nothing is exported and no embedder API changes.
+- Command names in lists (the listener Run table in `ssh_monitor.go`, `internal/sah`) do not pull code in. Turning them into registries is cleanup for a later wave, not a licensing requirement.
 
 ## Waves (adssh-06's sizing, done in a fresh session)
 
-1. Hooks: an admin route registry and an identity registry next to the existing `cm_hook.go` and `foureyes_hook.go` seams, plus the core-never-imports-ee CI check. Then move admin, attach, and adsshadm.
+1. DONE on branch ee/wave1: admin API (`admin_http`, `admin_attach`, `admin_lists`, `vbin_admin`) to `_ee.go`, the MCP `admin_*` tools to `tools_admin_ee.go` via `enterpriseToolRegistrars`, adsshadm to `ee/cmd/adsshadm`, and CI for both builds. Enterprise packaging moved to wave 3.
 2. Four-eyes, change management, evidence, elevate/grants, leases.
-3. Identity/device login, gateway, mirror_share, grid, sah, risk, bundles, docs, release.
+3. Identity/device login, gateway, mirror_share, grid, sah, risk, bundles, docs, and release (enterprise tarballs `adssh-enterprise_*` with adsshadm; Homebrew formula for the core).
 
 Ryan confirmed the classification table on 2026-10-16. The refactor may start.
 

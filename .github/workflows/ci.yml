@@ -28,6 +28,19 @@ jobs:
         run: go build -o adssh .
       - name: Build adssh-mcp
         run: go build -o adssh-mcp ./cmd/adssh-mcp
+      - name: Core build carries no enterprise code
+        run: |
+          # Apache core: no *_ee.go file and nothing under ee/ may be compiled in.
+          if go list -deps -f '{{.ImportPath}} {{join .GoFiles " "}}' . ./cmd/adssh-mcp | grep -E '(_ee\.go|/ee/)'; then
+            echo "FAIL: the core build includes enterprise code (see docs/LICENSING.md)"
+            exit 1
+          fi
+      - name: Build adssh (enterprise)
+        run: go build -tags ee -o adssh-ee .
+      - name: Build adssh-mcp (enterprise)
+        run: go build -tags ee -o adssh-mcp-ee ./cmd/adssh-mcp
+      - name: Build adsshadm (enterprise)
+        run: go build -tags ee -o adsshadm ./ee/cmd/adsshadm
 
   vet:
     name: go vet
@@ -40,6 +53,8 @@ jobs:
           cache: true
       - name: Vet
         run: go vet ./...
+      - name: Vet (enterprise)
+        run: go vet -tags ee ./...
 
   test:
     name: Test (race + coverage)
@@ -71,6 +86,8 @@ jobs:
           echo "Total coverage: ${total}% (threshold: ${COVERAGE_THRESHOLD}%)"
           awk -v t="$total" -v gate="$COVERAGE_THRESHOLD" \
             'BEGIN { if (t + 0 < gate + 0) { print "FAIL: coverage " t "% is below the " gate "% ratchet"; exit 1 } }'
+      - name: Run enterprise tests with race detector
+        run: go test -race -tags ee ./security/ ./cmd/adssh-mcp/ ./ee/...
 
   e2e:
     name: E2E (${{ matrix.os }})
@@ -105,3 +122,8 @@ jobs:
         with:
           version: latest
           args: --timeout=5m
+      - name: golangci-lint (enterprise)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          args: --timeout=5m --build-tags=ee

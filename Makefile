@@ -4,7 +4,7 @@ ADM_BINARY = adsshadm
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS    = -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build build-mcp build-adm install clean test test-e2e vet lint demo package dist
+.PHONY: build build-ee build-mcp build-adm install clean test test-e2e vet lint demo package dist
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) .
@@ -12,13 +12,16 @@ build:
 build-mcp:
 	go build $(LDFLAGS) -o $(MCP_BINARY) ./cmd/adssh-mcp
 
+# Enterprise build: the core plus every *_ee.go file (ee/LICENSE).
+build-ee:
+	go build -tags ee $(LDFLAGS) -o $(BINARY) .
+
 build-adm:
-	go build $(LDFLAGS) -o $(ADM_BINARY) ./cmd/adsshadm
+	go build -tags ee $(LDFLAGS) -o $(ADM_BINARY) ./ee/cmd/adsshadm
 
 install:
 	go install $(LDFLAGS) .
 	go install $(LDFLAGS) ./cmd/adssh-mcp
-	go install $(LDFLAGS) ./cmd/adsshadm
 
 test:
 	go test ./...

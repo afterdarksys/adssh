@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,34 +25,17 @@ import (
 // an opaque bearer and does not import groups. This does not wire provision,
 // enroll, or execute.
 
-// registerGovernedAdminTools registers the read-only admin tools and the
-// identity tools. There is no approve or deny tool: an agent must not decide
-// a four-eyes request. ForbidFourEyesDecisions also closes run_shell and
-// eval_starlark paths to `4eyes approve` in this process.
+// registerGovernedAdminTools registers the identity tools, then whatever the
+// enterprise build adds (the read-only admin_* tools, tools_admin_ee.go).
+// There is no approve or deny tool: an agent must not decide a four-eyes
+// request. ForbidFourEyesDecisions runs in every build, core included, and
+// also closes run_shell and eval_starlark paths to `4eyes approve` in this
+// process.
 func registerGovernedAdminTools(s *server.MCPServer, toolMu *sync.Mutex, eng *engine.Engine, agent mcpAgentConfig) {
 	security.ForbidFourEyesDecisions()
 	add := func(tool mcp.Tool, name string, handler server.ToolHandlerFunc) {
 		s.AddTool(tool, serializedHandler(toolMu, policyGate(eng, name, handler, agent)))
 	}
-	add(mcp.NewTool("admin_list_sessions",
-		mcp.WithDescription("List sessions registered in this process. Does not provision a machine or open a shell."),
-	), "admin_list_sessions", handleAdminListSessions())
-	add(mcp.NewTool("admin_list_approvals",
-		mcp.WithDescription("List pending four-eyes requests by public request id. The approval token is not included."),
-	), "admin_list_approvals", handleAdminListApprovals())
-	add(mcp.NewTool("admin_list_recordings",
-		mcp.WithDescription("List regular JSONL recording files. Symlinks are skipped."),
-	), "admin_list_recordings", handleAdminListRecordings())
-	add(mcp.NewTool("admin_list_elevations",
-		mcp.WithDescription("List elevation requests, drops, and active grants from the HMAC chain and this process. A missing chain fails closed."),
-	), "admin_list_elevations", handleAdminListElevations())
-	add(mcp.NewTool("admin_list_leases",
-		mcp.WithDescription("List lease metadata from the HMAC chain. Command text and secret values are not included. A missing chain fails closed."),
-	), "admin_list_leases", handleAdminListLeases())
-	add(mcp.NewTool("admin_explain",
-		mcp.WithDescription("Explain whether a command would be allowed. The command is split on whitespace and is not passed to a shell. Nothing is executed."),
-		mcp.WithString("command", mcp.Required(), mcp.Description("Command and arguments separated by whitespace")),
-	), "admin_explain", handleAdminExplain())
 	add(mcp.NewTool("identity_status",
 		mcp.WithDescription("Return the bound MCP session id, user, and principals. No token and no elevation are returned."),
 	), "identity_status", handleIdentityStatus())
@@ -65,7 +47,16 @@ func registerGovernedAdminTools(s *server.MCPServer, toolMu *sync.Mutex, eng *en
 		mcp.WithString("interval", mcp.Description("Poll interval as a Go duration or integer seconds")),
 		mcp.WithString("timeout", mcp.Description("Overall timeout as a Go duration or integer seconds")),
 	), "identity_device_login", handleIdentityDeviceLogin())
+	for _, register := range enterpriseToolRegistrars {
+		register(add)
+	}
 }
+
+// toolAdder registers one policy-gated, serialized MCP tool.
+type toolAdder func(tool mcp.Tool, name string, handler server.ToolHandlerFunc)
+
+// enterpriseToolRegistrars is filled by *_ee.go files in the enterprise build.
+var enterpriseToolRegistrars []func(add toolAdder)
 
 func securityEngineFromMCP(ctx context.Context) (*security.Engine, error) {
 	eng, _ := ctx.Value(mcpSecurityEngineContextKey{}).(*security.Engine)
@@ -93,108 +84,6 @@ type sessionListItem struct {
 	Terminated     bool           `json:"terminated,omitempty"`
 	Recording      string         `json:"recording,omitempty"`
 	Elevation      *sys.Elevation `json:"elevation,omitempty"`
-}
-
-func handleAdminListSessions() server.ToolHandlerFunc {
-	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if _, err := securityEngineFromMCP(ctx); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		infos := sys.ListSessionInfo()
-		items := make([]sessionListItem, 0, len(infos))
-		for _, info := range infos {
-			principals := info.Principals
-			if principals == nil {
-				principals = []string{}
-			}
-			items = append(items, sessionListItem{
-				ID:             info.ID,
-				User:           info.User,
-				Principals:     principals,
-				CreatedAt:      info.CreatedAt,
-				LastActive:     info.LastActive,
-				CurrentCommand: info.CurrentCommand,
-				Terminated:     info.Terminated,
-				Recording:      info.Recording,
-				Elevation:      info.Elevation,
-			})
-		}
-		return mcpJSONResult(items)
-	}
-}
-
-func handleAdminListApprovals() server.ToolHandlerFunc {
-	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		eng, err := securityEngineFromMCP(ctx)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		items, err := eng.ListApprovalsPublic()
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		if items == nil {
-			items = []security.ApprovalPublic{}
-		}
-		return mcpJSONResult(items)
-	}
-}
-
-func handleAdminListRecordings() server.ToolHandlerFunc {
-	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		eng, err := securityEngineFromMCP(ctx)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		items, err := eng.ListRecordings()
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcpJSONResult(items)
-	}
-}
-
-func handleAdminListElevations() server.ToolHandlerFunc {
-	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		eng, err := securityEngineFromMCP(ctx)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		items, err := eng.ListElevations()
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcpJSONResult(items)
-	}
-}
-
-func handleAdminListLeases() server.ToolHandlerFunc {
-	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		eng, err := securityEngineFromMCP(ctx)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		items, err := eng.ListLeases()
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcpJSONResult(items)
-	}
-}
-
-func handleAdminExplain() server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		eng, err := securityEngineFromMCP(ctx)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		command, _ := mcpStringArg(req, "command")
-		explanation, err := eng.ExplainCommand(security.SessionIDFromContext(ctx), strings.Fields(command))
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcpJSONResult(explanation)
-	}
 }
 
 func handleIdentityStatus() server.ToolHandlerFunc {

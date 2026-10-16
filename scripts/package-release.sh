@@ -30,7 +30,6 @@ build_platform() {
     cd "$ROOT"
     GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 "$GO_BIN" build -ldflags "-X main.version=$VERSION" -o "$work/bin/adssh$bin_suffix" .
     GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 "$GO_BIN" build -ldflags "-X main.version=$VERSION" -o "$work/bin/adssh-mcp$bin_suffix" ./cmd/adssh-mcp
-    GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 "$GO_BIN" build -ldflags "-X main.version=$VERSION" -o "$work/bin/adsshadm$bin_suffix" ./cmd/adsshadm
   )
   cp "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/TODO.md" "$work/"
   cp "$ROOT/man/adssh.1" "$work/man/"
@@ -63,7 +62,6 @@ if command -v dpkg-deb >/dev/null 2>&1 && [[ -f "$DIST/adssh_${VERSION}_linux_am
   tar -C "$pkg" -xzf "$pkg/adssh_${VERSION}_linux_amd64.tar.gz"
   cp "$pkg/adssh_${VERSION}_linux_amd64/bin/adssh" "$pkg/usr/local/bin/adssh"
   cp "$pkg/adssh_${VERSION}_linux_amd64/bin/adssh-mcp" "$pkg/usr/local/bin/adssh-mcp"
-  cp "$pkg/adssh_${VERSION}_linux_amd64/bin/adsshadm" "$pkg/usr/local/bin/adsshadm"
   cp "$ROOT/man/adssh.1" "$pkg/usr/local/share/man/man1/adssh.1"
   cp "$ROOT/completions/adssh.bash" "$pkg/usr/local/share/bash-completion/completions/adssh"
   cp "$ROOT/completions/adssh.zsh" "$pkg/usr/local/share/zsh/site-functions/_adssh"
@@ -106,14 +104,12 @@ mkdir -p %{buildroot}/usr/local/share/man/man1
 mkdir -p %{buildroot}/usr/local/share/adssh/policy
 cp bin/adssh %{buildroot}/usr/local/bin/adssh
 cp bin/adssh-mcp %{buildroot}/usr/local/bin/adssh-mcp
-cp bin/adsshadm %{buildroot}/usr/local/bin/adsshadm
 cp man/adssh.1 %{buildroot}/usr/local/share/man/man1/adssh.1
 cp -R policy/* %{buildroot}/usr/local/share/adssh/policy/
 
 %files
 /usr/local/bin/adssh
 /usr/local/bin/adssh-mcp
-/usr/local/bin/adsshadm
 /usr/local/share/man/man1/adssh.1
 /usr/local/share/adssh/policy
 EOF

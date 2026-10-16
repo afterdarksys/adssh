@@ -1,10 +1,11 @@
+//go:build ee
+
 package security
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -351,15 +351,6 @@ func (h *adminHTTPHandler) authenticate(r *http.Request) (adminPrincipal, bool) 
 	return adminPrincipal{}, false
 }
 
-func constantTimeEqual(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	ah := sha256.Sum256([]byte(a))
-	bh := sha256.Sum256([]byte(b))
-	return subtle.ConstantTimeCompare(ah[:], bh[:]) == 1
-}
-
 func (h *adminHTTPHandler) handleExplain(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID string   `json:"session_id"`
@@ -509,29 +500,6 @@ func (h *adminHTTPHandler) handleGuardUnban(w http.ResponseWriter, r *http.Reque
 	default:
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": "guard_unavailable"})
 	}
-}
-
-func adminGatewaySnapshot() []map[string]any {
-	gatewayMu.RLock()
-	sessions := make([]*gatewaySession, 0, len(gatewaySessions))
-	for _, session := range gatewaySessions {
-		sessions = append(sessions, session)
-	}
-	gatewayMu.RUnlock()
-	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
-
-	out := make([]map[string]any, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, map[string]any{
-			"id":         s.ID,
-			"name":       s.Name,
-			"listen":     s.Listen,
-			"target":     s.Target,
-			"user":       s.User,
-			"started_at": s.Started,
-		})
-	}
-	return out
 }
 
 func writeAdminJSON(w http.ResponseWriter, status int, value any) {

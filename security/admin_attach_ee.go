@@ -1,3 +1,5 @@
+//go:build ee
+
 package security
 
 import (
@@ -551,19 +553,6 @@ func (e *Engine) consumeSnoopApproval(key, sessionID, purpose string) {
 	if a != nil {
 		_ = os.Remove(filepath.Join(e.fourEyesApprovedDir(), a.requestID)) // best-effort: the map entry is already gone
 	}
-}
-
-// controllerTag is " via=<key>" while an rw attach controls the session.
-func controllerTag(sessionID string) string {
-	if sessionID == "" {
-		return ""
-	}
-	if s := sys.GetSession(sessionID); s != nil {
-		if c := s.Controller(); c != "" {
-			return " via=" + c
-		}
-	}
-	return ""
 }
 
 // attachOut is the session-output listener for one attach. It never blocks

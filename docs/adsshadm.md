@@ -1,5 +1,7 @@
 # adsshadm
 
+`adsshadm` and the admin API it talks to are part of the enterprise layer (`ee/LICENSE`, `docs/LICENSING.md`). Build both with the `ee` tag: `go build -tags ee .` for adssh and `go build -tags ee ./ee/cmd/adsshadm`, or `make build-ee build-adm`. The core adssh has no admin API.
+
 `adsshadm` administers a running adssh through the local admin API that `adssh admin serve` starts. With no command it opens an `adsshadm>` prompt with completion. With a command it runs that command and exits.
 
 ```sh
