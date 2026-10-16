@@ -652,6 +652,8 @@ ENVIRONMENT VARIABLES
   ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
   ADSSH_RC                RC script (default: ~/.adsshrc)
   ADSSH_ADMIN_KEYS        admin serve named-key file (0600 name=key; approve/deny/unban)
+  ADSSH_SNOOP_NOTIFY      Snoop attach notice default for support (on|off; default on)
+  ADSSH_SNOOP_NOTIFY_LOCK Force the snoop notice over policy (on; default off)
 
 Run 'adssh --init' to create a starter config in ~/.adssh/
 `)

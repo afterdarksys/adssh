@@ -8,6 +8,10 @@ List and evidence readers accept only regular files whose names end in `.jsonl`.
 
 `GET /v1/recordings` and MCP `admin_list_recordings` use that filter.
 
+## Snoop
+
+`adsshadm snoop <session-id> <user> [--rw] --purpose support|investigation --reason "..."` attaches through `GET /v1/sessions/{id}/attach` on the local admin API (see `docs/openapi/admin.yaml`). View needs a named admin key. rw also needs the `admin.snoop.rw` entitlement for the key name and a four-eyes approval: the session owner approves a support attach, a second named key approves an investigation. Every attach and detach is a `MIRROR_ATTACH`/`MIRROR_DETACH` chain event with key, mode, purpose, reason, session, user, and notify. Keystrokes are not audited; commands run during an rw attach carry `via=<key>`, and the recording captures the terminal as it does for `mirror console`. The owner sees `[adssh] <key> is viewing|controlling this session`. `ADSSH_SNOOP_NOTIFY=off` silences support attaches by default, policy may answer `notify` for command `snoop`, and `ADSSH_SNOOP_NOTIFY_LOCK=on` forces the notice over any policy.
+
 ## Evidence bundle
 
 `evidence` verifies the configured HMAC chain before it returns a bundle. Filtering does not skip verification. Every returned entry keeps its original chain hashes.

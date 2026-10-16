@@ -103,6 +103,8 @@ type Session struct {
 	dropPrivileges bool
 	prompt         io.Writer
 	identitySource string
+	// controller names the admin key holding an rw attach, or "".
+	controller string
 }
 
 // Identity sources. An empty source means User was set when the session was
@@ -250,6 +252,34 @@ func (s *Session) IdentitySource() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.identitySource
+}
+
+// ClaimController records name as the session's one rw attach controller.
+// It reports false when another controller already holds the session.
+func (s *Session) ClaimController(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.controller != "" || name == "" {
+		return false
+	}
+	s.controller = name
+	return true
+}
+
+// ReleaseController clears the controller when it is still name.
+func (s *Session) ReleaseController(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.controller == name {
+		s.controller = ""
+	}
+}
+
+// Controller returns the admin key holding an rw attach, or "".
+func (s *Session) Controller() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.controller
 }
 
 // SetOIDC records which OIDC audience established the session and which

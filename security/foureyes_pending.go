@@ -37,6 +37,19 @@ func randomHex(n int) (string, error) {
 }
 
 func (e *Engine) createFourEyesPending(cmd string, rule FourEyesRule, sessionID string) (FourEyesPending, string, error) {
+	if err := checkRequesterIdentity(sessionID); err != nil {
+		return FourEyesPending{}, "", err
+	}
+	requester := approvalActor(sessionID)
+	if requester == "" {
+		requester = "unknown"
+	}
+	return e.createFourEyesPendingAs(cmd, rule, requester)
+}
+
+// createFourEyesPendingAs writes a pending request whose requester the
+// caller has already authenticated (a named admin key for snoop).
+func (e *Engine) createFourEyesPendingAs(cmd string, rule FourEyesRule, requester string) (FourEyesPending, string, error) {
 	requestID, err := randomHex(16)
 	if err != nil {
 		return FourEyesPending{}, "", fmt.Errorf("foureyes: generate request id: %w", err)
@@ -45,14 +58,7 @@ func (e *Engine) createFourEyesPending(cmd string, rule FourEyesRule, sessionID 
 	if err != nil {
 		return FourEyesPending{}, "", fmt.Errorf("foureyes: generate token: %w", err)
 	}
-	if err := checkRequesterIdentity(sessionID); err != nil {
-		return FourEyesPending{}, "", err
-	}
 	hostname, _ := os.Hostname()
-	requester := approvalActor(sessionID)
-	if requester == "" {
-		requester = "unknown"
-	}
 	pending := FourEyesPending{
 		Token:     token,
 		RequestID: requestID,

@@ -22,6 +22,11 @@ type FourEyesRule struct {
 	Pattern  string `json:"pattern"`  // glob pattern matched against full command string
 	Approver string `json:"approver"` // optional: specific username required to approve
 	TTL      int    `json:"ttl"`      // seconds to wait for approval (default 300)
+	// NotApprover names a user who may never decide the request (a snoop
+	// investigation excludes the session owner).
+	NotApprover string `json:"not_approver,omitempty"`
+	// Surface, when set, is the only surface that may decide the request.
+	Surface string `json:"surface,omitempty"`
 }
 
 // FourEyesPending represents a command held for approval.
@@ -482,6 +487,12 @@ func (e *Engine) DecideRequest(token, approver, surface string, approve bool) er
 	}
 	if pending.Rule.Approver != "" && approver != pending.Rule.Approver {
 		return fmt.Errorf("foureyes: request requires approver %q", pending.Rule.Approver)
+	}
+	if pending.Rule.NotApprover != "" && approver == pending.Rule.NotApprover {
+		return fmt.Errorf("foureyes: %q cannot %s this request", approver, verb)
+	}
+	if pending.Rule.Surface != "" && surface != pending.Rule.Surface {
+		return fmt.Errorf("foureyes: this request must be decided through %s", pending.Rule.Surface)
 	}
 
 	claimed := filepath.Join(e.fourEyesPendingDir(), markerName+".claimed")

@@ -87,6 +87,66 @@ paths:
           description: Session list.
         "401":
           description: Missing or wrong API key.
+  /v1/sessions/{id}/attach:
+    get:
+      summary: Attach to a live session (adsshadm snoop). Upgrades to adssh-attach/1.
+      description: |
+        Requires Connection: Upgrade and Upgrade: adssh-attach/1. view needs a
+        named key; the legacy read-only key never attaches. rw also needs the
+        admin.snoop.rw entitlement for the key name and a four-eyes approval:
+        purpose=support is approved by the session owner (`4eyes approve`, or a
+        matching four-eyes rule's approver); purpose=investigation is approved
+        by a second named key over POST /v1/approvals/approve, never by the
+        owner or the requesting key. While the approval is pending the request
+        answers 428 at once; retry until approved within the rule TTL (default
+        300s). An approval is single use. rw is refused for a session whose
+        identity was asserted or set by device login. One rw controller per
+        session; at most 8 viewers.
+
+        After 101 the stream is frames of a 4-byte big-endian length (at most
+        1 MiB), one type byte, and the payload: 0x10 Out (server to client),
+        0x11 In and 0x12 Resize {"cols":N,"rows":N} (client to server, rw only;
+        in view mode either ends the attach with Close view_only), 0x13 Close
+        {"reason":"..."} either way. Close reasons from the server: detach,
+        idle (10 minutes with no frame either way), session_ended, view_only,
+        protocol, slow_client, write_failed, client_closed.
+
+        MIRROR_ATTACH key, mode, purpose, reason, session, user, and notify are
+        written to the audit chain before the 101 (503 if that fails) and
+        MIRROR_DETACH after. Keystrokes are not audited; commands the session
+        runs during an rw attach are audited with via=<key>. The owner sees
+        "[adssh] <key> is viewing|controlling this session" unless policy
+        returns notify=false for command snoop (args [purpose, mode, user],
+        input.snoop) and ADSSH_SNOOP_NOTIFY_LOCK is not on. Without a policy
+        answer, investigation is shown and support follows ADSSH_SNOOP_NOTIFY
+        (default on).
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+        - {name: user, in: query, required: true, description: Must equal the live session's user., schema: {type: string}}
+        - {name: mode, in: query, required: true, schema: {type: string, enum: [view, rw]}}
+        - {name: purpose, in: query, required: true, schema: {type: string, enum: [support, investigation]}}
+        - {name: reason, in: query, required: true, description: 1-512 bytes, no control or bidi characters., schema: {type: string}}
+        - {name: Connection, in: header, required: true, schema: {type: string, enum: [Upgrade]}}
+        - {name: Upgrade, in: header, required: true, schema: {type: string, enum: [adssh-attach/1]}}
+      responses:
+        "101":
+          description: Switching Protocols, Upgrade adssh-attach/1. The connection carries frames.
+        "400":
+          description: '{"error":"bad_upgrade"}, {"error":"bad_mode"}, {"error":"purpose_required"}, or {"error":"reason_required"}.'
+        "401":
+          description: Missing or wrong key ({"error":"unauthorized"}).
+        "403":
+          description: '{"error":"attach_forbidden"}: legacy key, rw without admin.snoop.rw, rw on an asserted or device-login identity, a denied approval, or a policy deny of snoop.'
+        "404":
+          description: '{"error":"session_not_found"}. Never the router''s {"error":"not found"}.'
+        "409":
+          description: '{"error":"user_mismatch"}, {"error":"controller_present"} (a second rw), {"error":"viewer_limit"} (more than 8 viewers), or {"error":"no_terminal"}.'
+        "428":
+          description: '{"error":"approval_required","request_id":"<id>"}. Approve that request, then retry.'
+        "500":
+          description: '{"error":"approval_unavailable"} when the four-eyes request cannot be written.'
+        "503":
+          description: '{"error":"audit_unavailable"}. Nothing was attached.'
   /v1/gateways:
     get:
       summary: Gateway listeners started by this process.

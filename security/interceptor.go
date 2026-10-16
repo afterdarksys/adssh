@@ -156,7 +156,7 @@ func (e *Engine) gateCommandContext(ctx context.Context, restricted bool, args [
 	}
 
 	cmd := strings.Join(args, " ")
-	if err := e.LogCommand("BASH", cmd); err != nil {
+	if err := e.LogCommand("BASH", cmd+controllerTag(sessionID)); err != nil {
 		return fmt.Errorf("adssh: audit log failed: %w", err)
 	}
 

@@ -256,23 +256,39 @@ func (e *Engine) mirrorAttach(ctx context.Context, callerSessionID, targetID str
 	if session == nil {
 		return fmt.Errorf("mirror: session not found: %s", targetID)
 	}
-	if session.Out == nil {
-		return fmt.Errorf("mirror: session %s has no output stream", targetID)
-	}
-	if console && (session.PTYMaster == nil || in == nil) {
-		return fmt.Errorf("mirror: session %s has no terminal", targetID)
+	if err := mirrorStreamable(session, console, in); err != nil {
+		return err
 	}
 	label := "View Only"
 	if console {
 		label = "Console"
 	}
 	fmt.Fprintf(out, "Attached to session %s (%s). Press Ctrl+C to exit.\r\n", targetID, label)
+	mirrorStream(ctx, session, console, out, in)
+	fmt.Fprintf(out, "\r\nDetached from session %s\r\n", targetID)
+	return nil
+}
+
+// mirrorStreamable reports why session cannot be streamed, or nil.
+func mirrorStreamable(session *sys.Session, console bool, in io.Reader) error {
+	if session.Out == nil {
+		return fmt.Errorf("mirror: session %s has no output stream", session.ID)
+	}
+	if console && (session.PTYMaster == nil || in == nil) {
+		return fmt.Errorf("mirror: session %s has no terminal", session.ID)
+	}
+	return nil
+}
+
+// mirrorStream copies session output to out and, with console, in to the
+// session's terminal, until ctx ends. mirror view/console and the admin
+// attach endpoint both stream through here; the session recording sees
+// console input as the terminal echoes it, as for any other keystroke.
+func mirrorStream(ctx context.Context, session *sys.Session, console bool, out io.Writer, in io.Reader) {
 	session.Out.AddListener(out)
 	defer session.Out.RemoveListener(out)
 	if console {
 		go func() { _, _ = io.Copy(session.PTYMaster, in) }() // best-effort: stream ends on session close
 	}
 	<-ctx.Done()
-	fmt.Fprintf(out, "\r\nDetached from session %s\r\n", targetID)
-	return nil
 }

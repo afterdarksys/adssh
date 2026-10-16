@@ -60,6 +60,9 @@ import (
 //	ADSSH_GUARD_STATE=/path   Ban file (default: ~/.adssh/guard-state.json)
 //	ADSSH_ADMIN_KEYS=/path    0600 name=key file for `admin serve`. A named key can
 //	                          approve, deny, and unban as that name.
+//	ADSSH_SNOOP_NOTIFY=on|off Default for the "[adssh] <key> is viewing" notice on a
+//	                          support snoop attach (default on). Read at attach time.
+//	ADSSH_SNOOP_NOTIFY_LOCK=on Force the snoop notice; no policy rule can silence it.
 type AppConfig struct {
 	Restricted         bool
 	SAHEnabled         bool

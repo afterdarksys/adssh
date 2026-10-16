@@ -172,6 +172,14 @@ func (h *adminHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
+	// An authenticated attach upgrades the connection, so it cannot be
+	// buffered; serveAttach audits each answer before sending it.
+	if sessionID, ok := attachSessionID(r); ok {
+		if principal, authed := h.authenticate(r); authed {
+			h.serveAttach(w, r, principal, sessionID)
+			return
+		}
+	}
 	// The response is buffered and sent only after the ADMIN_HTTP record is
 	// written, so a failed audit write discloses nothing.
 	rec := &bufferedResponse{header: http.Header{}, status: http.StatusOK}

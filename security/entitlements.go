@@ -166,3 +166,20 @@ func (e *Engine) GetMenuForUser(user string, principals []string) string {
 
 	return ""
 }
+
+// HasExplicitEntitlement reports whether the user entry itself names command.
+// A "*" wildcard and group entries do not count: it is for grants that must
+// be deliberate per principal, such as admin.snoop.rw for an admin key.
+func (e *Engine) HasExplicitEntitlement(user, command string) bool {
+	if user == "" || command == "" || command == "*" {
+		return false
+	}
+	e.entitlementsMu.RLock()
+	defer e.entitlementsMu.RUnlock()
+	for _, cmd := range e.entitlements.Users[user] {
+		if cmd == command {
+			return true
+		}
+	}
+	return false
+}

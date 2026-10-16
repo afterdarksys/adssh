@@ -31,6 +31,7 @@ type PolicyContext struct {
 	Gateway      *GatewayClaim   `json:"gateway,omitempty"`
 	Lease        *LeaseClaim     `json:"lease,omitempty"`
 	Agent        *AgentClaim     `json:"agent,omitempty"`
+	Snoop        *SnoopClaim     `json:"snoop,omitempty"`
 	// IdentityUnknown is set when a non-empty session ID resolves to no bound
 	// or registered principal. User is then empty and the gate denies before
 	// policy runs. It is never sent to Rego.
@@ -69,6 +70,14 @@ type AgentClaim struct {
 	Risk      string `json:"risk"`
 	DryRun    bool   `json:"dry_run"`
 	SessionID string `json:"session_id"`
+}
+
+// SnoopClaim describes an admin attach to a live session (input.snoop).
+type SnoopClaim struct {
+	Purpose string `json:"purpose"`
+	Mode    string `json:"mode"`
+	User    string `json:"user"`
+	Session string `json:"session"`
 }
 
 type PolicyContextExtra struct {
@@ -143,6 +152,9 @@ type PolicyDecision struct {
 	RequiredRole        string `json:"required_role,omitempty"`
 	Rule                string `json:"rule,omitempty"`
 	RequiredEntitlement string `json:"required_entitlement,omitempty"`
+	// Notify is the policy's optional `notify` answer for a snoop attach. A
+	// non-boolean notify reads as true, so a malformed rule cannot hide one.
+	Notify *bool `json:"notify,omitempty"`
 }
 
 // EvaluatePolicyDecision evaluates the loaded policy and returns every field
@@ -210,6 +222,15 @@ func (e *Engine) EvaluatePolicyDecision(pctx PolicyContext) (PolicyDecision, err
 		}
 	}
 
+	if pctx.Snoop != nil {
+		input["snoop"] = map[string]interface{}{
+			"purpose": pctx.Snoop.Purpose,
+			"mode":    pctx.Snoop.Mode,
+			"user":    pctx.Snoop.User,
+			"session": pctx.Snoop.Session,
+		}
+	}
+
 	results, err := e.preparedQuery.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
 		return PolicyDecision{}, fmt.Errorf("policy evaluation failed: %w", err)
@@ -256,6 +277,14 @@ func (e *Engine) EvaluatePolicyDecision(pctx PolicyContext) (PolicyDecision, err
 			return decision, nil
 		}
 		*field.dst = text
+	}
+
+	if value, present := resultMap["notify"]; present {
+		notify, isBool := value.(bool)
+		if !isBool {
+			notify = true
+		}
+		decision.Notify = &notify
 	}
 
 	allowVal, present := resultMap["allow"]
