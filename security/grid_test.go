@@ -34,8 +34,8 @@ const allowAllPolicy = "package adssh.authz\ndefault allow = true\n"
 func withGrid(t *testing.T) string {
 	t.Helper()
 	resetGridState()
-	dir := t.TempDir()
-	setScratchRoot(dir)
+	dir := scratchTestBase(t)
+	setScratchRoot(filepath.Join(dir, "worktrees"))
 	t.Cleanup(resetGridState)
 	return dir
 }
@@ -314,7 +314,7 @@ func TestGridInitPrintsFingerprintAndHidesToken(t *testing.T) {
 	}
 
 	resetGridState()
-	setScratchRoot(dir)
+	setScratchRoot(filepath.Join(dir, "worktrees"))
 	tokenPath := filepath.Join(dir, "token-file")
 	writeTokenFile(t, tokenPath, strings.Repeat("ab", 32)+"\n", 0o600)
 	output, err = runVBin(t, eng, session.ID, []string{
@@ -345,7 +345,7 @@ func TestGridInitRejectsWorldAccessibleAndSymlinkToken(t *testing.T) {
 	world := filepath.Join(dir, "world")
 	writeTokenFile(t, world, strings.Repeat("ab", 32)+"\n", 0o644)
 	_, _, err = initGrid(testID(t, "world"), world, "")
-	equalErr(t, err, "grid: token file is world-accessible")
+	equalErr(t, err, "grid: token file is readable or writable by group or others")
 
 	target := filepath.Join(dir, "target")
 	writeTokenFile(t, target, strings.Repeat("cd", 32)+"\n", 0o644)
@@ -358,12 +358,17 @@ func TestGridInitRejectsWorldAccessibleAndSymlinkToken(t *testing.T) {
 
 	group := filepath.Join(dir, "group")
 	writeTokenFile(t, group, strings.Repeat("ef", 32)+"\n", 0o640)
-	_, fingerprint, err := initGrid(testID(t, "group"), group, "")
+	_, _, err = initGrid(testID(t, "group"), group, "")
+	equalErr(t, err, "grid: token file is readable or writable by group or others")
+
+	private := filepath.Join(dir, "private")
+	writeTokenFile(t, private, strings.Repeat("ef", 32)+"\n", 0o600)
+	_, fingerprint, err := initGrid(testID(t, "private"), private, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fingerprint != fingerprintSecret(readToken(t, group)) {
-		t.Fatal("group-readable token fingerprint mismatch")
+	if fingerprint != fingerprintSecret(readToken(t, private)) {
+		t.Fatal("private token fingerprint mismatch")
 	}
 }
 
@@ -558,7 +563,7 @@ func TestFlightCapReusesCancelledAgentNotFlightID(t *testing.T) {
 	})
 	equalErr(t, err, "flight: too many flights")
 
-	if _, err := cancelFlight(testID(t, "f0")); err != nil {
+	if _, err := cancelFlight(testID(t, "f0"), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := placeFlight(placeOpts{
@@ -622,10 +627,10 @@ func TestDrainedPlaceRejectsAndCancelStatusRehearseWork(t *testing.T) {
 		Engine:     eng,
 	})
 	equalErr(t, err, "drained")
-	if _, err := cancelFlight(first); err != nil {
+	if _, err := cancelFlight(first, false); err != nil {
 		t.Fatal(err)
 	}
-	status, err := flightStatus(second)
+	status, err := flightStatus(second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +661,7 @@ func TestCancelledRehearsalAllowlistBeforeExpiry(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cancelFlight(flightID); err != nil {
+	if _, err := cancelFlight(flightID, false); err != nil {
 		t.Fatal(err)
 	}
 	result, err := rehearseFlight(eng, flightID, []string{"bash"}, false)
@@ -666,7 +671,7 @@ func TestCancelledRehearsalAllowlistBeforeExpiry(t *testing.T) {
 	if result.Status != "denied" || result.Reason != `agent cannot run "bash"` {
 		t.Fatalf("status=%s reason=%s", result.Status, result.Reason)
 	}
-	status, err := flightStatus(flightID)
+	status, err := flightStatus(flightID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -787,7 +792,7 @@ allow { input.user == "grid-peer"; input.agent.kind == "cloud"; input.command ==
 	if _, err := os.Stat(filepath.Join(worktreePath, "sentinel")); !os.IsNotExist(err) {
 		t.Fatal("rehearsal created a sentinel")
 	}
-	status, err := flightStatus(flightID)
+	status, err := flightStatus(flightID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -853,10 +858,7 @@ func TestFlightWrongCAFailsTLS(t *testing.T) {
 
 func TestFlightPeerAuthAndBodyLimit(t *testing.T) {
 	withGrid(t)
-	eng, err := NewEngine(EngineConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	eng := policyEngine(t, allowAllPolicy)
 	listenURL, tokenPath, certFile := serveGrid(t, testID(t, "grid"), eng)
 	statusBody := []byte(`{"action":"status","flight_id":"missing"}`)
 
@@ -1080,9 +1082,7 @@ func TestWorktreeAgentCannotCreateAndHumanCanCat(t *testing.T) {
 	err = repoBinary{}.Run(liveCtx, []string{"repo", "cat", "--id", "other", "--path", "ok.txt"})
 	equalErr(t, err, "repo: agent is bound to a different worktree")
 
-	human := &sys.Session{ID: testID(t, "human"), User: "alice"}
-	sys.RegisterSession(human)
-	t.Cleanup(func() { sys.UnregisterSession(human.ID) })
+	human := elevatedSession(t, "human", "alice")
 	eng := policyEngine(t, allowAllPolicy)
 	worktreeID := testID(t, "hw")
 	if _, err := runVBin(t, eng, human.ID, []string{"worktree", "create", "--id", worktreeID}); err != nil {
@@ -1106,14 +1106,24 @@ func TestWorktreeAgentCannotCreateAndHumanCanCat(t *testing.T) {
 
 func TestDestroyRefusesSymlink(t *testing.T) {
 	withGrid(t)
-	path, err := confinedWorktreePath("sym1")
+	initTestGrid(t, testID(t, "grid"))
+	path, err := createWorktree("sym1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(t.TempDir(), path); err != nil {
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	keep := filepath.Join(target, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
 	equalErr(t, destroyWorktree("sym1"), "worktree: destination is a symlink")
+	assertFileContents(t, keep, "keep")
 	info, err := os.Lstat(path)
 	if err != nil {
 		t.Fatal(err)

@@ -35,13 +35,15 @@ A missing `guard.yaml`, or a file that is `{}`, uses:
 | `rate_limit` | `30` |
 | `rate_window` | `1m` |
 | `max_entries` | `10000` |
+| `table_full` | `evict` |
+| `ipv6_prefix` | `64` |
 | `ignore` | `127.0.0.0/8`, `::1/128` |
 
 An omitted `ignore` key uses those two networks. That includes IPv4-mapped loopback (`::ffff:127.0.0.1`). An explicit empty list (`ignore: []`, `ignore:`, or `ignore: null`) ignores nothing, including loopback.
 
 Ignore entries are CIDR only. A hostname is rejected. A prefix length of `/0` (`0.0.0.0/0`, `::/0`) is rejected. `/1` is accepted. `::ffff:1.2.3.4` and `1.2.3.4` share one bucket, and the stored address is the IPv4 form.
 
-Limits: `max_retry` 1..100, `rate_limit` 1..10000, `max_entries` 1..100000, `ban_time` 1s..8760h, `find_time` 1s..24h, `rate_window` 1s..1h. Durations are Go duration strings such as `10m` and `1h`. Zero, negative, and non-duration values are rejected. Unknown YAML fields are rejected. An empty or comment-only file is rejected. The config must be a regular file of at most 64KiB, and it must not be a symlink or group/world writable.
+Limits: `max_retry` 1..100, `rate_limit` 1..10000, `max_entries` 1..100000, `ipv6_prefix` 32..128, `table_full` `evict` or `refuse`, `ban_time` 1s..8760h, `find_time` 1s..24h, `rate_window` 1s..1h. Durations are Go duration strings such as `10m` and `1h`. Zero, negative, and non-duration values are rejected. Unknown YAML fields are rejected. An empty or comment-only file is rejected. The config must be a regular file of at most 64KiB, and it must not be a symlink or group/world writable.
 
 `enabled: false`, with the switch unset, still validates the ban file. Admit then allows every peer and does not count. Unban still works, so the table can be cleared.
 
@@ -52,14 +54,15 @@ Each accepted TCP connection is checked before the SSH handshake.
 - A peer inside an ignore network is allowed and is not counted. That stays true while the jail is tripped.
 - An address that is not an IP or `host:port` is refused (`bad_peer`).
 - An active ban is refused (`banned`). The connection is closed and does not add a strike.
-- When the ban table already holds `max_entries` bans, a new address is refused (`table_full`).
+- When the ban table already holds `max_entries` bans, `table_full: evict` (the default) removes the ban that expires first to make room for a new one. `table_full: refuse` instead refuses every new non-ignored address (`table_full`) until a ban expires or is lifted. Evict keeps the listener open under a flood of addresses. It also lets an attacker who triggers more than `max_entries` bans end the earliest bans early. Refuse keeps every ban and locks out new peers.
+- IPv6 peers are counted and banned per `ipv6_prefix` network, `/64` by default, so rotating addresses inside one `/64` is one peer. The ban and the decision show the network, such as `2001:db8:1:2::/64`. `ipv6_prefix: 128` tracks single addresses. IPv4 is always tracked per address.
 - `rate_limit` connections from one address inside `rate_window` create a ban with reason `rate`. The connection that crosses the limit is the one refused.
 - A failed handshake counts as one strike. That covers a rejected key and a garbage banner. `max_retry` strikes inside `find_time` create a ban with reason `handshake`.
 - A successful handshake does not clear strikes.
 
 A ban is active while `until` is strictly after the current time. After it expires, the next connection is allowed. Strikes older than `find_time` are dropped. A later failure can ban the address again. Expiry leaves strikes that are still inside `find_time` in place.
 
-Strikes and the rate window live in memory. A restart clears them. Bans are the JSON file.
+Strikes and the rate window live in memory. A restart clears them. Bans are the JSON file. The peer table holds at most four times `max_entries` peers (at least 1024). Peers whose strikes and rate samples are all outside their windows are swept once per the shorter window. A new peer on a full table replaces an idle peer when one is found, otherwise an arbitrary one.
 
 ## Ban file
 
@@ -69,7 +72,7 @@ Strikes and the rate window live in memory. A restart clears them. Bans are the 
 {"v":1,"bans":[{"addr":"203.0.113.10","until":"2026-10-15T13:00:00Z","reason":"handshake"}]}
 ```
 
-Stored reasons are `handshake` and `rate`. The whole file is rejected for an unknown reason, a duplicate address, an unparseable address, a zero `until`, an `until` more than 366 days ahead, an unknown JSON field, trailing JSON, a symlink, or any mode other than `0600`.
+An `addr` is an IP or an IPv6 network written as the canonical `network/prefix` (`2001:db8:1:2::/64`) with a prefix of 32..127. A ban stored for a single IPv6 address still matches that address after `ipv6_prefix` changes. A network ban stored under an older prefix matches only peers that map to the same key. Stored reasons are `handshake` and `rate`. The whole file is rejected for an unknown reason, a duplicate address, an unparseable address, a zero `until`, an `until` more than 366 days ahead, an unknown JSON field, trailing JSON, a symlink, or any mode other than `0600`.
 
 The file is not signed. Mode `0600` and a rename inside the same directory are the integrity controls. A local user who can write the file can remove a ban. The file body and key material are not written to the audit log.
 
@@ -87,7 +90,7 @@ guard unban 203.0.113.10
 guard reload
 ```
 
-`--json` may appear anywhere after the command name. `status` prints the effective config and the active bans. `config` prints the config and omits the bans. `list` prints the bans. `reload` rereads `guard.yaml` and the ban file. `unban` removes one ban and that address's strikes. The address may be an IP or `host:port`. `::ffff:1.2.3.4` unbans the address stored as `1.2.3.4`.
+`--json` may appear anywhere after the command name. A process that never configured the jail, such as the per-login child of `adssh --serve`, prints `note: not configured in this process` and `enabled: false` (`"configured": false` in JSON). The ban file is the shared table. `status` prints the effective config and the active bans. `config` prints the config and omits the bans. `list` prints the bans. `reload` rereads `guard.yaml` and the ban file. `unban` removes one ban and that address's strikes. The address may be an IP, `host:port`, or an IPv6 network key. An IPv6 address lifts the ban on its `ipv6_prefix` network. `::ffff:1.2.3.4` unbans the address stored as `1.2.3.4`.
 
 ## Local admin API
 

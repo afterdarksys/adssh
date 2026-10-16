@@ -309,7 +309,7 @@ func TestMappedIPv4SharesABucket(t *testing.T) {
 }
 
 func TestTableFullDeniesASecondAddress(t *testing.T) {
-	configureDoc(t, "max_entries: 1\nmax_retry: 1\nrate_limit: 100\n", "")
+	configureDoc(t, "max_entries: 1\nmax_retry: 1\nrate_limit: 100\ntable_full: refuse\n", "")
 	failHandshake(t, "203.0.113.1")
 	d := Admit("203.0.113.2")
 	if d.Allow || d.Reason != "table_full" {
@@ -475,7 +475,7 @@ func TestRecorderSeesOnlyTheCrossingFailure(t *testing.T) {
 func TestStatusDoesNotInstallTheLazyJail(t *testing.T) {
 	setup(t)
 	st := Status()
-	if !st.Enabled || st.ConfigPath != "" || len(st.Bans) != 0 {
+	if st.Enabled || st.Configured || st.Note != "not configured in this process" || st.ConfigPath != "" || len(st.Bans) != 0 {
 		t.Fatalf("unconfigured status: %+v", st)
 	}
 	if _, err := Unban("203.0.113.22"); !errors.Is(err, ErrInactive) {
@@ -564,5 +564,158 @@ func TestWorldReadableConfigIsAccepted(t *testing.T) {
 	writeMode(t, cfgPath, "max_retry: 3\n", 0o664)
 	if err := CheckConfig(cfgPath); err == nil || !strings.Contains(err.Error(), "writable") {
 		t.Fatalf("group writable config: %v", err)
+	}
+}
+
+// Once the ban table is full the default policy evicts the ban that expires
+// first instead of refusing every new peer.
+func TestTableFullEvictsOldestExpiringBan(t *testing.T) {
+	_, state := configureDoc(t, "max_entries: 2\nmax_retry: 1\nrate_limit: 100\n", "")
+	clock := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return clock }
+	failHandshake(t, "203.0.113.1")
+	clock = clock.Add(time.Minute)
+	failHandshake(t, "203.0.113.2")
+	clock = clock.Add(time.Minute)
+	d := Admit("203.0.113.3")
+	if !d.Allow {
+		t.Fatalf("full table refused a new peer: %+v", d)
+	}
+	NoteHandshake("203.0.113.3", false)
+	st := Status()
+	got := map[string]bool{}
+	for _, b := range st.Bans {
+		got[b.Addr] = true
+	}
+	if len(st.Bans) != 2 || got["203.0.113.1"] || !got["203.0.113.2"] || !got["203.0.113.3"] {
+		t.Fatalf("bans after eviction: %+v", st.Bans)
+	}
+	if st.TableFull != "evict" {
+		t.Fatalf("table_full = %q", st.TableFull)
+	}
+	body, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "203.0.113.1\"") {
+		t.Fatalf("evicted ban still on disk: %s", body)
+	}
+}
+
+func TestTableFullRejectsUnknownMode(t *testing.T) {
+	setup(t)
+	if _, err := parseConfigDocument([]byte("table_full: drop\n")); err == nil || !strings.Contains(err.Error(), "table_full") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// Many distinct peers do not grow the peer table past its cap.
+func TestPeerTableIsCapped(t *testing.T) {
+	configureDoc(t, "max_entries: 1000\nrate_limit: 100\n", "")
+	const peers = 200000
+	for i := 0; i < peers; i++ {
+		addr := fmt.Sprintf("2001:db8:%x:%x::1", i>>16, i&0xffff)
+		if d := Admit(addr); !d.Allow {
+			t.Fatalf("admit %s: %+v", addr, d)
+		}
+	}
+	s := current(false)
+	s.mu.Lock()
+	n := len(s.peers)
+	limit := s.peerCapLocked()
+	s.mu.Unlock()
+	if n > limit {
+		t.Fatalf("peer table holds %d entries, cap is %d", n, limit)
+	}
+	if limit >= peers {
+		t.Fatalf("cap %d does not bound %d peers", limit, peers)
+	}
+}
+
+// Peers whose windows have closed are dropped by the sweep.
+func TestSweepDropsIdlePeers(t *testing.T) {
+	configureDoc(t, "rate_limit: 100\nfind_time: 1m\nrate_window: 1m\n", "")
+	clock := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return clock }
+	for i := 0; i < 50; i++ {
+		Admit(fmt.Sprintf("198.51.100.%d", i))
+	}
+	clock = clock.Add(10 * time.Minute)
+	Admit("203.0.113.99")
+	s := current(false)
+	s.mu.Lock()
+	n := len(s.peers)
+	s.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("peer table holds %d entries after the windows closed, want 1", n)
+	}
+}
+
+// An attacker rotating addresses inside one IPv6 /64 is one peer.
+func TestIPv6SlashSixtyFourIsOnePeer(t *testing.T) {
+	configureDoc(t, "max_retry: 3\nrate_limit: 100\n", "")
+	for i := 1; i <= 3; i++ {
+		failHandshake(t, fmt.Sprintf("[2001:db8:1:2::%x]:22", i))
+	}
+	d := Admit("2001:db8:1:2:ffff::9")
+	if d.Allow || d.Reason != "banned" || d.Addr != "2001:db8:1:2::/64" {
+		t.Fatalf("rotated address: %+v", d)
+	}
+	if d := Admit("2001:db8:1:3::1"); !d.Allow {
+		t.Fatalf("neighbor /64 was banned: %+v", d)
+	}
+	st := Status()
+	if len(st.Bans) != 1 || st.Bans[0].Addr != "2001:db8:1:2::/64" || st.IPv6Prefix != 64 {
+		t.Fatalf("status: %+v", st)
+	}
+	key, err := Unban("2001:db8:1:2::abcd")
+	if err != nil || key != "2001:db8:1:2::/64" {
+		t.Fatalf("unban = %q, %v", key, err)
+	}
+	if d := Admit("2001:db8:1:2::1"); !d.Allow {
+		t.Fatalf("after unban: %+v", d)
+	}
+}
+
+// The prefix is configurable; /128 tracks single addresses.
+func TestIPv6PrefixConfigurable(t *testing.T) {
+	configureDoc(t, "max_retry: 1\nrate_limit: 100\nipv6_prefix: 128\n", "")
+	failHandshake(t, "2001:db8::1")
+	if d := Admit("2001:db8::1"); d.Allow || d.Addr != "2001:db8::1" {
+		t.Fatalf("same address: %+v", d)
+	}
+	if d := Admit("2001:db8::2"); !d.Allow {
+		t.Fatalf("other address in the /64: %+v", d)
+	}
+	for _, bad := range []string{"ipv6_prefix: 0\n", "ipv6_prefix: 129\n", "ipv6_prefix: 31\n"} {
+		if _, err := parseConfigDocument([]byte(bad)); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
+
+// A /64 ban survives a round trip through the ban file.
+func TestPrefixBanRoundTripsThroughState(t *testing.T) {
+	_, state := configureDoc(t, "max_retry: 1\nrate_limit: 100\n", "")
+	failHandshake(t, "2001:db8:5::1")
+	if err := Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if d := Admit("2001:db8:5::77"); d.Allow || d.Reason != "banned" {
+		t.Fatalf("after reload: %+v", d)
+	}
+	if err := CheckState(state); err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	good := fmt.Sprintf(`{"v":1,"bans":[{"addr":"2001:db8:6::/64","until":%q,"reason":"rate"}]}`, until)
+	if _, err := parseState([]byte(good)); err != nil {
+		t.Fatalf("rejected a canonical /64: %v", err)
+	}
+	for _, addr := range []string{"2001:db8:5::1/64", "10.0.0.0/8", "::ffff:10.0.0.0/104", "2001:db8::/16"} {
+		bad := fmt.Sprintf(`{"v":1,"bans":[{"addr":%q,"until":%q,"reason":"rate"}]}`, addr, until)
+		if _, err := parseState([]byte(bad)); err == nil {
+			t.Fatalf("accepted %s", addr)
+		}
 	}
 }

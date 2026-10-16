@@ -1,11 +1,15 @@
 package security
 
-// Threats: grid, flight, and agent commands require a live gridops
-// elevation, and a managed agent cannot mint that elevation. Membership
-// tokens are never printed. Remote flights send no caller user and no
-// credentials. Checkout and cat stay inside the scratch worktree.
+// Threats: grid, flight, and agent commands, and worktree create, destroy,
+// and checkout, require a live gridops elevation; a managed agent cannot
+// mint that elevation. A managed agent may check out only into its own
+// worktree and only from the source bound to its flight, and may cat only
+// its own worktree. Membership tokens are never printed. Remote flights send
+// no caller user, no credentials, and no source. Checkout and cat stay
+// inside the scratch worktree.
 // Non-goals: this does not execute a rehearsed command, skip policy, or
-// change the process uid.
+// change the process uid. repo cat by a non-agent session needs no
+// elevation; it reads only inside the 0700 scratch root.
 
 import (
 	"context"
@@ -40,7 +44,8 @@ func (flightBinary) Description() string {
 	return "Place, rehearse, and cancel a supervised cloud-agent flight"
 }
 func (flightBinary) Usage() string {
-	return `flight place --id F --agent A --worktree W --for 10m [--host URL --ca PATH --server-name NAME --token-file PATH]
+	return `flight place --id F --agent A --worktree W --for 10m [--source PATH]
+flight place --id F --agent A --worktree W --for 10m --host URL --ca PATH [--server-name NAME] --token-file PATH
 flight rehearse --id F -- command [arg...]
 flight cancel --id F
 flight status --id F`
@@ -59,7 +64,7 @@ func (worktreeBinary) Description() string {
 func (worktreeBinary) Usage() string {
 	return `worktree create --id W
 worktree destroy --id W
-worktree checkout --id W --from PATH --rev SHA`
+worktree checkout --id W [--from PATH] --rev SHA`
 }
 
 func (repoBinary) Name() string { return "repo" }
@@ -127,35 +132,7 @@ func (gridBinary) Run(ctx context.Context, args []string) error {
 		fmt.Fprintf(hc.Stdout, "grid: id=%s fingerprint=%s\n", id, fingerprint)
 		return nil
 	case "serve":
-		flags, err := parseNamedFlags("grid", head, map[string]bool{
-			"listen": true, "cert": true, "key": true, "token-file": true,
-		})
-		if err != nil {
-			return err
-		}
-		listen, err := requiredFlag("grid", flags, "listen")
-		if err != nil {
-			return err
-		}
-		cert, err := requiredFlag("grid", flags, "cert")
-		if err != nil {
-			return err
-		}
-		key, err := requiredFlag("grid", flags, "key")
-		if err != nil {
-			return err
-		}
-		tokenFile, err := requiredFlag("grid", flags, "token-file")
-		if err != nil {
-			return err
-		}
-		url, err := listenGrid(listen, cert, key, tokenFile, engineFromContext(ctx))
-		if err != nil {
-			return err
-		}
-		hc := interp.HandlerCtx(ctx)
-		fmt.Fprintf(hc.Stdout, "grid: listening %s\n", url)
-		return nil
+		return gridServe(ctx, head)
 	case "drain":
 		if _, err := parseNamedFlags("grid", head, nil); err != nil {
 			return err
@@ -169,6 +146,30 @@ func (gridBinary) Run(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("grid: unknown option %q", args[1])
 	}
+}
+
+func gridServe(ctx context.Context, args []string) error {
+	flags, err := parseNamedFlags("grid", args, map[string]bool{
+		"listen": true, "cert": true, "key": true, "token-file": true,
+	})
+	if err != nil {
+		return err
+	}
+	values := make([]string, 0, 4)
+	for _, name := range []string{"listen", "cert", "key", "token-file"} {
+		value, err := requiredFlag("grid", flags, name)
+		if err != nil {
+			return err
+		}
+		values = append(values, value)
+	}
+	url, err := listenGrid(values[0], values[1], values[2], values[3], engineFromContext(ctx))
+	if err != nil {
+		return err
+	}
+	hc := interp.HandlerCtx(ctx)
+	fmt.Fprintf(hc.Stdout, "grid: listening %s\n", url)
+	return nil
 }
 
 func (flightBinary) Run(ctx context.Context, args []string) error {
@@ -205,7 +206,7 @@ func (flightBinary) Run(ctx context.Context, args []string) error {
 
 func flightPlace(ctx context.Context, session *sys.Session, args []string) error {
 	flags, err := parseNamedFlags("flight", args, map[string]bool{
-		"id": true, "agent": true, "worktree": true, "for": true,
+		"id": true, "agent": true, "worktree": true, "for": true, "source": true,
 		"host": true, "ca": true, "server-name": true, "token-file": true,
 	})
 	if err != nil {
@@ -231,6 +232,9 @@ func flightPlace(ctx context.Context, session *sys.Session, args []string) error
 		return err
 	}
 	remote := flags["host"] != ""
+	if remote && flags["source"] != "" {
+		return fmt.Errorf("flight: --source cannot be sent to a remote host")
+	}
 	ttl, seconds, err := parseFlightTTL(forRaw, remote)
 	if err != nil {
 		return err
@@ -260,6 +264,7 @@ func flightPlace(ctx context.Context, session *sys.Session, args []string) error
 			User:       session.User,
 			Remote:     false,
 			Engine:     engineFromContext(ctx),
+			Source:     flags["source"],
 		})
 	}
 	if err != nil {
@@ -324,7 +329,7 @@ func flightCancel(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := cancelFlight(id)
+	result, err := cancelFlight(id, false)
 	if err != nil {
 		return err
 	}
@@ -342,7 +347,7 @@ func flightStatusCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := flightStatus(id)
+	result, err := flightStatus(id, false)
 	if err != nil {
 		return err
 	}
@@ -392,86 +397,93 @@ func (worktreeBinary) Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("worktree: unknown option %q", rest[0])
 	}
 	switch args[1] {
-	case "create":
-		flags, err := parseNamedFlags("worktree", head, map[string]bool{"id": true})
-		if err != nil {
-			return err
-		}
-		id, err := requiredFlag("worktree", flags, "id")
-		if err != nil {
-			return err
-		}
-		session, err := requireWorktreeSession(ctx)
-		if err != nil {
-			return err
-		}
-		if session.ManagedAgent() != nil {
-			return fmt.Errorf("worktree: agents cannot create a worktree")
-		}
-		path, err := createWorktree(id)
-		if err != nil {
-			return err
-		}
-		hc := interp.HandlerCtx(ctx)
-		fmt.Fprintf(hc.Stdout, "worktree: id=%s path=%s\n", id, path)
-		return nil
-	case "destroy":
-		flags, err := parseNamedFlags("worktree", head, map[string]bool{"id": true})
-		if err != nil {
-			return err
-		}
-		id, err := requiredFlag("worktree", flags, "id")
-		if err != nil {
-			return err
-		}
-		session, err := requireWorktreeSession(ctx)
-		if err != nil {
-			return err
-		}
-		if session.ManagedAgent() != nil {
-			return fmt.Errorf("worktree: agents cannot destroy a worktree")
-		}
-		if err := destroyWorktree(id); err != nil {
-			return err
-		}
-		hc := interp.HandlerCtx(ctx)
-		fmt.Fprintf(hc.Stdout, "worktree: id=%s destroyed\n", id)
-		return nil
+	case "create", "destroy":
+		return worktreeCreateOrDestroy(ctx, args[1], head)
 	case "checkout":
-		flags, err := parseNamedFlags("worktree", head, map[string]bool{
-			"id": true, "from": true, "rev": true,
-		})
-		if err != nil {
-			return err
-		}
-		id, err := requiredFlag("worktree", flags, "id")
-		if err != nil {
-			return err
-		}
-		source, err := requiredFlag("worktree", flags, "from")
-		if err != nil {
-			return err
-		}
-		rev, err := requiredFlag("worktree", flags, "rev")
-		if err != nil {
-			return err
-		}
-		session, err := requireWorktreeSession(ctx)
-		if err != nil {
-			return err
-		}
-		if err := requireAgentWorktree(session, id, "worktree"); err != nil {
-			return err
-		}
-		if err := checkoutWorktree(id, source, rev); err != nil {
-			return err
-		}
-		hc := interp.HandlerCtx(ctx)
-		fmt.Fprintf(hc.Stdout, "worktree: id=%s rev=%s\n", id, rev)
-		return nil
+		return worktreeCheckout(ctx, head)
 	default:
 		return fmt.Errorf("worktree: unknown option %q", args[1])
 	}
+}
+
+func worktreeCreateOrDestroy(ctx context.Context, verb string, args []string) error {
+	flags, err := parseNamedFlags("worktree", args, map[string]bool{"id": true})
+	if err != nil {
+		return err
+	}
+	id, err := requiredFlag("worktree", flags, "id")
+	if err != nil {
+		return err
+	}
+	session, err := requireWorktreeSession(ctx)
+	if err != nil {
+		return err
+	}
+	if session.ManagedAgent() != nil {
+		return fmt.Errorf("worktree: agents cannot %s a worktree", verb)
+	}
+	if _, err := requireGridOps(ctx, "worktree"); err != nil {
+		return err
+	}
+	hc := interp.HandlerCtx(ctx)
+	if verb == "destroy" {
+		if err := destroyWorktree(id); err != nil {
+			return err
+		}
+		fmt.Fprintf(hc.Stdout, "worktree: id=%s destroyed\n", id)
+		return nil
+	}
+	path, err := createWorktree(id)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(hc.Stdout, "worktree: id=%s path=%s\n", id, path)
+	return nil
+}
+
+// worktreeCheckout pins a worktree to a commit. A gridops operator names
+// the source; a managed agent gets the source bound to its flight.
+func worktreeCheckout(ctx context.Context, args []string) error {
+	flags, err := parseNamedFlags("worktree", args, map[string]bool{
+		"id": true, "from": true, "rev": true,
+	})
+	if err != nil {
+		return err
+	}
+	id, err := requiredFlag("worktree", flags, "id")
+	if err != nil {
+		return err
+	}
+	rev, err := requiredFlag("worktree", flags, "rev")
+	if err != nil {
+		return err
+	}
+	session, err := requireWorktreeSession(ctx)
+	if err != nil {
+		return err
+	}
+	var source string
+	if agent := session.ManagedAgent(); agent != nil {
+		if err := requireAgentWorktree(session, id, "worktree"); err != nil {
+			return err
+		}
+		if source, err = agentCheckoutSource(agent, flags["from"]); err != nil {
+			return err
+		}
+	} else {
+		if _, err := requireGridOps(ctx, "worktree"); err != nil {
+			return err
+		}
+		if source, err = requiredFlag("worktree", flags, "from"); err != nil {
+			return err
+		}
+	}
+	if err := checkoutWorktree(id, source, rev); err != nil {
+		return err
+	}
+	hc := interp.HandlerCtx(ctx)
+	fmt.Fprintf(hc.Stdout, "worktree: id=%s rev=%s\n", id, rev)
+	return nil
 }
 
 func (repoBinary) Run(ctx context.Context, args []string) error {

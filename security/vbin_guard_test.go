@@ -52,3 +52,24 @@ func TestGuardStatusJSONAndUnknownUnban(t *testing.T) {
 		t.Fatal("unknown unban returned nil")
 	}
 }
+
+// An SSH login child never calls guard.Configure. Its status must say so
+// instead of printing defaults that look like a live jail.
+func TestGuardStatusUnconfiguredProcess(t *testing.T) {
+	guard.ResetForTest()
+	t.Cleanup(guard.ResetForTest)
+	out, err := runGuard(t, "guard", "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "note: not configured in this process") || !strings.Contains(out, "enabled: false") {
+		t.Fatalf("status output:\n%s", out)
+	}
+	out, err = runGuard(t, "guard", "config", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `"configured":false`) || !strings.Contains(out, `"note":"not configured in this process"`) {
+		t.Fatalf("config json: %s", out)
+	}
+}

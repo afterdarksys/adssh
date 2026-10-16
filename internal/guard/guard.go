@@ -10,7 +10,13 @@
 // material. The state file is not signed. A local user who can write that
 // file can remove a ban. A successful handshake does not clear strikes. An
 // explicit empty ignore list does not spare loopback. ADSSH_GUARD=off skips
-// the files so a bad file cannot block startup.
+// the files so a bad file cannot block startup. Many source addresses are
+// bounded: IPv6 peers are tracked and banned per ipv6_prefix (default /64),
+// the peer table is capped and idle peers are swept, and a full ban table
+// evicts the ban that expires first (table_full: evict) unless the operator
+// chose table_full: refuse, which refuses every new peer while full. Eviction
+// lets an attacker who can trigger more than max_entries bans shorten the
+// earliest bans.
 package guard
 
 import (
@@ -25,9 +31,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/afterdarksys/adssh/internal/safefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -90,9 +96,19 @@ type Snapshot struct {
 	RateLimit  int      `json:"rate_limit"`
 	RateWindow string   `json:"rate_window"`
 	MaxEntries int      `json:"max_entries"`
+	TableFull  string   `json:"table_full"`
+	IPv6Prefix int      `json:"ipv6_prefix"`
 	Ignore     []string `json:"ignore"`
 	Bans       []Ban    `json:"bans"`
+	// Configured is false when this process never called Configure. Note
+	// then says so, and the other fields are built-in defaults.
+	Configured bool   `json:"configured"`
+	Note       string `json:"note,omitempty"`
 }
+
+// NotConfiguredNote is the Snapshot note for a process that never called
+// Configure, such as an SSH login child.
+const NotConfiguredNote = "not configured in this process"
 
 type fileConfig struct {
 	Enabled    *bool     `yaml:"enabled"`
@@ -102,6 +118,8 @@ type fileConfig struct {
 	RateLimit  *int      `yaml:"rate_limit"`
 	RateWindow *string   `yaml:"rate_window"`
 	MaxEntries *int      `yaml:"max_entries"`
+	TableFull  *string   `yaml:"table_full"`
+	IPv6Prefix *int      `yaml:"ipv6_prefix"`
 	Ignore     *[]string `yaml:"ignore"`
 }
 
@@ -113,9 +131,19 @@ type config struct {
 	rateLimit  int
 	rateWindow time.Duration
 	maxEntries int
+	tableFull  string
+	ipv6Prefix int
 	ignore     []*net.IPNet
 	ignoreText []string
 }
+
+const (
+	tableFullEvict  = "evict"
+	tableFullRefuse = "refuse"
+	// peersPerBan sizes the peer table from max_entries.
+	peersPerBan = 4
+	minPeerCap  = 1024
+)
 
 type banRec struct {
 	until  time.Time
@@ -135,6 +163,7 @@ type stateMeta struct {
 
 type service struct {
 	mu         sync.Mutex
+	configured bool
 	cfg        config
 	configPath string
 	statePath  string
@@ -146,6 +175,7 @@ type service struct {
 	stateSize  int64
 	bans       map[string]banRec
 	peers      map[string]*peerState
+	peerSweep  time.Time
 }
 
 type stateFile struct {
@@ -285,7 +315,10 @@ func Ready() error {
 func Status() Snapshot {
 	s := current(false)
 	if s == nil {
-		return snapshot(defaultConfig(), "", "", false, nil, nil)
+		st := snapshot(defaultConfig(), "", "", false, nil, nil)
+		st.Enabled = false
+		st.Note = NotConfiguredNote
+		return st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -323,7 +356,7 @@ func NoteHandshake(addr string, ok bool) {
 // Unban removes one ban and clears that address's strikes. The ban file is
 // written before memory changes. The address may be an IP or host:port.
 func Unban(addr string) (string, error) {
-	key, _, err := parsePeer(addr)
+	network, ip, err := parseUnbanAddr(addr)
 	if err != nil {
 		return "", ErrBadPeer
 	}
@@ -332,6 +365,18 @@ func Unban(addr string) (string, error) {
 		return "", ErrInactive
 	}
 	s.mu.Lock()
+	key := network
+	if key == "" {
+		key = s.keyLocked(ip)
+		// A ban recorded under another ipv6_prefix is keyed by the address.
+		if _, ok := s.bans[key]; !ok {
+			if exact := canonicalIP(ip); exact != key {
+				if _, ok := s.bans[exact]; ok {
+					key = exact
+				}
+			}
+		}
+	}
 	evs, err := s.unbanLocked(key)
 	s.mu.Unlock()
 	emitAll(evs)
@@ -359,6 +404,7 @@ func Reload() error {
 
 func newService(opt Options, cfg config, forceOff, forceOn bool, tripped error) *service {
 	return &service{
+		configured: true,
 		cfg:        cfg,
 		configPath: opt.ConfigPath,
 		statePath:  opt.StatePath,
@@ -395,10 +441,11 @@ func (s *service) admitLocked(addr string) (Decision, []Event) {
 	if s.forceOff || !s.cfg.enabled {
 		return Decision{Allow: true, Addr: addr}, nil
 	}
-	key, ip, err := parsePeer(addr)
+	_, ip, err := parsePeer(addr)
 	if err != nil {
 		return Decision{Allow: false, Reason: "bad_peer"}, nil
 	}
+	key := s.keyLocked(ip)
 	if ignored(s.cfg.ignore, ip) {
 		return Decision{Allow: true, Addr: key}, nil
 	}
@@ -410,10 +457,10 @@ func (s *service) admitLocked(addr string) (Decision, []Event) {
 	}
 	t := now()
 	s.sweepLocked(t)
-	if b, ok := s.bans[key]; ok && b.until.After(t) {
-		return Decision{Allow: false, Reason: "banned", Addr: key}, nil
+	if banned, ok := s.bannedLocked(key, ip, t); ok {
+		return Decision{Allow: false, Reason: "banned", Addr: banned}, nil
 	}
-	if len(s.bans) >= s.cfg.maxEntries {
+	if s.cfg.tableFull == tableFullRefuse && len(s.bans) >= s.cfg.maxEntries {
 		return Decision{Allow: false, Reason: "table_full", Addr: key}, nil
 	}
 	evs, banned := s.noteRateLocked(key, t)
@@ -430,36 +477,79 @@ func (s *service) noteHandshakeLocked(addr string) []Event {
 	if err := s.refreshLocked(); err != nil {
 		return nil
 	}
-	key, ip, err := parsePeer(addr)
+	_, ip, err := parsePeer(addr)
 	if err != nil || ignored(s.cfg.ignore, ip) {
 		return nil
 	}
+	key := s.keyLocked(ip)
 	t := now()
 	s.sweepLocked(t)
-	if b, ok := s.bans[key]; ok && b.until.After(t) {
+	if _, ok := s.bannedLocked(key, ip, t); ok {
 		return nil
 	}
-	p := s.peerLocked(key)
+	p := s.peerLocked(key, t)
 	p.strikes = appendWindow(p.strikes, t, s.cfg.findTime, s.cfg.maxRetry)
 	if len(p.strikes) < s.cfg.maxRetry {
 		return nil
 	}
-	if _, exists := s.bans[key]; !exists && len(s.bans) >= s.cfg.maxEntries {
+	if !s.roomForBanLocked(key) {
 		return nil
 	}
 	return s.applyBanLocked(key, "handshake", t)
 }
 
 func (s *service) noteRateLocked(key string, t time.Time) ([]Event, bool) {
-	p := s.peerLocked(key)
+	p := s.peerLocked(key, t)
 	p.rates = appendWindow(p.rates, t, s.cfg.rateWindow, s.cfg.rateLimit)
 	if len(p.rates) < s.cfg.rateLimit {
 		return nil, false
 	}
-	if _, exists := s.bans[key]; !exists && len(s.bans) >= s.cfg.maxEntries {
+	if !s.roomForBanLocked(key) {
 		return nil, false
 	}
 	return s.applyBanLocked(key, "rate", t), true
+}
+
+// keyLocked is the peer and ban key for ip: the canonical IPv4 address, or
+// the IPv6 network of the configured prefix length.
+func (s *service) keyLocked(ip net.IP) string {
+	return peerKey(ip, s.cfg.ipv6Prefix)
+}
+
+// bannedLocked returns the key of an active ban that covers ip. A ban stored
+// under the exact IPv6 address (another ipv6_prefix) still matches.
+func (s *service) bannedLocked(key string, ip net.IP, t time.Time) (string, bool) {
+	if b, ok := s.bans[key]; ok && b.until.After(t) {
+		return key, true
+	}
+	if exact := canonicalIP(ip); exact != key {
+		if b, ok := s.bans[exact]; ok && b.until.After(t) {
+			return exact, true
+		}
+	}
+	return "", false
+}
+
+// roomForBanLocked reports whether key may be banned. A full table refuses in
+// refuse mode and evicts the ban that expires first in evict mode.
+func (s *service) roomForBanLocked(key string) bool {
+	if _, exists := s.bans[key]; exists || len(s.bans) < s.cfg.maxEntries {
+		return true
+	}
+	if s.cfg.tableFull == tableFullRefuse {
+		return false
+	}
+	for len(s.bans) >= s.cfg.maxEntries {
+		oldest := ""
+		var until time.Time
+		for addr, b := range s.bans {
+			if oldest == "" || b.until.Before(until) || (b.until.Equal(until) && addr < oldest) {
+				oldest, until = addr, b.until
+			}
+		}
+		delete(s.bans, oldest)
+	}
+	return true
 }
 
 func (s *service) applyBanLocked(key, reason string, t time.Time) []Event {
@@ -599,17 +689,73 @@ func (s *service) sweepLocked(t time.Time) {
 			delete(s.bans, addr)
 		}
 	}
+	// Idle peers are dropped once per the shorter window, so the cost stays
+	// off the per-connection path.
+	every := s.cfg.findTime
+	if s.cfg.rateWindow < every {
+		every = s.cfg.rateWindow
+	}
+	if t.Sub(s.peerSweep) < every {
+		return
+	}
+	s.peerSweep = t
+	for key, p := range s.peers {
+		if s.peerIdle(p, t) {
+			delete(s.peers, key)
+		}
+	}
 }
 
-func (s *service) peerLocked(key string) *peerState {
+// peerIdle reports whether every sample of p is outside its window.
+func (s *service) peerIdle(p *peerState, t time.Time) bool {
+	if n := len(p.strikes); n > 0 && p.strikes[n-1].After(t.Add(-s.cfg.findTime)) {
+		return false
+	}
+	if n := len(p.rates); n > 0 && p.rates[n-1].After(t.Add(-s.cfg.rateWindow)) {
+		return false
+	}
+	return true
+}
+
+// peerCapLocked bounds the peer table.
+func (s *service) peerCapLocked() int {
+	limit := s.cfg.maxEntries * peersPerBan
+	if limit < minPeerCap {
+		limit = minPeerCap
+	}
+	return limit
+}
+
+// peerLocked returns the state for key. A new peer on a full table evicts
+// an idle peer when one is found, otherwise an arbitrary one, so the table
+// never grows past its cap.
+func (s *service) peerLocked(key string, t time.Time) *peerState {
 	if s.peers == nil {
 		s.peers = map[string]*peerState{}
 	}
 	p := s.peers[key]
-	if p == nil {
-		p = &peerState{}
-		s.peers[key] = p
+	if p != nil {
+		return p
 	}
+	if len(s.peers) >= s.peerCapLocked() {
+		victim := ""
+		scanned := 0
+		for k, other := range s.peers {
+			if victim == "" {
+				victim = k
+			}
+			if s.peerIdle(other, t) {
+				victim = k
+				break
+			}
+			if scanned++; scanned >= 16 {
+				break
+			}
+		}
+		delete(s.peers, victim)
+	}
+	p = &peerState{}
+	s.peers[key] = p
 	return p
 }
 
@@ -687,7 +833,12 @@ func (s *service) marshalStateLocked() ([]byte, error) {
 }
 
 func (s *service) snapshotLocked() Snapshot {
-	return snapshot(s.cfg, s.configPath, s.statePath, s.forceOff, s.tripped, s.bans)
+	st := snapshot(s.cfg, s.configPath, s.statePath, s.forceOff, s.tripped, s.bans)
+	st.Configured = s.configured
+	if !s.configured {
+		st.Note = NotConfiguredNote + "; built-in defaults, bans in memory only"
+	}
+	return st
 }
 
 func snapshot(cfg config, configPath, statePath string, forceOff bool, tripped error, bans map[string]banRec) Snapshot {
@@ -702,6 +853,8 @@ func snapshot(cfg config, configPath, statePath string, forceOff bool, tripped e
 		RateLimit:  cfg.rateLimit,
 		RateWindow: cfg.rateWindow.String(),
 		MaxEntries: cfg.maxEntries,
+		TableFull:  cfg.tableFull,
+		IPv6Prefix: cfg.ipv6Prefix,
 		Ignore:     append([]string{}, cfg.ignoreText...),
 		Bans:       []Ban{},
 	}
@@ -750,6 +903,8 @@ func defaultConfig() config {
 		rateLimit:  30,
 		rateWindow: time.Minute,
 		maxEntries: 10000,
+		tableFull:  tableFullEvict,
+		ipv6Prefix: 64,
 		ignore:     nets,
 		ignoreText: text,
 	}
@@ -862,6 +1017,20 @@ func buildConfig(fc fileConfig, ignoreEmpty bool) (config, error) {
 			return config{}, fmt.Errorf("max_entries %d is outside 1..100000", *fc.MaxEntries)
 		}
 		cfg.maxEntries = *fc.MaxEntries
+	}
+	if fc.TableFull != nil {
+		switch mode := strings.TrimSpace(*fc.TableFull); mode {
+		case tableFullEvict, tableFullRefuse:
+			cfg.tableFull = mode
+		default:
+			return config{}, fmt.Errorf("table_full %q is not evict or refuse", mode)
+		}
+	}
+	if fc.IPv6Prefix != nil {
+		if *fc.IPv6Prefix < 32 || *fc.IPv6Prefix > 128 {
+			return config{}, fmt.Errorf("ipv6_prefix %d is outside 32..128", *fc.IPv6Prefix)
+		}
+		cfg.ipv6Prefix = *fc.IPv6Prefix
 	}
 	if ignoreEmpty {
 		cfg.ignore = nil
@@ -989,11 +1158,10 @@ func parseState(data []byte) (map[string]banRec, error) {
 	t := now()
 	horizon := t.Add(maxBanHorizon)
 	for _, b := range doc.Bans {
-		ip := net.ParseIP(strings.TrimSpace(b.Addr))
-		if ip == nil {
-			return nil, fmt.Errorf("guard state addr %q", b.Addr)
+		key, err := stateKey(b.Addr)
+		if err != nil {
+			return nil, err
 		}
-		key := canonicalIP(ip)
 		if _, ok := out[key]; ok {
 			return nil, fmt.Errorf("guard state duplicate addr %s", key)
 		}
@@ -1014,34 +1182,23 @@ func parseState(data []byte) (map[string]banRec, error) {
 	return out, nil
 }
 
+// readRegular reads path through internal/safefile: no symlink, a regular
+// file, checks on the opened descriptor, and at most max bytes.
 func readRegular(path string, max int64, modeCheck func(os.FileMode) error) ([]byte, os.FileInfo, error) {
-	info, err := os.Lstat(path)
+	f, info, err := safefile.Open(nil, path)
 	if err != nil {
 		return nil, nil, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, info, fmt.Errorf("%s is a symlink", path)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, info, fmt.Errorf("%s is not a regular file", path)
-	}
+	defer f.Close()
 	if err := modeCheck(info.Mode()); err != nil {
 		return nil, info, err
 	}
-	if info.Size() > max {
-		return nil, info, fmt.Errorf("%s is too large", path)
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	data, err := safefile.ReadAll(f, info, max)
 	if err != nil {
+		if errors.Is(err, safefile.ErrTooLarge) {
+			return nil, info, fmt.Errorf("%s is too large", path)
+		}
 		return nil, info, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, max+1))
-	if err != nil {
-		return nil, info, err
-	}
-	if int64(len(data)) > max {
-		return nil, info, fmt.Errorf("%s is too large", path)
 	}
 	return data, info, nil
 }
@@ -1056,6 +1213,69 @@ func parsePeer(addr string) (string, net.IP, error) {
 		return "", nil, ErrBadPeer
 	}
 	return canonicalIP(ip), ip, nil
+}
+
+// peerKey is the canonical IPv4 address, or for IPv6 the network of prefix
+// bits written as addr/prefix. A prefix of 128 is the plain address.
+func peerKey(ip net.IP, prefix int) string {
+	if ip.To4() != nil || prefix <= 0 || prefix >= 128 {
+		return canonicalIP(ip)
+	}
+	network := ip.To16().Mask(net.CIDRMask(prefix, 128))
+	return fmt.Sprintf("%s/%d", network.String(), prefix)
+}
+
+// prefixKey parses an IPv6 network key. It must be in canonical form, a
+// pure IPv6 network, and 32..127 bits.
+func prefixKey(raw string) (string, error) {
+	ip, network, err := net.ParseCIDR(raw)
+	if err != nil {
+		return "", err
+	}
+	ones, bits := network.Mask.Size()
+	if bits != 128 || ip.To4() != nil || ones < 32 || ones > 127 {
+		return "", fmt.Errorf("%q is not an IPv6 network of /32../127", raw)
+	}
+	key := peerKey(ip, ones)
+	if key != raw {
+		return "", fmt.Errorf("%q is not the canonical network %s", raw, key)
+	}
+	return key, nil
+}
+
+// stateKey validates one ban-file address: an IP, or an IPv6 network key.
+func stateKey(raw string) (string, error) {
+	addr := strings.TrimSpace(raw)
+	if strings.Contains(addr, "/") {
+		key, err := prefixKey(addr)
+		if err != nil {
+			return "", fmt.Errorf("guard state addr %q", raw)
+		}
+		return key, nil
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return "", fmt.Errorf("guard state addr %q", raw)
+	}
+	return canonicalIP(ip), nil
+}
+
+// parseUnbanAddr accepts an IP, host:port, or an IPv6 network key. A network
+// is returned as its key. An address is returned as the IP.
+func parseUnbanAddr(addr string) (string, net.IP, error) {
+	text := strings.TrimSpace(addr)
+	if strings.Contains(text, "/") {
+		key, err := prefixKey(text)
+		if err != nil {
+			return "", nil, ErrBadPeer
+		}
+		return key, nil, nil
+	}
+	_, ip, err := parsePeer(text)
+	if err != nil {
+		return "", nil, err
+	}
+	return "", ip, nil
 }
 
 func canonicalIP(ip net.IP) string {

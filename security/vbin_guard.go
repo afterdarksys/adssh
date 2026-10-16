@@ -125,6 +125,8 @@ func writeGuardJSON(w io.Writer, value any) error {
 }
 
 type guardConfigJSON struct {
+	Configured bool     `json:"configured"`
+	Note       string   `json:"note,omitempty"`
 	Enabled    bool     `json:"enabled"`
 	ForcedOff  bool     `json:"forced_off"`
 	Tripped    string   `json:"tripped,omitempty"`
@@ -136,11 +138,15 @@ type guardConfigJSON struct {
 	RateLimit  int      `json:"rate_limit"`
 	RateWindow string   `json:"rate_window"`
 	MaxEntries int      `json:"max_entries"`
+	TableFull  string   `json:"table_full"`
+	IPv6Prefix int      `json:"ipv6_prefix"`
 	Ignore     []string `json:"ignore"`
 }
 
 func guardConfigView(st guard.Snapshot) guardConfigJSON {
 	return guardConfigJSON{
+		Configured: st.Configured,
+		Note:       st.Note,
 		Enabled:    st.Enabled,
 		ForcedOff:  st.ForcedOff,
 		Tripped:    st.Tripped,
@@ -152,11 +158,16 @@ func guardConfigView(st guard.Snapshot) guardConfigJSON {
 		RateLimit:  st.RateLimit,
 		RateWindow: st.RateWindow,
 		MaxEntries: st.MaxEntries,
+		TableFull:  st.TableFull,
+		IPv6Prefix: st.IPv6Prefix,
 		Ignore:     st.Ignore,
 	}
 }
 
 func writeGuardConfig(w io.Writer, st guard.Snapshot) {
+	if st.Note != "" {
+		fmt.Fprintf(w, "note: %s\n", st.Note)
+	}
 	fmt.Fprintf(w, "enabled: %t\n", st.Enabled)
 	fmt.Fprintf(w, "forced_off: %t\n", st.ForcedOff)
 	if st.Tripped != "" {
@@ -170,6 +181,8 @@ func writeGuardConfig(w io.Writer, st guard.Snapshot) {
 	fmt.Fprintf(w, "rate_limit: %d\n", st.RateLimit)
 	fmt.Fprintf(w, "rate_window: %s\n", st.RateWindow)
 	fmt.Fprintf(w, "max_entries: %d\n", st.MaxEntries)
+	fmt.Fprintf(w, "table_full: %s\n", st.TableFull)
+	fmt.Fprintf(w, "ipv6_prefix: %d\n", st.IPv6Prefix)
 	fmt.Fprintf(w, "ignore: %s\n", strings.Join(st.Ignore, ", "))
 }
 

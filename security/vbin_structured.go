@@ -6,13 +6,13 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"go.starlark.net/starlark"
 	"gopkg.in/yaml.v3"
@@ -298,7 +298,7 @@ func structuredFromYAML(input io.Reader, output io.Writer) error {
 			return fmt.Errorf("from yaml: %w", err)
 		}
 		if err := rejectYAMLAliases(&node); err != nil {
-			return err
+			return fmt.Errorf("from yaml: %w", err)
 		}
 		var value any
 		if err := node.Decode(&value); err != nil {
@@ -320,12 +320,17 @@ func structuredFromYAML(input io.Reader, output io.Writer) error {
 	return nil
 }
 
+// errYAMLAlias is returned by rejectYAMLAliases. Callers add their prefix.
+var errYAMLAlias = errors.New("aliases are not allowed")
+
+// rejectYAMLAliases fails on any alias node, so an alias bomb cannot expand.
+// Plugin manifests and `from yaml` share it.
 func rejectYAMLAliases(node *yaml.Node) error {
 	if node == nil {
 		return nil
 	}
 	if node.Kind == yaml.AliasNode || node.Alias != nil {
-		return fmt.Errorf("from yaml: aliases are not allowed")
+		return errYAMLAlias
 	}
 	for _, child := range node.Content {
 		if err := rejectYAMLAliases(child); err != nil {
@@ -432,7 +437,7 @@ func parseStructSpec(spec string) ([]structField, error) {
 		if !ok || name == "" || kind == "" {
 			return nil, fmt.Errorf("field spec must be name:type")
 		}
-		if !structNameOK(name) {
+		if !validStarlarkIdent(name) {
 			return nil, fmt.Errorf("invalid field name %q", name)
 		}
 		kind = strings.ToLower(kind)
@@ -448,21 +453,6 @@ func parseStructSpec(spec string) ([]structField, error) {
 		fields = append(fields, structField{name: name, kind: kind})
 	}
 	return fields, nil
-}
-
-func structNameOK(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if i == 0 && !(r == '_' || unicode.IsLetter(r)) {
-			return false
-		}
-		if i > 0 && !(r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)) {
-			return false
-		}
-	}
-	return true
 }
 
 func checkStructRecord(record any, fields []structField) error {
@@ -561,24 +551,15 @@ func rejectTrailingJSON(decoder *json.Decoder) error {
 }
 
 func appendStructuredValue(records []any, value any, fromYAML bool) ([]any, error) {
-	var err error
 	if fromYAML {
+		// normalizeYAMLValue is recursive, so list items are already done.
+		var err error
 		value, err = normalizeYAMLValue(value)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if items, ok := value.([]any); ok {
-		if fromYAML {
-			normalized := make([]any, len(items))
-			for i, item := range items {
-				normalized[i], err = normalizeYAMLValue(item)
-				if err != nil {
-					return nil, err
-				}
-			}
-			return append(records, normalized...), nil
-		}
 		return append(records, items...), nil
 	}
 	return append(records, value), nil

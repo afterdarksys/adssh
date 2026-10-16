@@ -27,6 +27,35 @@ var (
 	CompletersMu     sync.RWMutex
 )
 
+func init() {
+	security.SetGlobalCompleterSnapshot(snapshotCustomCompleters)
+}
+
+// snapshotCustomCompleters copies CustomCompleters and returns a function that
+// puts the copy back: keys added since are removed and changed keys get their
+// old value. A failed plugin load uses it so the plugin's completer does not
+// stay reachable from Tab.
+func snapshotCustomCompleters() func() {
+	CompletersMu.RLock()
+	saved := make(map[string]starlark.Callable, len(CustomCompleters))
+	for name, fn := range CustomCompleters {
+		saved[name] = fn
+	}
+	CompletersMu.RUnlock()
+	return func() {
+		CompletersMu.Lock()
+		defer CompletersMu.Unlock()
+		for name := range CustomCompleters {
+			if _, ok := saved[name]; !ok {
+				delete(CustomCompleters, name)
+			}
+		}
+		for name, fn := range saved {
+			CustomCompleters[name] = fn
+		}
+	}
+}
+
 // ExtensionOptions carries the per-session context SetupExtensions needs so that
 // each session builds its own isolated set of builtins (restricted-mode
 // omissions, per-session sec.is_restricted, session id, injectable I/O). Passing

@@ -211,4 +211,43 @@ func TestLoadPluginsCompleterRollsBack(t *testing.T) {
 	if fmt.Sprintf("%T", env["plugins"]) != "*starlark.Dict" {
 		t.Fatal("plugins bag changed type")
 	}
+	CompletersMu.RLock()
+	_, leaked := CustomCompleters["greet"]
+	CompletersMu.RUnlock()
+	if leaked {
+		t.Fatal("the failed plugin's completer stayed in the process-global CustomCompleters map")
+	}
+}
+
+// A completer that existed before a failed load keeps its old value, and one
+// the failed load added is removed.
+func TestLoadPluginsCompleterRollbackKeepsEarlierGlobal(t *testing.T) {
+	before := starlark.NewBuiltin("before", func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
+		return starlark.None, nil
+	})
+	CompletersMu.Lock()
+	CustomCompleters["kept"] = before
+	CompletersMu.Unlock()
+	t.Cleanup(func() {
+		CompletersMu.Lock()
+		delete(CustomCompleters, "kept")
+		delete(CustomCompleters, "added")
+		CompletersMu.Unlock()
+	})
+	root := pluginTestRoot(t)
+	writeStarlarkPlugin(t, root, "hello", "def c(args):\n    return \"x\"\nsys[\"register_completer\"](\"kept\", c)\nsys[\"register_completer\"](\"added\", c)\nfail(\"boom\")\n")
+	env := execEnv(t, allowAllEngine(t), false)
+	if _, err := evalExec(t, env, `sys["load_plugins"](names=["hello"])`); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("error %v", err)
+	}
+	CompletersMu.RLock()
+	kept := CustomCompleters["kept"]
+	_, added := CustomCompleters["added"]
+	CompletersMu.RUnlock()
+	if kept != before {
+		t.Fatalf("kept = %v, want the earlier completer", kept)
+	}
+	if added {
+		t.Fatal("added completer survived the rollback")
+	}
 }

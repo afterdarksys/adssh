@@ -615,6 +615,36 @@ func TestPluginCompleterRollsBack(t *testing.T) {
 	}
 }
 
+// The process-global completer map is restored through the installed hook on
+// a failed load, and left alone on a good one.
+func TestPluginCompleterRollbackRestoresGlobal(t *testing.T) {
+	globalCompleterMu.Lock()
+	prev := globalCompleterSnapshot
+	globalCompleterMu.Unlock()
+	t.Cleanup(func() { SetGlobalCompleterSnapshot(prev) })
+	snapshots, restores := 0, 0
+	SetGlobalCompleterSnapshot(func() func() {
+		snapshots++
+		return func() { restores++ }
+	})
+
+	root := usePluginRoot(t)
+	writePlugin(t, root, "bad", "", "fail(\"boom\")\n")
+	writePlugin(t, root, "good", "", greetOne)
+	g := testPluginGlobals(t)
+	_, err := LoadStarlarkPlugins(g, []string{"bad"}, false)
+	mustSub(t, err, "boom")
+	if snapshots != 1 || restores != 1 {
+		t.Fatalf("failed load: snapshots=%d restores=%d, want 1 and 1", snapshots, restores)
+	}
+	if _, err := LoadStarlarkPlugins(g, []string{"good"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 2 || restores != 1 {
+		t.Fatalf("good load: snapshots=%d restores=%d, want 2 and 1", snapshots, restores)
+	}
+}
+
 func TestPluginArgumentChecksDoNotOpen(t *testing.T) {
 	root := usePluginRoot(t)
 	writePlugin(t, root, "hello", "", greetOne)
@@ -1196,4 +1226,53 @@ func TestPluginSiblingDoesNotBlockNamedLoad(t *testing.T) {
 	}
 	_, err = LoadStarlarkPlugins(g, nil, true)
 	mustSub(t, err, "unexpected entry")
+}
+
+// A root, plugin directory, or plugin file owned by another user is refused.
+// The test cannot chown, so it swaps the ownership check for one that
+// reports the named entry as foreign.
+func TestPluginForeignOwnerRefused(t *testing.T) {
+	cases := []struct {
+		foreign string
+		want    string
+	}{
+		{foreign: "root", want: "plugin: root is not owned by the current user"},
+		{foreign: "hello", want: "plugin: hello is not owned by the current user"},
+		{foreign: "manifest.yaml", want: "plugin: manifest.yaml is not owned by the current user"},
+		{foreign: "plugin.star", want: "plugin: plugin.star is not owned by the current user"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.foreign, func(t *testing.T) {
+			root := usePluginRoot(t)
+			writePlugin(t, root, "hello", "", greetOne)
+			prev := pluginOwned
+			t.Cleanup(func() { pluginOwned = prev })
+			rootInfo, err := os.Stat(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pluginOwned = func(info os.FileInfo) bool {
+				if tc.foreign == "root" {
+					return !os.SameFile(info, rootInfo)
+				}
+				return info.Name() != tc.foreign
+			}
+			g := testPluginGlobals(t)
+			_, err = LoadStarlarkPlugins(g, []string{"hello"}, false)
+			mustExact(t, err, tc.want)
+			if dictHas(commandsDict(g), "greet") {
+				t.Fatal("foreign plugin registered greet")
+			}
+		})
+	}
+}
+
+// The default ownership check accepts files the test process created.
+func TestPluginOwnedByEUIDAccepted(t *testing.T) {
+	root := usePluginRoot(t)
+	writePlugin(t, root, "hello", "", greetOne)
+	g := testPluginGlobals(t)
+	if _, err := LoadStarlarkPlugins(g, []string{"hello"}, false); err != nil {
+		t.Fatal(err)
+	}
 }

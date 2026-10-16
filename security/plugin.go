@@ -8,8 +8,10 @@ package security
 //   - A path outside the plugins directory. Names are a single safe component.
 //     The directory is opened without following a symlink, and each file is
 //     opened with O_NOFOLLOW.
-//   - A file someone else can replace. Group-writable and world-writable
-//     directories and files are rejected. The size of each file is capped.
+//   - A file someone else can replace. The root, each plugin directory, and
+//     each file must be owned by the effective user, checked with fstat on
+//     the opened descriptor. Group-writable and world-writable directories
+//     and files are rejected. The size of each file is capped.
 //   - A manifest that asks for more than it says. Unknown fields, aliases,
 //     extra documents, and a name that does not match the directory fail closed.
 //   - A bad neighbor. plugin load --all checks every entry first. If any check
@@ -33,11 +35,12 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/afterdarksys/adssh/internal/config"
+	"github.com/afterdarksys/adssh/internal/safefile"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/syntax"
@@ -76,6 +79,13 @@ type pluginSource struct {
 	star        []byte
 }
 
+// pluginOwned reports whether info, from fstat on an open descriptor, is
+// owned by the effective user. Tests replace it because they cannot chown.
+var pluginOwned = func(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Geteuid()
+}
+
 func pluginDir() string {
 	if dir := os.Getenv("ADSSH_PLUGIN_DIR"); dir != "" {
 		return dir
@@ -83,28 +93,17 @@ func pluginDir() string {
 	return filepath.Join(config.XDGConfigHome(), "plugins")
 }
 
+// validPluginName allows 1..64 ASCII letters, digits, '-' and '_'. That
+// allowlist already excludes separators, dots, NUL and spaces, so the name is
+// one path component.
 func validPluginName(name string) bool {
-	if name == "" || strings.ContainsRune(name, 0) {
-		return false
-	}
-	if strings.ContainsAny(name, "/\\. ") {
-		return false
-	}
-	if n := utf8.RuneCountInString(name); n < 1 || n > pluginNameMax {
+	if name == "" || len(name) > pluginNameMax {
 		return false
 	}
 	for _, r := range name {
 		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
 			return false
 		}
-	}
-	if name == "." || name == ".." || filepath.Base(name) != name {
-		return false
-	}
-	root := pluginDir()
-	rel, err := filepath.Rel(root, filepath.Join(root, name))
-	if err != nil || rel != name || strings.HasPrefix(rel, "..") {
-		return false
 	}
 	return true
 }
@@ -170,7 +169,7 @@ func attachClose(err, cerr error) error {
 }
 
 func mapFileErr(filename string, err error) error {
-	if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK) {
+	if errors.Is(err, safefile.ErrSymlink) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK) {
 		return fmt.Errorf("plugin: %s is a symlink", filename)
 	}
 	if os.IsNotExist(err) {
@@ -218,6 +217,9 @@ func openPluginRoot() (*os.File, error) {
 	if err != nil {
 		return nil, attachClose(fmt.Errorf("plugin: %w", err), f.Close())
 	}
+	if !pluginOwned(st) {
+		return nil, attachClose(fmt.Errorf("plugin: root is not owned by the current user"), f.Close())
+	}
 	if st.Mode().Perm()&0o022 != 0 {
 		return nil, attachClose(fmt.Errorf("plugin: root is group/world writable"), f.Close())
 	}
@@ -250,17 +252,20 @@ func openAt(parent *os.File, name string, flags int) (*os.File, error) {
 	return f, nil
 }
 
+// readCheckedFile opens filename in dir through internal/safefile, which
+// refuses a symlink or a non-regular file and checks the opened descriptor,
+// then requires the effective user as owner and no group/world write bit.
+// With read false it only checks.
 func readCheckedFile(dir *os.File, filename string, max int64, read bool) ([]byte, error) {
-	f, err := openAt(dir, filename, syscall.O_RDONLY)
+	f, st, err := safefile.Open(dir, filename)
 	if err != nil {
+		if errors.Is(err, safefile.ErrNotRegular) {
+			return nil, fmt.Errorf("plugin: %s is not a regular file", filename)
+		}
 		return nil, mapFileErr(filename, err)
 	}
-	st, err := f.Stat()
-	if err != nil {
-		return nil, attachClose(fmt.Errorf("plugin: %w", err), f.Close())
-	}
-	if !st.Mode().IsRegular() {
-		return nil, attachClose(fmt.Errorf("plugin: %s is not a regular file", filename), f.Close())
+	if !pluginOwned(st) {
+		return nil, attachClose(fmt.Errorf("plugin: %s is not owned by the current user", filename), f.Close())
 	}
 	if st.Mode().Perm()&0o022 != 0 {
 		return nil, attachClose(fmt.Errorf("plugin: %s is group/world writable", filename), f.Close())
@@ -274,16 +279,16 @@ func readCheckedFile(dir *os.File, filename string, max int64, read bool) ([]byt
 		}
 		return nil, nil
 	}
-	body, err := io.ReadAll(io.LimitReader(f, max+1))
+	body, err := safefile.ReadAll(f, st, max)
 	cerr := f.Close()
+	if errors.Is(err, safefile.ErrTooLarge) {
+		return nil, fmt.Errorf("plugin: %s is too large", filename)
+	}
 	if err != nil {
 		return nil, attachClose(fmt.Errorf("plugin: %w", err), cerr)
 	}
 	if cerr != nil {
 		return nil, fmt.Errorf("plugin: %w", cerr)
-	}
-	if int64(len(body)) > max {
-		return nil, fmt.Errorf("plugin: %s is too large", filename)
 	}
 	return body, nil
 }
@@ -300,6 +305,9 @@ func readPlugin(root *os.File, name string, parse bool) (pluginSource, error) {
 	st, err := dir.Stat()
 	if err != nil {
 		return pluginSource{}, attachClose(fmt.Errorf("plugin: %w", err), dir.Close())
+	}
+	if !pluginOwned(st) {
+		return pluginSource{}, attachClose(fmt.Errorf("plugin: %s is not owned by the current user", name), dir.Close())
 	}
 	if st.Mode().Perm()&0o022 != 0 {
 		return pluginSource{}, attachClose(fmt.Errorf("plugin: %s is group/world writable", name), dir.Close())
@@ -399,21 +407,6 @@ func preflightNames(root *os.File, names []string) ([]pluginSource, error) {
 	return sources, nil
 }
 
-func rejectPluginAliases(node *yaml.Node) error {
-	if node == nil {
-		return nil
-	}
-	if node.Kind == yaml.AliasNode || node.Alias != nil {
-		return fmt.Errorf("plugin: aliases are not allowed")
-	}
-	for _, child := range node.Content {
-		if err := rejectPluginAliases(child); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func parseManifest(dirName string, raw []byte) (string, error) {
 	if strings.TrimSpace(string(raw)) == "" {
 		return "", fmt.Errorf("plugin: manifest is not valid")
@@ -431,8 +424,8 @@ func parseManifest(dirName string, raw []byte) (string, error) {
 	} else {
 		return "", fmt.Errorf("plugin: trailing document")
 	}
-	if err := rejectPluginAliases(&doc); err != nil {
-		return "", err
+	if err := rejectYAMLAliases(&doc); err != nil {
+		return "", fmt.Errorf("plugin: %w", err)
 	}
 	return manifestFields(dirName, &doc)
 }
@@ -606,6 +599,25 @@ type sessionSnap struct {
 	plugins       *starlark.Dict
 	completers    *starlark.Dict
 	hadCompleters bool
+	// restoreGlobal puts back the process-global completer map. Nil when no
+	// snapshot hook is installed.
+	restoreGlobal func()
+}
+
+var (
+	globalCompleterMu       sync.Mutex
+	globalCompleterSnapshot func() (restore func())
+)
+
+// SetGlobalCompleterSnapshot installs the hook that snapshots the deprecated
+// process-global completer map, which lives in a package this one cannot
+// import. The hook returns a function that restores the snapshot. A failed
+// plugin load calls it so a completer the plugin registered does not outlive
+// the rollback.
+func SetGlobalCompleterSnapshot(fn func() (restore func())) {
+	globalCompleterMu.Lock()
+	globalCompleterSnapshot = fn
+	globalCompleterMu.Unlock()
 }
 
 func cloneDict(d *starlark.Dict) (*starlark.Dict, error) {
@@ -683,6 +695,12 @@ func snapshotSession(g starlark.StringDict) (*sessionSnap, error) {
 		snap.completers = cloned
 		snap.hadCompleters = true
 	}
+	globalCompleterMu.Lock()
+	hook := globalCompleterSnapshot
+	globalCompleterMu.Unlock()
+	if hook != nil {
+		snap.restoreGlobal = hook()
+	}
 	return snap, nil
 }
 
@@ -699,6 +717,9 @@ func restoreSession(g starlark.StringDict, snap *sessionSnap) {
 		g["__completers__"] = snap.completers
 	} else {
 		delete(g, "__completers__")
+	}
+	if snap.restoreGlobal != nil {
+		snap.restoreGlobal()
 	}
 }
 
