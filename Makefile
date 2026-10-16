@@ -1,9 +1,10 @@
 BINARY     = adssh
 MCP_BINARY = adssh-mcp
+ADM_BINARY = adsshadm
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS    = -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: build build-mcp install clean test test-e2e vet lint demo package dist
+.PHONY: build build-mcp build-adm install clean test test-e2e vet lint demo package dist
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) .
@@ -11,9 +12,13 @@ build:
 build-mcp:
 	go build $(LDFLAGS) -o $(MCP_BINARY) ./cmd/adssh-mcp
 
+build-adm:
+	go build $(LDFLAGS) -o $(ADM_BINARY) ./cmd/adsshadm
+
 install:
 	go install $(LDFLAGS) .
 	go install $(LDFLAGS) ./cmd/adssh-mcp
+	go install $(LDFLAGS) ./cmd/adsshadm
 
 test:
 	go test ./...
