@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
 )
 
@@ -351,11 +353,31 @@ func TestAttachPathCarriesPurposeAndReason(t *testing.T) {
 }
 
 func TestSnoopAgainstServerWithoutAttachRoute(t *testing.T) {
-	srv := realServer(t)
-	a, _ := testApp(t, srv.URL, namedKey)
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"not found"}`)
+	}))
+	defer old.Close()
+	a, _ := testApp(t, old.URL, namedKey)
 	_, _, err := a.c.openAttach(context.Background(), snoopRequest{SessionID: "s1", User: "alice", Purpose: "support", Reason: "x"})
 	if !errors.Is(err, errNoAttach) {
 		t.Fatalf("want errNoAttach, got %v", err)
+	}
+}
+
+func TestSnoopRefusalsFromRealServer(t *testing.T) {
+	srv := realServer(t)
+	ctx := context.Background()
+	a, _ := testApp(t, srv.URL, namedKey)
+	_, _, err := a.c.openAttach(ctx, snoopRequest{SessionID: "no-such", User: "alice", Purpose: "support", Reason: "x"})
+	if err == nil || !strings.Contains(err.Error(), "no live session no-such") {
+		t.Errorf("unknown session: %v", err)
+	}
+	ro, _ := testApp(t, srv.URL, legacyKey)
+	_, _, err = ro.c.openAttach(ctx, snoopRequest{SessionID: "no-such", User: "alice", Purpose: "support", Reason: "x"})
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.Status != http.StatusForbidden {
+		t.Errorf("read-only key attach: want 403, got %v", err)
 	}
 }
 
@@ -544,5 +566,57 @@ func TestCompleterOffersCommandsAndLiveValues(t *testing.T) {
 	got, _ = c.Do([]rune("guard "), 6)
 	if len(got) != 1 || string(got[0]) != "unban " {
 		t.Fatalf("guard completion %q", got)
+	}
+}
+
+// The test binary may import internal/sys; the shipped adsshadm must not.
+func TestFrameConstantsMatchServer(t *testing.T) {
+	if attachProtocol != sys.AttachProtocol || maxFrame != sys.AttachMaxFrame ||
+		frameOut != sys.AttachFrameOut || frameIn != sys.AttachFrameIn ||
+		frameResize != sys.AttachFrameResize || frameClose != sys.AttachFrameClose {
+		t.Fatal("adsshadm's adssh-attach/1 constants differ from internal/sys/attach_frame.go")
+	}
+	var buf bytes.Buffer
+	if err := writeFrame(&buf, frameIn, []byte("ls\r")); err != nil {
+		t.Fatal(err)
+	}
+	typ, p, err := sys.ReadAttachFrame(&buf)
+	if err != nil || typ != frameIn || string(p) != "ls\r" {
+		t.Fatalf("server cannot read the client's frame: %v %x %q", err, typ, p)
+	}
+	if err := sys.WriteAttachFrame(&buf, sys.AttachFrameOut, []byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if typ, p, err := readFrame(&buf); err != nil || typ != frameOut || string(p) != "hi" {
+		t.Fatalf("client cannot read the server's frame: %v %x %q", err, typ, p)
+	}
+}
+
+func TestAttachRefusalsAreExplained(t *testing.T) {
+	inv := snoopRequest{SessionID: "s1", User: "alice", RW: true, Purpose: "investigation"}
+	if m := attachRefusal(inv, "approval_required", "r-9"); !strings.Contains(m, "r-9") || !strings.Contains(m, "never the session owner") {
+		t.Errorf("investigation approval message: %q", m)
+	}
+	sup := snoopRequest{SessionID: "s1", User: "alice", RW: true, Purpose: "support"}
+	if m := attachRefusal(sup, "approval_required", "r-9"); !strings.Contains(m, "session owner") {
+		t.Errorf("support approval message: %q", m)
+	}
+	if m := attachRefusal(sup, "approval_required", "x\x1b[2Jy"); strings.Contains(m, "\x1b") {
+		t.Errorf("request id printed raw: %q", m)
+	}
+	for _, code := range []string{"session_not_found", "user_mismatch", "attach_forbidden", "approval_unavailable", "viewer_limit", "no_terminal", "bad_mode"} {
+		if attachRefusal(sup, code, "") == "" {
+			t.Errorf("%s has no explanation", code)
+		}
+	}
+}
+
+func TestShippedBinaryDoesNotImportInternalSys(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", ".").Output()
+	if err != nil {
+		t.Skipf("go list: %v", err)
+	}
+	if strings.Contains(string(out), "github.com/afterdarksys/adssh/internal/sys\n") {
+		t.Fatal("adsshadm imports internal/sys, which carries the --session-child launcher")
 	}
 }

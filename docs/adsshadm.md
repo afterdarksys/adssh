@@ -39,7 +39,9 @@ Every string from the server was typed by some user, so control characters and b
 
 The server decides the rest:
 
-- Whether the watched user sees a notice. An operator lock forces the notice on (for jurisdictions that require it). Otherwise policy decides per purpose, user, or session. Otherwise the operator default `snoop.notify` applies, shipped as on.
-- Whether the key may use `--rw`: a named key, the `admin.snoop.rw` entitlement, and four-eyes approval. For support, the session owner approves by default. For investigation, a second named admin key approves, never the owner.
+- Whether the watched user sees a notice. `ADSSH_SNOOP_NOTIFY_LOCK=on` forces the notice on and nothing can silence it, for jurisdictions that require notice. Otherwise a Rego rule may decide per purpose, user, or session. Otherwise `ADSSH_SNOOP_NOTIFY` (`on` or `off`, default `on`) applies. An investigation is shown to the watched user unless a Rego rule explicitly returns `notify=false`. The operator default alone cannot silence it.
+- Whether the key may use `--rw`: a named key, the `admin.snoop.rw` entitlement granted to that key name explicitly (a `*` entitlement does not count), a session with a terminal, and four-eyes approval. For support, the session owner approves by default. For investigation, a second named admin key approves, never the owner. While approval is pending, `snoop` prints the request id for the approver to `adsshadm approve`. Run `snoop` again once it is approved.
 
-The server side of `snoop` (`GET /v1/sessions/{id}/attach`, protocol `adssh-attach/1`) is not in this release yet. Until it is, `snoop` reports that the server has no attach endpoint.
+The attach and detach audit records (`MIRROR_ATTACH`, `MIRROR_DETACH`) carry the key name, mode, purpose, reason, session, user, and whether the user was notified. They go into both the audit log and the hash chain.
+
+Against an adssh older than the attach endpoint, `snoop` reports that the server has no attach endpoint.

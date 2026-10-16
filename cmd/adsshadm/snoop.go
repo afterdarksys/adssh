@@ -37,8 +37,10 @@ import (
 )
 
 // adssh-attach/1 framing: 4-byte big-endian payload length, 1 type byte,
-// payload. Same shape as the monitor socket. The type values below are the
-// client half of the contract agreed for the server's attach endpoint.
+// payload. These mirror internal/sys/attach_frame.go; TestFrameConstantsMatch
+// fails if they drift. adsshadm does not import internal/sys, because that
+// package's init turns any binary run with --session-child into a command
+// launcher, which an admin client has no business carrying.
 const (
 	attachProtocol = "adssh-attach/1"
 	frameOut       = byte(0x10) // server -> client: raw terminal output
@@ -212,13 +214,17 @@ func (c *client) openAttach(ctx context.Context, req snoopRequest) (net.Conn, *b
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		resp.Body.Close()
 		var e struct {
-			Error string `json:"error"`
+			Error     string `json:"error"`
+			RequestID string `json:"request_id"`
 		}
 		_ = json.Unmarshal(data, &e)
 		// The admin router answers an unknown route with exactly "not found";
 		// a missing session on a server that has the route says more.
 		if resp.StatusCode == http.StatusNotFound && e.Error == "not found" {
 			return nil, nil, errNoAttach
+		}
+		if msg := attachRefusal(req, e.Error, e.RequestID); msg != "" {
+			return nil, nil, &apiError{Status: resp.StatusCode, Message: msg}
 		}
 		return nil, nil, &apiError{Status: resp.StatusCode, Message: e.Error}
 	}
@@ -228,6 +234,37 @@ func (c *client) openAttach(ctx context.Context, req snoopRequest) (net.Conn, *b
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return conn, br, nil
+}
+
+// attachRefusal explains the server's attach error codes in plain words.
+func attachRefusal(req snoopRequest, code, requestID string) string {
+	switch code {
+	case "session_not_found":
+		return fmt.Sprintf("no live session %s (see sessions)", req.SessionID)
+	case "user_mismatch":
+		return fmt.Sprintf("session %s does not belong to %s; check the user", req.SessionID, req.User)
+	case "attach_forbidden":
+		if req.RW {
+			return "this key may not attach read-write; it needs a named key with admin.snoop.rw granted to its name (a * entitlement does not count)"
+		}
+		return "this key may not attach; snoop needs a named admin key"
+	case "approval_required":
+		approver := "the session owner"
+		if req.Purpose == "investigation" {
+			approver = "a second admin (never the session owner)"
+		}
+		return fmt.Sprintf("read-write attach is waiting for four-eyes approval by %s: request %s (they run: adsshadm approve %s), then run snoop again",
+			approver, clean(requestID), clean(requestID))
+	case "approval_unavailable":
+		return "the server could not record the approval request; the attach was refused"
+	case "viewer_limit":
+		return "this session already has the maximum number of viewers"
+	case "no_terminal":
+		return "this session has no terminal to drive; attach view-only instead"
+	case "bad_mode", "purpose_required", "reason_required":
+		return "the server refused the request (" + code + "); this adsshadm may be older than the server"
+	}
+	return ""
 }
 
 func writeFrame(w io.Writer, typ byte, payload []byte) error {
