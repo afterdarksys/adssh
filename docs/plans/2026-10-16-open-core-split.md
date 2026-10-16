@@ -8,6 +8,18 @@ Ryan approved: the core under Apache 2.0, the enterprise layer under BSL 1.1 in 
 - The core defines the hooks those packages fill: an approval gate the interceptor consults, an admin route table, and an identity provider registry. With nothing registered, the core behaves as a plain governed shell. Four-eyes and change-management checks become no-ops, and the admin API is absent.
 - Two builds. `adssh` (core, Apache) does not import `ee/`. `adssh` built with the `ee` build tag, or a separate `cmd/adssh-enterprise`, blank-imports `ee/...`. Distributions ship the core build, and customers get the enterprise build.
 - A CI check fails if any core package imports `ee/`.
+- `ee/` lives at the repo root, not under `internal/`, so `cmd/adssh-enterprise` can import it. `ee` packages import `security`; `security` never imports `ee`.
+- Every place the core lists enterprise commands by name becomes a registry the `ee` packages fill from `init()`: the listener Run table in `ssh_monitor.go`, `help_content.go`, and the REPL completer. Otherwise the core build still knows the enterprise commands exist.
+- Moving exported symbols out of `security` breaks the v0.9.0 embedder API. v0.10.0 is a breaking release, and `docs/EMBEDDING.md` changes with it.
+- Docs and policy follow their code into `ee/`: `policy/bundles/admin-api.rego`, `docs/openapi/admin.yaml`, and the matching parts of `docs/SECURITY_REVIEW.md`.
+
+## Waves (adssh-06's sizing, done in a fresh session)
+
+1. Hooks: an admin route registry and an identity registry next to the existing `cm_hook.go` and `foureyes_hook.go` seams, plus the core-never-imports-ee CI check. Then move admin, attach, and adsshadm.
+2. Four-eyes, change management, evidence, elevate/grants, leases.
+3. Identity/device login, gateway, mirror_share, grid, sah, risk, bundles, docs, release.
+
+The refactor waits until Ryan confirms the classification table below, including the borderline rows.
 
 ## Proposed classification (Ryan decides the borderline rows)
 
