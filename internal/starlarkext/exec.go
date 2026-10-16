@@ -138,7 +138,7 @@ func resolveExecParams(opts ExtensionOptions, timeoutSecs, maxOutput int) execPa
 
 	return execParams{
 		engine:    engine,
-		session:   &security.SessionState{Restricted: opts.Restricted, Globals: opts.Env},
+		session:   &security.SessionState{Restricted: opts.Restricted, Globals: opts.Env, SessionID: opts.SessionID},
 		timeout:   timeout,
 		outputCap: cap,
 	}
@@ -155,19 +155,16 @@ func runGatedShell(ctx context.Context, p execParams, cmdStr string) (string, er
 		return "", fmt.Errorf("parse error: %v", err)
 	}
 
-	sid := ""
-	if p.session != nil {
-		if v, ok := p.session.Globals["SESSION_ID"].(starlark.String); ok {
-			sid = string(v)
-		}
-	}
+	// The fixed session ID wins over the SESSION_ID global, which Starlark
+	// code can overwrite.
+	sid := sessionGateID(p.session)
 	out := &cappedBuffer{cap: p.outputCap}
 	runner, err := interp.New(
 		interp.Env(security.NewSessionEnviron(sid)),
 		interp.StdIO(nil, out, out),
 		interp.CallHandler(p.engine.CallInterceptorSession(p.session)),
 		interp.ExecHandlers(p.engine.BashInterceptorSession(p.session), security.SessionExecHandler),
-		interp.OpenHandler(security.VirtualOpenHandler()),
+		interp.OpenHandler(p.engine.OpenHandlerSession(p.session)),
 	)
 	if err != nil {
 		return "", fmt.Errorf("exec init error: %v", err)

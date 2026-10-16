@@ -52,14 +52,14 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 
 	// Instantiate persistent runner with this session's own directory stack.
 	dirs := &sys.DirStackState{}
-	sessState := &security.SessionState{Restricted: restricted, Globals: globals, Dirs: dirs}
+	sessState := newSessionState(globals, restricted, dirs)
 	envBridge := hybridEnv{globals: globals}
 	runner, err := interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
 		interp.CallHandler(security.CallInterceptorSession(sessState)),
 		interp.ExecHandlers(security.BashInterceptorSession(sessState), security.SessionExecHandler),
-		interp.OpenHandler(security.VirtualOpenHandler()),
+		interp.OpenHandler(security.OpenInterceptorSession(sessState)),
 	)
 	if err != nil {
 		fmt.Fprintf(errOut, "Error creating runner: %v\n", err)

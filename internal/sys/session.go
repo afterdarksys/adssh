@@ -99,7 +99,18 @@ type Session struct {
 	envOverlay     map[string]string
 	dropPrivileges bool
 	prompt         io.Writer
+	identitySource string
 }
+
+// Identity sources. An empty source means User was set when the session was
+// constructed by the code that registered it (the local shell, an SSH login).
+// SetIdentity marks the session asserted. A caller that verified the new
+// identity sets a stronger source after SetIdentity.
+const (
+	IdentitySourceAsserted     = "asserted"
+	IdentitySourceDeviceLogin  = "device-login"
+	IdentitySourceOIDCVerified = "oidc-verified"
+)
 
 // Per-entry ceilings. A session must not pin an unbounded overlay, and a
 // value this large cannot be a credential we are willing to copy into a child.
@@ -177,7 +188,23 @@ func (s *Session) SetIdentity(user string, principals []string) {
 		s.User = user
 	}
 	s.Principals = append([]string(nil), principals...)
+	s.identitySource = IdentitySourceAsserted
 	s.touchLocked()
+}
+
+// SetIdentitySource records how the current User was established.
+func (s *Session) SetIdentitySource(source string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.identitySource = source
+}
+
+// IdentitySource returns how the current User was established. Empty means
+// the registering code set it and nothing has renamed the session since.
+func (s *Session) IdentitySource() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.identitySource
 }
 
 // SetOIDC records which OIDC audience established the session and which
@@ -477,23 +504,30 @@ var (
 	sessionsMu     sync.RWMutex
 )
 
-// GenerateSessionID creates a random 8-character hex string
+// GenerateSessionID returns 128 random bits as 32 hex characters. A failure
+// of the system random source panics rather than return a guessable id.
 func GenerateSessionID() string {
-	b := make([]byte, 4)
-	rand.Read(b)
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("adssh: session id: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 
+// RegisterSession adds s to the session table. An id that is already
+// registered is refused, so a later registration cannot replace the user or
+// principals bound to a live session.
 func RegisterSession(s *Session) error {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
-	if _, exists := globalSessions[s.ID]; !exists {
-		if sessionCapRefuse {
-			return fmt.Errorf("adssh: session cap is invalid; refusing new sessions")
-		}
-		if sessionCap > 0 && uint64(len(globalSessions)) >= sessionCap {
-			return fmt.Errorf("adssh: session cap of %d reached", sessionCap)
-		}
+	if _, exists := globalSessions[s.ID]; exists {
+		return fmt.Errorf("adssh: session id is already registered")
+	}
+	if sessionCapRefuse {
+		return fmt.Errorf("adssh: session cap is invalid; refusing new sessions")
+	}
+	if sessionCap > 0 && uint64(len(globalSessions)) >= sessionCap {
+		return fmt.Errorf("adssh: session cap of %d reached", sessionCap)
 	}
 	now := time.Now().UTC()
 	if s.CreatedAt.IsZero() {

@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	osuser "os/user"
@@ -30,6 +31,10 @@ type PolicyContext struct {
 	Gateway      *GatewayClaim   `json:"gateway,omitempty"`
 	Lease        *LeaseClaim     `json:"lease,omitempty"`
 	Agent        *AgentClaim     `json:"agent,omitempty"`
+	// IdentityUnknown is set when a non-empty session ID resolves to no bound
+	// or registered principal. User is then empty and the gate denies before
+	// policy runs. It is never sent to Rego.
+	IdentityUnknown bool `json:"-"`
 }
 
 type ElevationClaim struct {
@@ -44,6 +49,7 @@ type GatewayClaim struct {
 	Name       string `json:"name,omitempty"`
 	Target     string `json:"target"`
 	TargetHost string `json:"target_host"`
+	TargetIP   string `json:"target_ip,omitempty"`
 	TargetPort string `json:"target_port"`
 }
 
@@ -117,7 +123,14 @@ func (e *Engine) EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 
 var roleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,64}$`)
 
+// errPolicyRemoteOnly denies every local evaluation in an SSH session
+// process. Its engine is empty, so an evaluation there would allow.
+var errPolicyRemoteOnly = errors.New("policy is evaluated by the listener; not available in this process")
+
 func (e *Engine) evaluatePolicy(pctx PolicyContext) (bool, string, string, error) {
+	if RemoteGateProcess() {
+		return false, errPolicyRemoteOnly.Error(), "", errPolicyRemoteOnly
+	}
 	e.policyMu.RLock()
 	defer e.policyMu.RUnlock()
 
@@ -150,6 +163,7 @@ func (e *Engine) evaluatePolicy(pctx PolicyContext) (bool, string, string, error
 			"name":        pctx.Gateway.Name,
 			"target":      pctx.Gateway.Target,
 			"target_host": pctx.Gateway.TargetHost,
+			"target_ip":   pctx.Gateway.TargetIP,
 			"target_port": pctx.Gateway.TargetPort,
 		}
 	}
@@ -249,9 +263,23 @@ func EvaluatePolicy(pctx PolicyContext) (bool, string, error) {
 	return defaultEngine.EvaluatePolicy(pctx)
 }
 
-// BuildPolicyContext creates a PolicyContext from the current OS user and command.
-// It is stateless (no engine state), so it remains a plain package function.
+// BuildPolicyContext builds a PolicyContext against the process-global default
+// engine. See (*Engine).buildPolicyContext for the resolution order.
 func BuildPolicyContext(command string, args []string, sessionID string) PolicyContext {
+	return defaultEngine.buildPolicyContext(command, args, sessionID)
+}
+
+// buildPolicyContext resolves the principal for sessionID in this order:
+//  1. the identity bound on this engine (BindSessionIdentity);
+//  2. the process sys session registry (SSH and local sessions), with the
+//     active elevation and managed-agent claims;
+//  3. for an empty sessionID only, the current OS user and its groups;
+//  4. otherwise IdentityUnknown with an empty User.
+//
+// Threats: a named session never falls back to the process identity, so an
+// embedded session declared for another user cannot authorize as the host
+// account. It trusts whoever bound or registered the identity.
+func (e *Engine) buildPolicyContext(command string, args []string, sessionID string) PolicyContext {
 	pctx := PolicyContext{
 		Command:   command,
 		Args:      args,
@@ -260,6 +288,11 @@ func BuildPolicyContext(command string, args []string, sessionID string) PolicyC
 	}
 
 	if sessionID != "" {
+		if user, groups, ok := e.boundIdentity(sessionID); ok {
+			pctx.User = user
+			pctx.Groups = groups
+			return pctx
+		}
 		if session := sys.GetSession(sessionID); session != nil {
 			pctx.User = session.User
 			pctx.Groups = append([]string(nil), session.Principals...)
@@ -281,18 +314,28 @@ func BuildPolicyContext(command string, args []string, sessionID string) PolicyC
 			}
 			return pctx
 		}
+		pctx.IdentityUnknown = true
+		return pctx
 	}
 
-	if u, err := osuser.Current(); err == nil {
-		pctx.User = u.Username
-		if gids, err := u.GroupIds(); err == nil {
-			for _, gid := range gids {
-				if g, err := osuser.LookupGroupId(gid); err == nil {
-					pctx.Groups = append(pctx.Groups, g.Name)
-				}
+	pctx.User, pctx.Groups = CurrentOSIdentity()
+	return pctx
+}
+
+// CurrentOSIdentity returns the process user's name and group names. It
+// returns an empty user when the OS lookup fails.
+func CurrentOSIdentity() (string, []string) {
+	u, err := osuser.Current()
+	if err != nil {
+		return "", nil
+	}
+	var groups []string
+	if gids, err := u.GroupIds(); err == nil {
+		for _, gid := range gids {
+			if g, err := osuser.LookupGroupId(gid); err == nil {
+				groups = append(groups, g.Name)
 			}
 		}
 	}
-
-	return pctx
+	return u.Username, groups
 }

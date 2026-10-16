@@ -8,12 +8,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -44,7 +47,7 @@ import (
 //     topStdout / topStdin detects them),
 //
 // which also excludes SSH sessions and scripts, because there tty is nil.
-func ptyExecHandler(tty *os.File, topStdin io.Reader, topStdout io.Writer) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+func ptyExecHandler(tty *os.File, topStdin io.Reader, topStdout, topStderr io.Writer) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		return func(ctx context.Context, args []string) error {
 			if len(args) == 0 {
@@ -54,7 +57,7 @@ func ptyExecHandler(tty *os.File, topStdin io.Reader, topStdout io.Writer) func(
 			if !ptyEligible(tty, topStdin, topStdout, hc) {
 				return next(ctx, args)
 			}
-			ran, err := runOnPTY(ctx, args, tty, topStdout, hc)
+			ran, err := runOnPTY(ctx, args, tty, topStdout, topStderr, hc)
 			if !ran {
 				// Fail safe: the PTY could not be set up and NO child was
 				// started, so fall back to the standard exec path rather than
@@ -98,7 +101,7 @@ func ptyEligible(tty *os.File, topStdin io.Reader, topStdout io.Writer, hc inter
 // command twice) and the child's exit status as err (an interp exit-status error
 // for a non-zero exit). It returns ran=false only when nothing was started and
 // the terminal is left as it was found, so the caller can fall back safely.
-func runOnPTY(ctx context.Context, args []string, tty *os.File, out io.Writer, hc interp.HandlerContext) (bool, error) {
+func runOnPTY(ctx context.Context, args []string, tty *os.File, out, topStderr io.Writer, hc interp.HandlerContext) (bool, error) {
 	path, lookErr := interp.LookPathDir(hc.Dir, hc.Env, args[0])
 	if lookErr != nil {
 		// Match the default handler: report and return 127 without falling back.
@@ -108,9 +111,18 @@ func runOnPTY(ctx context.Context, args []string, tty *os.File, out io.Writer, h
 		return true, interp.NewExitStatus(127)
 	}
 
-	cmd := exec.Command(path, args...)
+	// CommandContext kills the child when the runner's context ends (timeout,
+	// session teardown), as the default exec handler does.
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Args = args
 	cmd.Dir = hc.Dir
+	// pty.Start attaches only the std streams left nil. Keep a redirected
+	// stderr (2>file, 2>/dev/null) off the terminal and out of the session
+	// recording; stderr that is the session's own stream, or 2>&1 onto it,
+	// stays on the PTY.
+	if hc.Stderr != nil && hc.Stderr != topStderr && hc.Stderr != out {
+		cmd.Stderr = hc.Stderr
+	}
 	cmd.Env = security.ChildEnviron(hc.Env)
 	if err := sys.PrepareChild(cmd, security.SessionFromEnv(hc.Env)); err != nil {
 		if hc.Stderr != nil {
@@ -135,27 +147,45 @@ func runOnPTY(ctx context.Context, args []string, tty *os.File, out io.Writer, h
 		restore()
 		return false, nil
 	}
+	// A poller-owned master lets Close release the output copier and the
+	// input pump even while a background grandchild holds the slave open.
+	// If the copy fails, keep the blocking master: the child is running.
+	if pollable, err := sys.PollablePTY(ptmx); err == nil {
+		ptmx = pollable
+	}
 	defer restore()
 	defer func() { _ = ptmx.Close() }()
 
 	// Match the child PTY size to the real terminal and keep it in sync while
-	// the command runs. pty.InheritSize copies the size of its first argument
-	// onto its second, so this reads the real tty and applies it to the master.
+	// the command runs. syncPTYSize never calls ptmx.Fd, which would put the
+	// master back into blocking mode. signal.Stop does not close winch, so the goroutine needs its own quit.
 	winch := make(chan os.Signal, 1)
 	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
+	winchQuit := make(chan struct{})
+	winchDone := make(chan struct{})
 	go func() {
-		for range winch {
-			_ = pty.InheritSize(tty, ptmx)
+		defer close(winchDone)
+		for {
+			select {
+			case <-winch:
+				_ = syncPTYSize(tty, ptmx)
+			case <-winchQuit:
+				return
+			}
 		}
 	}()
 	winch <- syscall.SIGWINCH // set the initial size
 
 	// Pump the real terminal into the child and the child's output into the
-	// session broadcaster (so recordings still capture it). The stdin copy is
-	// detached: it blocks on the real terminal read and must not hold up the
-	// child's exit.
-	go func() { _, _ = io.Copy(ptmx, tty) }()
+	// session broadcaster (so recordings still capture it). The input pump is
+	// stopped and joined before returning: a reader left blocked on the real
+	// terminal would swallow the operator's next line.
+	var stopInput atomic.Bool
+	inputDone := make(chan struct{})
+	go func() {
+		defer close(inputDone)
+		pumpTerminalInput(tty, ptmx, &stopInput)
+	}()
 	copyDone := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(out, ptmx)
@@ -164,13 +194,80 @@ func runOnPTY(ctx context.Context, args []string, tty *os.File, out io.Writer, h
 
 	waitErr := cmd.Wait()
 
-	// Drain any output the child produced right before exiting. Closing ptmx
-	// (deferred) unblocks the copy goroutine; wait briefly for it to flush.
+	stopInput.Store(true)
+	signal.Stop(winch)
+	close(winchQuit)
+	<-winchDone
+	// Give the copier a bounded time to drain what the child wrote. A
+	// grandchild that keeps the slave open (sh -c 'sleep 600 & exit') would
+	// otherwise hold the prompt. Closing the pollable master then unblocks the
+	// output copy and a pump write to a child that no longer reads.
+	select {
+	case <-copyDone:
+	case <-time.After(ptyDrainTimeout):
+	}
 	_ = ptmx.Close()
 	<-copyDone
+	<-inputDone
 
 	restore()
 	return true, exitStatusFromWait(waitErr)
+}
+
+// ptyDrainTimeout bounds how long runOnPTY waits for child output after the
+// child exits before it closes the master.
+const ptyDrainTimeout = 200 * time.Millisecond
+
+// syncPTYSize copies the real terminal's window size onto the pty master
+// through SyscallConn. pty.InheritSize calls ptmx.Fd, which puts a pollable
+// master back into blocking mode so Close no longer unblocks a Read.
+func syncPTYSize(tty, ptmx *os.File) error {
+	ws, err := pty.GetsizeFull(tty)
+	if err != nil {
+		return err
+	}
+	return sys.SetPTYSize(ptmx, ws)
+}
+
+// pumpTerminalInput copies the real terminal into dst until stop is raised.
+// It never blocks in read(2): it polls with a short timeout and reads only when
+// input is ready and stop is still clear, so once stop is set no further byte
+// is taken from the terminal. The Go poller cannot watch a tty on macOS
+// (deadlines return ErrNoDeadline), hence unix.Poll on the raw descriptor.
+func pumpTerminalInput(tty *os.File, dst io.Writer, stop *atomic.Bool) {
+	fd := int(tty.Fd())
+	buf := make([]byte, 4096)
+	for !stop.Load() {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, 50)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return
+		}
+		if n == 0 || stop.Load() {
+			continue
+		}
+		if fds[0].Revents&unix.POLLIN == 0 {
+			if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+				return
+			}
+			continue
+		}
+		r, err := unix.Read(fd, buf)
+		if r > 0 {
+			if _, werr := dst.Write(buf[:r]); werr != nil {
+				return
+			}
+		}
+		if err == unix.EINTR || err == unix.EAGAIN {
+			continue
+		}
+		if err != nil || r == 0 {
+			return
+		}
+	}
 }
 
 // exitStatusFromWait converts an *exec.Cmd.Wait error into the interp exit

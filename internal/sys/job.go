@@ -1,7 +1,9 @@
 package sys
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -27,20 +29,24 @@ type Job struct {
 	PID    int
 	PGID   int
 	Args   []string // human-readable command args for display
+
+	done chan struct{} // closed by the owner once the pid is reaped and output drained
 }
 
 // JobTable is a mutex-protected table of active jobs.
 type JobTable struct {
-	mu     sync.Mutex
-	jobs   map[int]*Job
-	nextID int
+	mu      sync.Mutex
+	changed *sync.Cond // broadcast on every job status change; uses mu
+	jobs    map[int]*Job
+	nextID  int
 }
 
 // globalJobTable is the process-wide singleton.
-var globalJobTable = &JobTable{
-	jobs:   make(map[int]*Job),
-	nextID: 1,
-}
+var globalJobTable = func() *JobTable {
+	t := &JobTable{jobs: make(map[int]*Job), nextID: 1}
+	t.changed = sync.NewCond(&t.mu)
+	return t
+}()
 
 // GlobalJobTable returns the singleton job table.
 func GlobalJobTable() *JobTable {
@@ -49,14 +55,103 @@ func GlobalJobTable() *JobTable {
 
 // NewJob sets up cmd for a new process group (Setpgid), starts it, and
 // registers it in the job table.  Returns the assigned job ID.
+//
+// The job table is the only waiter for the child: a per-job owner goroutine
+// waits on that one pid and nothing (including cmd.Wait) may wait on it again.
+// Callers must not call cmd.Wait.  Non-file stdio is piped through copiers
+// owned here so os/exec never needs Wait to drain or close them.
 func NewJob(cmd *exec.Cmd) (int, error) {
+	// A context-bound command's cancel path signals cmd.Process by pid and
+	// expects cmd.Wait to run; both would race the owner's reap.
+	if cmd.Cancel != nil || cmd.WaitDelay != 0 {
+		return 0, errors.New("job: context-bound commands are not supported")
+	}
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
 
+	var (
+		childEnds []*os.File // closed in the parent once the child holds them
+		readEnds  []*os.File // parent read ends, closed by their copier
+		copiers   []func()
+		drained   sync.WaitGroup
+	)
+	closeAll := func() {
+		for _, f := range childEnds {
+			f.Close()
+		}
+		for _, f := range readEnds {
+			f.Close()
+		}
+	}
+	pipeOut := func(w io.Writer) (*os.File, error) {
+		r, pw, err := os.Pipe()
+		if err != nil {
+			return nil, err
+		}
+		childEnds = append(childEnds, pw)
+		readEnds = append(readEnds, r)
+		copiers = append(copiers, func() {
+			defer drained.Done()
+			io.Copy(w, r) //nolint:errcheck
+			r.Close()
+		})
+		return pw, nil
+	}
+	if _, ok := cmd.Stdout.(*os.File); cmd.Stdout != nil && !ok {
+		pw, err := pipeOut(cmd.Stdout)
+		if err != nil {
+			closeAll()
+			return 0, fmt.Errorf("job: stdout pipe: %w", err)
+		}
+		if sameWriter(cmd.Stdout, cmd.Stderr) {
+			cmd.Stderr = pw
+		}
+		cmd.Stdout = pw
+	}
+	if _, ok := cmd.Stderr.(*os.File); cmd.Stderr != nil && !ok {
+		pw, err := pipeOut(cmd.Stderr)
+		if err != nil {
+			closeAll()
+			return 0, fmt.Errorf("job: stderr pipe: %w", err)
+		}
+		cmd.Stderr = pw
+	}
+	var stdinW *os.File
+	var stdinSrc io.Reader
+	if _, ok := cmd.Stdin.(*os.File); cmd.Stdin != nil && !ok {
+		r, w, err := os.Pipe()
+		if err != nil {
+			closeAll()
+			return 0, fmt.Errorf("job: stdin pipe: %w", err)
+		}
+		childEnds = append(childEnds, r)
+		stdinW, stdinSrc = w, cmd.Stdin
+		cmd.Stdin = r
+	}
+
 	if err := cmd.Start(); err != nil {
+		closeAll()
+		if stdinW != nil {
+			stdinW.Close()
+		}
 		return 0, fmt.Errorf("job: start: %w", err)
+	}
+	for _, f := range childEnds {
+		f.Close()
+	}
+	drained.Add(len(copiers))
+	for _, c := range copiers {
+		go c()
+	}
+	if stdinW != nil {
+		// Not awaited: like os/exec, this ends when src is exhausted or the
+		// child closes its stdin (EPIPE).
+		go func() {
+			io.Copy(stdinW, stdinSrc) //nolint:errcheck
+			stdinW.Close()
+		}()
 	}
 
 	pgid := cmd.Process.Pid // after Setpgid the PGID equals the PID of the child
@@ -76,21 +171,71 @@ func NewJob(cmd *exec.Cmd) (int, error) {
 		PID:    cmd.Process.Pid,
 		PGID:   pgid,
 		Args:   cmd.Args,
+		done:   make(chan struct{}),
 	}
 	t.jobs[id] = j
 	t.mu.Unlock()
 
-	// Reap the process in the background and mark it done when it exits.
-	go func() {
-		cmd.Wait() //nolint:errcheck
-		t.mu.Lock()
-		if jj, ok := t.jobs[id]; ok {
-			jj.Status = JobDone
-		}
-		t.mu.Unlock()
-	}()
+	go t.ownJob(j, &drained)
 
 	return id, nil
+}
+
+// ownJob is the single waiter for j.PID.  It waits on that pid only, tracks
+// stop/continue for job control, and on exit marks the job done, waits for
+// its output to drain, and closes j.done.
+func (t *JobTable) ownJob(j *Job, drained *sync.WaitGroup) {
+	for {
+		var ws syscall.WaitStatus
+		_, err := syscall.Wait4(j.PID, &ws, syscall.WUNTRACED|syscall.WCONTINUED, nil)
+		if err == syscall.EINTR {
+			continue
+		}
+		t.mu.Lock()
+		switch {
+		case err != nil:
+			// ECHILD: the pid is no longer ours to wait on.  Fail closed to done.
+			j.Status = JobDone
+		case isStopReport(ws):
+			if isContinueReport(ws) {
+				j.Status = JobRunning
+			} else {
+				j.Status = JobStopped
+			}
+		default:
+			j.Status = JobDone
+		}
+		finished := j.Status == JobDone
+		t.changed.Broadcast()
+		t.mu.Unlock()
+		if finished {
+			drained.Wait()
+			close(j.done)
+			return
+		}
+	}
+}
+
+// isStopReport and isContinueReport decode wait4 stop/continue reports for
+// both kernels.  syscall.WaitStatus.Stopped/Continued are wrong on Darwin:
+// they treat a SIGSTOP stop as "continued".  Both Linux and Darwin mark a
+// stop/continue report with 0x7f in the low seven bits.  Linux reports a
+// continue as 0xffff; Darwin reports it as a stop with signal SIGCONT.
+func isStopReport(ws syscall.WaitStatus) bool { return ws&0x7f == 0x7f }
+
+func isContinueReport(ws syscall.WaitStatus) bool {
+	return ws == 0xffff || syscall.Signal((ws>>8)&0xff) == syscall.SIGCONT
+}
+
+// sameWriter reports whether a and b are the same writer, without panicking
+// on incomparable dynamic types.
+func sameWriter(a, b io.Writer) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
 }
 
 // Jobs returns a snapshot of all tracked jobs.
@@ -111,11 +256,15 @@ func FgJob(id int) error {
 	t := globalJobTable
 	t.mu.Lock()
 	j, ok := t.jobs[id]
+	var status JobStatus
+	if ok {
+		status = j.Status
+	}
 	t.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("fg: no such job: %d", id)
 	}
-	if j.Status == JobDone {
+	if status == JobDone {
 		return fmt.Errorf("fg: job %d has already finished", id)
 	}
 
@@ -130,22 +279,20 @@ func FgJob(id int) error {
 		return fmt.Errorf("fg: SIGCONT: %w", err)
 	}
 
+	// Wait for the job's owner to report it stopped or exited.  fg never
+	// waits on the pid itself.
 	t.mu.Lock()
-	j.Status = JobRunning
+	if j.Status == JobStopped {
+		j.Status = JobRunning
+	}
+	for j.Status == JobRunning {
+		t.changed.Wait()
+	}
 	t.mu.Unlock()
-
-	// Wait for the child to stop or exit, then reclaim the terminal.
-	_ = j.Cmd.Wait()
 
 	// Reclaim the terminal for the shell.
 	shellPGID := syscall.Getpgrp()
 	_ = SetForegroundProcessGroup(shellPGID)
-
-	t.mu.Lock()
-	if jj, ok := t.jobs[id]; ok {
-		jj.Status = JobDone
-	}
-	t.mu.Unlock()
 
 	return nil
 }
@@ -155,11 +302,15 @@ func BgJob(id int) error {
 	t := globalJobTable
 	t.mu.Lock()
 	j, ok := t.jobs[id]
+	var status JobStatus
+	if ok {
+		status = j.Status
+	}
 	t.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("bg: no such job: %d", id)
 	}
-	if j.Status == JobDone {
+	if status == JobDone {
 		return fmt.Errorf("bg: job %d has already finished", id)
 	}
 
@@ -168,7 +319,9 @@ func BgJob(id int) error {
 	}
 
 	t.mu.Lock()
-	j.Status = JobRunning
+	if j.Status == JobStopped {
+		j.Status = JobRunning
+	}
 	t.mu.Unlock()
 
 	return nil
@@ -198,18 +351,7 @@ func WaitJob(id int) error {
 	if !ok {
 		return fmt.Errorf("wait: no such job: %d", id)
 	}
-	if j.Status == JobDone {
-		return nil
-	}
-
-	j.Cmd.Wait() //nolint:errcheck
-
-	t.mu.Lock()
-	if jj, ok := t.jobs[id]; ok {
-		jj.Status = JobDone
-	}
-	t.mu.Unlock()
-
+	<-j.done // the owner goroutine is the only waiter on the pid
 	return nil
 }
 

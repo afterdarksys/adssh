@@ -202,3 +202,139 @@ func markerPath(t *testing.T) string {
 	}
 	return path
 }
+
+// A Starlark custom command would run on a worker goroutine against the
+// session's shared, unfrozen globals. The batch is refused before any command
+// starts.
+func TestParallelRefusesCustomCommandBeforeRun(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	marker := markerPath(t)
+	cases := []string{"bump", "true && bump x", "command bump", "eval 'bump'"}
+	for _, cmd := range cases {
+		t.Run(cmd, func(t *testing.T) {
+			src := fmt.Sprintf(`
+hits = []
+def bump(argv):
+    hits.append(1)
+sys["register_command"]("bump", bump)
+sys["parallel"]([%q, %q, "bump", "bump"], jobs=4, timeout=5)
+`, "touch "+marker, cmd)
+			g, err := evalExec(t, env, src)
+			if err == nil || !strings.Contains(err.Error(), `sys.parallel cannot run Starlark custom command "bump"`) {
+				t.Fatalf("error = %v", err)
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Fatalf("a command ran before the refusal: %v", statErr)
+			}
+			if hits, ok := g["hits"].(*starlark.List); ok && hits.Len() != 0 {
+				t.Fatalf("custom command ran %d times", hits.Len())
+			}
+		})
+	}
+}
+
+// The worker's globals copy has no custom-command table, so a name that the
+// pre-flight cannot see (built at run time) still cannot reach Starlark.
+func TestParallelIsolatedDropsCustomCommands(t *testing.T) {
+	commands := starlark.NewDict(1)
+	if err := commands.SetKey(starlark.String("bump"), starlark.None); err != nil {
+		t.Fatal(err)
+	}
+	p := execParams{session: &security.SessionState{SessionID: "s1", Globals: starlark.StringDict{
+		"__custom_commands__": commands,
+		"X":                   starlark.String("y"),
+	}}}
+	iso := p.isolated()
+	if _, ok := iso.session.Globals["__custom_commands__"]; ok {
+		t.Fatal("isolated globals still carry __custom_commands__")
+	}
+	if iso.session.Globals["X"] != starlark.String("y") || iso.session.SessionID != "s1" {
+		t.Fatalf("isolated session lost state: %+v", iso.session)
+	}
+}
+
+// A failure stops the batch: with jobs=1 the command after a failing one never
+// starts.
+func TestParallelFailureStopsLaterCommands(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	marker := markerPath(t)
+	src := fmt.Sprintf("sys[\"parallel\"]([\"false\", %q], jobs=1, timeout=5)\n", "touch "+marker)
+	_, err := evalExec(t, env, src)
+	if err == nil || !strings.Contains(err.Error(), "command 0") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("command after the failure ran: %v", statErr)
+	}
+}
+
+// A failure cancels commands already running in other workers.
+func TestParallelFailureCancelsRunning(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	start := time.Now()
+	_, err := evalExec(t, env, `sys["parallel"](["sleep 5", "false"], jobs=2, timeout=10)`)
+	if err == nil || !strings.Contains(err.Error(), "command 1") {
+		t.Fatalf("error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("batch took %s after a failure, want the sleep cancelled", elapsed)
+	}
+}
+
+// Policy is checked for every command before any starts.
+func TestParallelPreflightDenialRunsNothing(t *testing.T) {
+	eng, err := security.NewEngine(security.EngineConfig{PolicySource: []byte(`
+package adssh.authz
+default allow = false
+allow { input.command != "echo" }
+deny_reason = "echo denied by session policy" { input.command == "echo" }
+`)})
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	env := execEnv(t, eng, false)
+	marker := markerPath(t)
+	src := fmt.Sprintf("sys[\"parallel\"]([%q, \"sleep 0\", \"echo no\"], jobs=1, timeout=5)\n", "touch "+marker)
+	_, err = evalExec(t, env, src)
+	if err == nil || !strings.Contains(err.Error(), "command 2") || !strings.Contains(err.Error(), "echo denied") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("a command ran before the denial: %v", statErr)
+	}
+}
+
+// Thread.Cancel from another goroutine stops a running batch.
+func TestParallelThreadCancelStopsBatch(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	thread := &starlark.Thread{Name: "cancel-test"}
+	timer := time.AfterFunc(300*time.Millisecond, func() { thread.Cancel("operator interrupt") })
+	defer timer.Stop()
+	start := time.Now()
+	_, err := starlark.ExecFile(thread, "t.star", `sys["parallel"](["sleep 5", "sleep 5"], jobs=2, timeout=10)`, env)
+	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("cancelled batch took %s", elapsed)
+	}
+}
+
+// The overall deadline bounds the batch and is itself bounded.
+func TestParallelDeadline(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	start := time.Now()
+	_, err := evalExec(t, env, `sys["parallel"](["sleep 5", "sleep 5", "sleep 5"], jobs=1, timeout=10, deadline=1)`)
+	if err == nil || !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("deadline batch took %s", elapsed)
+	}
+	for _, bad := range []string{"-1", "3601"} {
+		_, err := evalExec(t, env, `sys["parallel"](["true"], deadline=`+bad+`)`)
+		if err == nil || !strings.Contains(err.Error(), "deadline must be") {
+			t.Fatalf("deadline=%s error = %v", bad, err)
+		}
+	}
+}

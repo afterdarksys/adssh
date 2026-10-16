@@ -156,3 +156,45 @@ func TestShellIncomplete(t *testing.T) {
 		t.Fatal("forced shell prefix")
 	}
 }
+
+func TestStarlarkIfWithBraceLiteralStaysStarlark(t *testing.T) {
+	for _, src := range []string{
+		`if d == {}: print("empty")`,
+		`if x in {1, 2}:`,
+		`if d == {"a": 1}:`,
+		"if d == {\"a\": 1}:\n  print(\"one\")",
+		`if x == [{"a": 1}]:`,
+		"if d == {\n  \"a\": 1,\n}:",
+	} {
+		t.Run(src, func(t *testing.T) {
+			if got := ClassifyFlow(src); got.Kind != FlowNot || got.Err != nil {
+				t.Fatalf("flow kind %v err %v", got.Kind, got.Err)
+			}
+			if c := ClassifyChunk(src); c.Kind != ChunkReady || c.Mode != ModeStarlark {
+				t.Fatalf("chunk %+v", c)
+			}
+		})
+	}
+}
+
+func TestShellBraceIfStillFlow(t *testing.T) {
+	for _, src := range []string{
+		"if true { echo yes }",
+		"if true { echo yes } else { echo no }",
+		"if [ -f x ] { echo yes }",
+		"if test -n \"$(echo {)\" { echo yes }",
+		"if ls a[0-9] { echo yes }",
+		"if (true) { echo yes }",
+		"if true {\n  echo a:\n}",
+	} {
+		t.Run(src, func(t *testing.T) {
+			got := ClassifyFlow(src)
+			if got.Kind != FlowReady || got.Op != "if" {
+				t.Fatalf("kind %v err %v", got.Kind, got.Err)
+			}
+		})
+	}
+	if got := ClassifyFlow("if true {"); got.Kind != FlowIncomplete {
+		t.Fatalf("open brace kind %v", got.Kind)
+	}
+}

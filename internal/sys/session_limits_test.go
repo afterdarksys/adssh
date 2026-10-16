@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -168,10 +169,14 @@ func TestWrapSessionLimits(t *testing.T) {
 		t.Fatalf("executable failure rewrote %#v %s", plain.Args, plain.Path)
 	}
 
-	executable = func() (string, error) { t.Fatal("wrap ran for an existing --session-child"); return "", nil }
-	already := &exec.Cmd{Path: "/bin/true", Args: []string{"adssh", "--session-child", "nofile=1", "--", "/bin/true"}}
+	executable = func() (string, error) { return "/fake/adssh", nil }
+	alreadyArgs := []string{"/fake/adssh", "--session-child", "nofile=1", "--", "/bin/true"}
+	already := &exec.Cmd{Path: "/fake/adssh", Args: append([]string(nil), alreadyArgs...)}
 	if err := PrepareChild(already, nil); err != nil {
 		t.Fatal(err)
+	}
+	if already.Path != "/fake/adssh" || !reflect.DeepEqual(already.Args, alreadyArgs) {
+		t.Fatalf("an existing wrap was wrapped again: %#v", already.Args)
 	}
 
 	setSessionLimitsForTest(hostLimits{})
@@ -220,8 +225,22 @@ func TestApplyOneLimit(t *testing.T) {
 	if err := applyOneLimit("nofile", 100); err != nil {
 		t.Fatal(err)
 	}
-	if got.Cur != 100 || got.Max != unix.RLIM_INFINITY {
+	// The hard limit drops with the soft one, so the dropped user cannot
+	// raise it back.
+	if got.Cur != 100 || got.Max != 100 {
 		t.Fatalf("infinity clamp got %+v", got)
+	}
+
+	getRlimit = func(res int, rlim *unix.Rlimit) error {
+		rlim.Cur = 16
+		rlim.Max = 4096
+		return nil
+	}
+	if err := applyOneLimit("nofile", 100); err != nil {
+		t.Fatal(err)
+	}
+	if got.Cur != 100 || got.Max != 100 {
+		t.Fatalf("finite hard limit got %+v", got)
 	}
 
 	setRlimit = func(int, *unix.Rlimit) error { t.Fatal("zero limit called setrlimit"); return nil }
@@ -328,5 +347,107 @@ func TestSessionChildReexecNOFILE(t *testing.T) {
 	}
 	if out != strconv.FormatUint(want, 10) {
 		t.Fatalf("ulimit -n = %q, want %d", out, want)
+	}
+}
+
+func sessionChildCmd(t *testing.T, limits []string, tail ...string) *exec.Cmd {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := append([]string{"--session-child"}, limits...)
+	args = append(args, "--")
+	args = append(args, tail...)
+	return exec.Command(exe, args...)
+}
+
+func TestSessionChildCannotRaiseLimit(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is not available")
+	}
+	limits := []string{"nofile=64", "nproc=0", "as=0", "fsize=0", "cpu=0"}
+	out, err := sessionChildCmd(t, limits, "/bin/sh", "sh", "-c", "ulimit -Hn").CombinedOutput()
+	if err != nil {
+		t.Fatalf("ulimit -Hn: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "64" {
+		t.Fatalf("hard nofile = %q, want 64", got)
+	}
+	out, err = sessionChildCmd(t, limits, "/bin/sh", "sh", "-c", "ulimit -n 200 && echo raised").CombinedOutput()
+	if err == nil || strings.Contains(string(out), "raised") {
+		t.Fatalf("session child raised its nofile limit: err=%v out=%q", err, out)
+	}
+}
+
+func TestRunSessionChildOnlyAsArgv1(t *testing.T) {
+	origSet := setRlimit
+	origExec := execProcess
+	t.Cleanup(func() {
+		setRlimit = origSet
+		execProcess = origExec
+	})
+	setRlimit = func(int, *unix.Rlimit) error { t.Fatal("limit applied"); return nil }
+	execProcess = func(string, []string, []string) error { t.Fatal("exec ran"); return nil }
+	for _, args := range [][]string{
+		{"adssh", "script.star", "--session-child", "nofile=1", "--", "/bin/true"},
+		{"adssh", "-c", "echo", "--session-child"},
+		{"--session-child", "nofile=1", "--", "/bin/true"},
+	} {
+		if err := runSessionChild(args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestWrapSessionLimitsIgnoresUserArgument(t *testing.T) {
+	origTest := runningUnderTest
+	origExe := executable
+	origLimits := setSessionLimitsForTest(hostLimits{nofile: 256})
+	t.Cleanup(func() {
+		runningUnderTest = origTest
+		executable = origExe
+		setSessionLimitsForTest(origLimits)
+	})
+	runningUnderTest = func() bool { return false }
+	executable = func() (string, error) { return "/fake/adssh", nil }
+	cmd := &exec.Cmd{Path: "/bin/sleep", Args: []string{"sleep", "9", "--session-child"}}
+	if err := PrepareChild(cmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cmd.Path != "/fake/adssh" || len(cmd.Args) < 2 || cmd.Args[1] != "--session-child" {
+		t.Fatalf("user argument skipped the limit wrap: path=%s args=%#v", cmd.Path, cmd.Args)
+	}
+}
+
+// A shell started with SIGINT ignored (as a session child inherits from the
+// listener) execs the session-child wrapper; the command it runs must get
+// the default SIGINT disposition again.
+func TestSessionChildRestoresDefaultSignals(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is not available")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sig := range []string{"INT", "QUIT"} {
+		script := fmt.Sprintf("trap '' %s; exec \"$0\" --session-child nofile=0 nproc=0 as=0 fsize=0 cpu=0 -- /bin/sh sh -c 'kill -%s $$; echo survived'", sig, sig)
+		cmd := exec.Command("/bin/sh", "-c", script, exe)
+		done := make(chan struct{})
+		var out []byte
+		go func() {
+			out, _ = cmd.CombinedOutput()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			t.Fatalf("SIG%s: helper hung", sig)
+		}
+		if strings.Contains(string(out), "survived") {
+			t.Fatalf("SIG%s stayed ignored through the session-child exec: %q", sig, out)
+		}
 	}
 }

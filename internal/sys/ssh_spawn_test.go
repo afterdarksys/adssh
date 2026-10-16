@@ -48,9 +48,8 @@ func installSpawnFakes(t *testing.T) {
 	runningUnderTest = func() bool { return false }
 	executable = func() (string, error) { return "/fake/adssh", nil }
 	geteuid = func() int { return 1 }
-	lookupUser = func(string) (*user.User, error) {
-		t.Errorf("lookupUser called")
-		return nil, errors.New("not found")
+	lookupUser = func(name string) (*user.User, error) {
+		return &user.User{Username: name, Uid: "1000", Gid: "1000", HomeDir: "/nonexistent/home/" + name}, nil
 	}
 	userGroupIDs = func(*user.User) ([]string, error) {
 		t.Errorf("userGroupIDs called")
@@ -155,15 +154,12 @@ func TestSpawnSSHSessionWrapsAndHooks(t *testing.T) {
 		hookCh <- sessionID
 	})
 	if err := SpawnSSHSession(SSHSessionSpec{
-		SessionID:   id,
-		User:        userName,
-		Principals:  []string{"p1", "p2"},
-		Restricted:  true,
-		MenuPath:    "/menu",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
-		PTY:         pty,
+		SessionID:  id,
+		User:       userName,
+		Principals: []string{"p1", "p2"},
+		Restricted: true,
+		MenuPath:   "/menu",
+		PTY:        pty,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -177,9 +173,9 @@ func TestSpawnSSHSessionWrapsAndHooks(t *testing.T) {
 		"--monitor-fd", "3",
 		"--restricted",
 		"--menu", "/menu",
-		"--history", "/hist",
-		"--profile", "/profile",
-		"--rc", "/rc",
+		"--history", "/nonexistent/home/bob/.adssh/history",
+		"--profile", "/nonexistent/home/bob/.adsshprofile",
+		"--rc", "/nonexistent/home/bob/.adsshrc",
 		"--principal", "p1",
 		"--principal", "p2",
 	}
@@ -189,7 +185,7 @@ func TestSpawnSSHSessionWrapsAndHooks(t *testing.T) {
 	if got.extra != 1 || got.stdin != pty || got.stdout != pty || got.stderr != pty {
 		t.Fatal("stdio")
 	}
-	if !got.setsid || !got.setctty || got.ctty != 0 || got.cred != nil || !got.envSet || got.dir != "" {
+	if !got.setsid || !got.setctty || got.ctty != 0 || got.cred != nil || !got.envSet || got.dir != "/" {
 		t.Fatal("proc attr")
 	}
 	select {
@@ -216,12 +212,9 @@ func TestSpawnSSHSessionOmitsOptionalFlags(t *testing.T) {
 	}
 	SetSSHMonitorServer(func(net.Conn, string) {})
 	if err := SpawnSSHSession(SSHSessionSpec{
-		SessionID:   id,
-		User:        userName,
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
-		PTY:         pty,
+		SessionID: id,
+		User:      userName,
+		PTY:       pty,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -233,9 +226,9 @@ func TestSpawnSSHSessionOmitsOptionalFlags(t *testing.T) {
 		"--session-id", id,
 		"--ssh-user", userName,
 		"--monitor-fd", "3",
-		"--history", "/hist",
-		"--profile", "/profile",
-		"--rc", "/rc",
+		"--history", "/nonexistent/home/bob/.adssh/history",
+		"--profile", "/nonexistent/home/bob/.adsshprofile",
+		"--rc", "/nonexistent/home/bob/.adsshrc",
 	}
 	if !reflect.DeepEqual(got.args, want) {
 		t.Fatalf("args=%#v", got.args)
@@ -250,7 +243,7 @@ func TestSpawnSSHSessionCredentialSurvives(t *testing.T) {
 		if name != "dropme" {
 			t.Errorf("lookup name")
 		}
-		return &user.User{Uid: "1000", Gid: "1000", Username: name}, nil
+		return &user.User{Uid: "1000", Gid: "1000", Username: name, HomeDir: "/nonexistent/home/" + name}, nil
 	}
 	userGroupIDs = func(*user.User) ([]string, error) {
 		return []string{"1000"}, nil
@@ -265,12 +258,9 @@ func TestSpawnSSHSessionCredentialSurvives(t *testing.T) {
 	}
 	SetSSHMonitorServer(func(net.Conn, string) {})
 	if err := SpawnSSHSession(SSHSessionSpec{
-		SessionID:   id,
-		User:        "dropme",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
-		PTY:         pty,
+		SessionID: id,
+		User:      "dropme",
+		PTY:       pty,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -306,12 +296,9 @@ func TestSpawnSSHSessionLookupFailure(t *testing.T) {
 	var hooked atomic.Int32
 	SetSSHMonitorServer(func(net.Conn, string) { hooked.Add(1) })
 	err := SpawnSSHSession(SSHSessionSpec{
-		SessionID:   id,
-		User:        "dropme",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
-		PTY:         pty,
+		SessionID: id,
+		User:      "dropme",
+		PTY:       pty,
 	})
 	assertSpawnErr(t, err, "adssh: session user: not found")
 	if strings.Contains(err.Error(), "dropme") {
@@ -342,19 +329,13 @@ func TestSpawnSSHSessionFailClosed(t *testing.T) {
 
 	SetSSHMonitorServer(func(net.Conn, string) { hooked.Add(1) })
 	err = SpawnSSHSession(SSHSessionSpec{
-		SessionID:   "-sekret",
-		User:        "bob",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
+		SessionID: "-sekret",
+		User:      "bob",
 	})
 	assertSpawnErr(t, err, "adssh: ssh session: invalid value")
 	err = SpawnSSHSession(SSHSessionSpec{
-		SessionID:   "ok",
-		User:        "sekret\x00",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
+		SessionID: "ok",
+		User:      "sekret\x00",
 	})
 	assertSpawnErr(t, err, "adssh: ssh session: invalid value")
 	if hooked.Load() != 0 || started.Load() != 0 {
@@ -365,12 +346,9 @@ func TestSpawnSSHSessionFailClosed(t *testing.T) {
 	id := "spawn-nil-hook"
 	markSpawnSession(t, id, "bob", true)
 	err = SpawnSSHSession(SSHSessionSpec{
-		SessionID:   id,
-		User:        "bob",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
-		PTY:         openSpawnPTY(t),
+		SessionID: id,
+		User:      "bob",
+		PTY:       openSpawnPTY(t),
 	})
 	assertSpawnErr(t, err, "adssh: ssh session: monitor is not configured")
 	if started.Load() != 0 {
@@ -379,33 +357,24 @@ func TestSpawnSSHSessionFailClosed(t *testing.T) {
 
 	SetSSHMonitorServer(func(net.Conn, string) { hooked.Add(1) })
 	err = SpawnSSHSession(SSHSessionSpec{
-		SessionID:   "spawn-missing",
-		User:        "bob",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
-		PTY:         openSpawnPTY(t),
+		SessionID: "spawn-missing",
+		User:      "bob",
+		PTY:       openSpawnPTY(t),
 	})
 	assertSpawnErr(t, err, "adssh: ssh session: refusing unmarked session")
 
 	markSpawnSession(t, "spawn-unmarked", "bob", false)
 	err = SpawnSSHSession(SSHSessionSpec{
-		SessionID:   "spawn-unmarked",
-		User:        "bob",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
-		PTY:         openSpawnPTY(t),
+		SessionID: "spawn-unmarked",
+		User:      "bob",
+		PTY:       openSpawnPTY(t),
 	})
 	assertSpawnErr(t, err, "adssh: ssh session: refusing unmarked session")
 
 	markSpawnSession(t, "spawn-nil-pty", "bob", true)
 	err = SpawnSSHSession(SSHSessionSpec{
-		SessionID:   "spawn-nil-pty",
-		User:        "bob",
-		HistoryFile: "/hist",
-		ProfilePath: "/profile",
-		RCPath:      "/rc",
+		SessionID: "spawn-nil-pty",
+		User:      "bob",
 	})
 	assertSpawnErr(t, err, "adssh: ssh session: pty is not a file")
 	if hooked.Load() != 0 || started.Load() != 0 {

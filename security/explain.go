@@ -29,7 +29,7 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 	if len(args) == 0 || args[0] == "" {
 		return CommandExplanation{}, fmt.Errorf("why: command is required")
 	}
-	pctx := BuildPolicyContext(args[0], args[1:], sessionID)
+	pctx := e.buildPolicyContext(args[0], args[1:], sessionID)
 	explanation := CommandExplanation{
 		Outcome:   "allowed",
 		User:      pctx.User,
@@ -43,6 +43,9 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 		explanation.Outcome = "denied"
 	}
 
+	if pctx.IdentityUnknown {
+		deny("identity", "session identity unknown")
+	}
 	allowed, reason, role, err := e.evaluatePolicy(pctx)
 	if role != "" {
 		explanation.RequiredRole = role

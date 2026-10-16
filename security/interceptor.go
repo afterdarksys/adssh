@@ -34,6 +34,21 @@ type SessionState struct {
 	// Dirs is this session's own directory stack for pushd/popd/dirs. When nil
 	// the interceptor falls back to the process-global sys.DirStack().
 	Dirs *sys.DirStackState
+	// SessionID is the session's fixed ID. When set, the gates use it instead
+	// of Globals["SESSION_ID"], so a later write to that global cannot move the
+	// session to another principal. Empty keeps the legacy globals lookup.
+	SessionID string
+}
+
+// gateSessionID returns the ID the gates authorize this session under.
+func (s *SessionState) gateSessionID() string {
+	if s == nil {
+		return ""
+	}
+	if s.SessionID != "" {
+		return s.SessionID
+	}
+	return sessionIDFromGlobals(s.Globals)
 }
 
 // BashInterceptor returns the shell exec middleware for the process-global
@@ -48,9 +63,9 @@ func BashInterceptor(restricted bool, globals starlark.StringDict) func(next int
 
 // BashInterceptorSession returns the shell exec middleware for the process-global
 // default engine bound to a specific session's state (restricted flag, globals,
-// and directory stack).
+// directory stack, and session id).
 func BashInterceptorSession(sess *SessionState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	return defaultEngine.execHandler(sess.Restricted, sess.Globals, sess.Dirs)
+	return defaultEngine.execHandlerSession(sess)
 }
 
 // BashInterceptor returns the shell exec middleware for this engine, using the
@@ -67,7 +82,7 @@ func (e *Engine) BashInterceptor(globals starlark.StringDict) func(next interp.E
 // while restricted, globals and the directory stack come from sess so that many
 // sessions can share one engine without sharing per-session state.
 func (e *Engine) BashInterceptorSession(sess *SessionState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	return e.execHandler(sess.Restricted, sess.Globals, sess.Dirs)
+	return e.execHandlerSession(sess)
 }
 
 // CallInterceptor returns the shell CALL handler for the process-global default
@@ -81,26 +96,26 @@ func (e *Engine) BashInterceptorSession(sess *SessionState) func(next interp.Exe
 // hole where builtins bypassed policy/CM/four-eyes/audit entirely. See
 // (*Engine).callHandler for the exact coverage and the documented residual gaps.
 func CallInterceptor(restricted bool, globals starlark.StringDict) interp.CallHandlerFunc {
-	return defaultEngine.callHandler(restricted, globals)
+	return defaultEngine.callHandler(&SessionState{Restricted: restricted, Globals: globals})
 }
 
 // CallInterceptorSession returns the shell CALL handler (authorization gate) for
 // the process-global default engine bound to a specific session's state.
 func CallInterceptorSession(sess *SessionState) interp.CallHandlerFunc {
-	return defaultEngine.callHandler(sess.Restricted, sess.Globals)
+	return defaultEngine.callHandler(sess)
 }
 
 // CallInterceptor returns the shell CALL handler (authorization gate) for this
 // engine, using the engine's own restricted flag.
 func (e *Engine) CallInterceptor(globals starlark.StringDict) interp.CallHandlerFunc {
-	return e.callHandler(e.restricted, globals)
+	return e.callHandler(&SessionState{Restricted: e.restricted, Globals: globals})
 }
 
 // CallInterceptorSession returns the shell CALL handler (authorization gate) for
 // this engine bound to a specific session's state. All gates run against engine
 // e; restricted and globals come from sess so many sessions can share one engine.
 func (e *Engine) CallInterceptorSession(sess *SessionState) interp.CallHandlerFunc {
-	return e.callHandler(sess.Restricted, sess.Globals)
+	return e.callHandler(sess)
 }
 
 // gateCommand is the shared AUTHORIZATION GATE for a single resolved command
@@ -123,7 +138,17 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 	}
 	// The SSH session process installs this. The listener leaves it nil.
 	if fn := currentRemoteGate(); fn != nil {
+		if err := refuseInRemoteGateProcess(restricted, args, sessionID); err != nil {
+			return err
+		}
 		return fn(restricted, args, sessionID)
+	}
+	// A marked SSH session process with no gate fails closed.
+	if RemoteGateProcess() {
+		if err := refuseInRemoteGateProcess(restricted, args, sessionID); err != nil {
+			return err
+		}
+		return fmt.Errorf("adssh: ssh session: monitor gate is not installed")
 	}
 
 	cmd := strings.Join(args, " ")
@@ -153,7 +178,15 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 	}
 
 	// 0. Rego policy evaluation (primary authorization) — fail closed.
-	pctx := BuildPolicyContext(args[0], args[1:], sessionID)
+	// A named session with no bound or registered principal is denied here.
+	// It never falls back to the process identity.
+	pctx := e.buildPolicyContext(args[0], args[1:], sessionID)
+	if pctx.IdentityUnknown {
+		const reason = "adssh: session identity unknown"
+		e.rememberDeniedCommand(sessionID, args)
+		auditErr := e.LogPolicyDecision("", cmd, false, reason)
+		return joinDeny("adssh: access denied: session identity unknown", auditErr)
+	}
 	pctx.Lease = extra.Lease
 	// The session cloud-agent claim wins. extra.Agent fills in only when the
 	// session did not already bind one, so a caller cannot overwrite it.
@@ -281,12 +314,12 @@ func (e *Engine) AuthorizeCommandWithExtra(args []string, sessionID string, extr
 // (`eval` re-parses through Runner.call, so eval'd commands ARE gated
 // individually.) This is a naming-granularity limitation, not a bypass: the
 // wrapper itself is still policy-gated and audited on every invocation.
-func (e *Engine) callHandler(restricted bool, globals starlark.StringDict) interp.CallHandlerFunc {
+func (e *Engine) callHandler(sess *SessionState) interp.CallHandlerFunc {
 	return func(ctx context.Context, args []string) ([]string, error) {
 		if len(args) == 0 {
 			return args, nil
 		}
-		if err := e.gateCommand(restricted, args, sessionIDFromGlobals(globals)); err != nil {
+		if err := e.gateCommand(sess.Restricted, args, sess.gateSessionID()); err != nil {
 			return nil, err
 		}
 		return args, nil
@@ -313,7 +346,7 @@ func GateProgram(restricted bool, node syntax.Node) error {
 // GateProgramSession runs the DeclClause-keyword authorization pre-scan for the
 // process-global default engine bound to a specific session's state.
 func GateProgramSession(sess *SessionState, node syntax.Node) error {
-	return defaultEngine.gateProgram(sess.Restricted, node, sessionIDFromGlobals(sess.Globals))
+	return defaultEngine.gateProgram(sess.Restricted, node, sess.gateSessionID())
 }
 
 // GateProgram runs the DeclClause-keyword authorization pre-scan against this
@@ -328,7 +361,7 @@ func (e *Engine) GateProgramSession(sess *SessionState, node syntax.Node) error 
 	if sess == nil {
 		return e.GateProgram(e.restricted, node)
 	}
-	return e.gateProgram(sess.Restricted, node, sessionIDFromGlobals(sess.Globals))
+	return e.gateProgram(sess.Restricted, node, sess.gateSessionID())
 }
 
 func (e *Engine) gateProgram(restricted bool, node syntax.Node, sessionID string) error {
@@ -361,8 +394,7 @@ func (e *Engine) gateProgram(restricted bool, node syntax.Node, sessionID string
 // environment. An unregistered SESSION_ID fails closed and does not call
 // os.Setenv. The Starlark global is written only after this returns nil.
 // The error does not include the value.
-func assignProcessOrSessionEnv(globals starlark.StringDict, key, value string) error {
-	id := sessionIDFromGlobals(globals)
+func assignProcessOrSessionEnv(id, key, value string) error {
 	if id == "" {
 		return os.Setenv(key, value)
 	}
@@ -376,7 +408,12 @@ func assignProcessOrSessionEnv(globals starlark.StringDict, key, value string) e
 // applySetAssignment handles `set VAR=VALUE` and `set VAR VALUE`. Flag forms
 // (`set -x`, `set +e`) return handled=false so the shopts switch still runs.
 // A usage error or an env write error returns handled=true.
-func applySetAssignment(globals starlark.StringDict, args []string) (bool, error) {
+//
+// Threats: `set SESSION_ID=...` would point the legacy globals lookup at
+// another session's principal. Reserved names (SESSION_ID, __*,
+// ADSSH_SESSION*) are refused. Sessions that set SessionState.SessionID are
+// gated under that ID even if the global is changed some other way.
+func applySetAssignment(globals starlark.StringDict, sessionID string, args []string) (bool, error) {
 	if len(args) < 2 || args[0] != "set" {
 		return false, nil
 	}
@@ -391,13 +428,28 @@ func applySetAssignment(globals starlark.StringDict, args []string) (bool, error
 	} else {
 		return true, fmt.Errorf("set: usage: set VARNAME VALUE or set VARNAME=VALUE")
 	}
-	if err := assignProcessOrSessionEnv(globals, name, value); err != nil {
+	if reservedSessionName(name) {
+		return true, fmt.Errorf("set: %s is reserved and cannot be assigned", name)
+	}
+	if err := assignProcessOrSessionEnv(sessionID, name, value); err != nil {
 		return true, err
 	}
 	if globals != nil {
 		globals[name] = starlark.String(value)
 	}
 	return true, nil
+}
+
+// ReservedSessionGlobal reports whether name is the session id or an internal
+// session global that a Starlark binding or `set` must not overwrite.
+func ReservedSessionGlobal(name string) bool {
+	return reservedSessionName(name)
+}
+
+// reservedSessionName reports whether a `set` assignment would overwrite the
+// session ID or an internal session global.
+func reservedSessionName(name string) bool {
+	return name == "SESSION_ID" || strings.HasPrefix(name, "__") || strings.HasPrefix(name, "ADSSH_SESSION")
 }
 
 func sessionIDFromGlobals(globals starlark.StringDict) string {
@@ -449,7 +501,18 @@ func declArgs(decl *syntax.DeclClause) []string {
 // global stack while the session form passes per-session state. When dirs is nil
 // the process-global directory stack is used.
 func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs *sys.DirStackState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	ds := dirs
+	return e.execHandlerSession(&SessionState{Restricted: restricted, Globals: globals, Dirs: dirs})
+}
+
+// execHandlerSession is execHandler for one session. Virtual binaries and env
+// writes run under sess.gateSessionID(), the id the gate authorized, so a
+// write to the SESSION_ID global cannot re-point them.
+func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	if sess == nil {
+		sess = &SessionState{}
+	}
+	restricted, globals := sess.Restricted, sess.Globals
+	ds := sess.Dirs
 	if ds == nil {
 		ds = sys.DirStack()
 	}
@@ -461,7 +524,7 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 			// Assignment form of set returns before HandlerCtx. A direct call
 			// has no interpreter context, and a session assignment must not
 			// reach os.Setenv.
-			if handled, err := applySetAssignment(globals, args); handled {
+			if handled, err := applySetAssignment(globals, sess.gateSessionID(), args); handled {
 				return err
 			}
 
@@ -576,7 +639,7 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 				// set VARNAME VALUE  or  set VARNAME=VALUE. The early return
 				// above already handles this; keep the same writer here so
 				// this branch cannot fall back to os.Setenv.
-				if handled, err := applySetAssignment(globals, args); handled {
+				if handled, err := applySetAssignment(globals, sess.gateSessionID(), args); handled {
 					return err
 				}
 				return nil
@@ -707,7 +770,10 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 					return fmt.Errorf("read: %w", err)
 				}
 				value := strings.TrimRight(line, "\n")
-				if err := assignProcessOrSessionEnv(globals, varName, value); err != nil {
+				if reservedSessionName(varName) {
+					return fmt.Errorf("read: %s is reserved and cannot be assigned", varName)
+				}
+				if err := assignProcessOrSessionEnv(sess.gateSessionID(), varName, value); err != nil {
 					return err
 				}
 				if globals != nil {
@@ -767,15 +833,11 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 
 			// 2. Virtual binary registry — thread sessionID through context for binaries that need it
 			if vb, ok := e.Lookup(args[0]); ok {
-				sessionID := ""
-				if globals != nil {
-					if val, ok := globals["SESSION_ID"]; ok {
-						if strVal, ok := val.(starlark.String); ok {
-							sessionID = string(strVal)
-						}
-					}
+				// `command NAME` reaches here without the gate seeing NAME.
+				if err := refuseInRemoteGateProcess(restricted, args, sess.gateSessionID()); err != nil {
+					return err
 				}
-				return e.DispatchVBin(WithVBinSession(WithSessionID(ctx, sessionID), restricted, globals), vb, args)
+				return e.DispatchVBin(WithVBinSession(WithSessionID(ctx, sess.gateSessionID()), restricted, globals), vb, args)
 			}
 
 			// 3. Restricted mode checks before falling through to the real shell

@@ -27,15 +27,46 @@ gateway list
 gateway stop <id>`
 }
 
+// Threats: `gateway start` resolves the target name once, before the policy
+// decision, and every proxied connection dials that address. A DNS answer
+// that changes after the check (rebinding) is not used, and policy can
+// constrain input.gateway.target_ip as well as target_host. An unresolvable
+// name fails closed. Not covered: a name whose address legitimately moves
+// while the gateway is running keeps the old address until restarted.
 type gatewaySession struct {
-	ID       string
-	Name     string
-	Listen   string
-	Target   string
+	ID     string
+	Name   string
+	Listen string
+	Target string
+	// dialAddr is the resolved address the policy decision saw. The proxy
+	// dials it, never the name, so DNS cannot change the target after the
+	// check.
+	dialAddr string
 	User     string
 	Started  time.Time
 	listener net.Listener
 	cancel   context.CancelFunc
+}
+
+// gatewayResolveTimeout bounds the one lookup of a gateway target name.
+const gatewayResolveTimeout = 10 * time.Second
+
+var gatewayLookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
+}
+
+// resolveGatewayIP returns host as an address, resolving a name once.
+func resolveGatewayIP(host string) (net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gatewayResolveTimeout)
+	defer cancel()
+	ips, err := gatewayLookupIP(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("gateway: target does not resolve")
+	}
+	return ips[0], nil
 }
 
 var (
@@ -106,6 +137,12 @@ func gatewayStart(ctx context.Context, hc interp.HandlerContext, args []string) 
 	if err != nil {
 		return err
 	}
+	// Resolve once; the decision sees the name and the address, and the
+	// proxy dials only that address.
+	targetIP, err := resolveGatewayIP(targetHost)
+	if err != nil {
+		return err
+	}
 	engine := engineFromContext(ctx)
 	if err := engine.AuthorizeGateway(GatewayPolicyRequest{
 		SessionID:  SessionIDFromContext(ctx),
@@ -113,6 +150,7 @@ func gatewayStart(ctx context.Context, hc interp.HandlerContext, args []string) 
 		Listen:     listenAddr,
 		Name:       name,
 		TargetHost: targetHost,
+		TargetIP:   targetIP.String(),
 		TargetPort: targetPort,
 	}); err != nil {
 		return err
@@ -128,7 +166,8 @@ func gatewayStart(ctx context.Context, hc interp.HandlerContext, args []string) 
 		Name:     name,
 		Listen:   listener.Addr().String(),
 		Target:   target,
-		User:     BuildPolicyContext("gateway", []string{"connect", target}, SessionIDFromContext(ctx)).User,
+		dialAddr: net.JoinHostPort(targetIP.String(), strconv.FormatUint(uint64(targetPort), 10)),
+		User:     engine.buildPolicyContext("gateway", []string{"connect", target}, SessionIDFromContext(ctx)).User,
 		Started:  time.Now().UTC(),
 		listener: listener,
 		cancel:   cancel,
@@ -208,7 +247,7 @@ func proxyGatewayConnection(ctx context.Context, client net.Conn, session *gatew
 	defer client.Close()
 	record := newGatewayConnectionRecord(session)
 	openedAt := time.Now().UTC()
-	targetConn, err := net.DialTimeout("tcp", session.Target, 10*time.Second)
+	targetConn, err := net.DialTimeout("tcp", session.dialAddr, 10*time.Second)
 	if err != nil {
 		record.ClosedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		record.DurationMS = time.Since(openedAt).Milliseconds()

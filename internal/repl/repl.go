@@ -6,7 +6,6 @@ import (
 	"io"
 	"math/rand"
 	"os"
-	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
@@ -24,6 +23,7 @@ import (
 
 	"github.com/chzyer/readline"
 	"go.starlark.net/starlark"
+	starsyntax "go.starlark.net/syntax"
 	"golang.org/x/term"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
@@ -157,54 +157,67 @@ func needsContinuation(buf string) bool {
 	return false
 }
 
-// evalStarlark executes src in the REPL context.
-// It tries expression evaluation first (so results are printed), then falls
-// back to statement execution (def, for, if, assignments, etc.) and merges
-// any new bindings back into globals.
+// EvalStarlarkOnce runs src exactly once. The expression/statement choice is
+// made by parsing, never by retrying: once evaluation has started, side effects
+// (cloud calls, notifications, commands) may already have happened, so a
+// runtime error must not run src a second time. A single expression is
+// evaluated (isExpr true, val set); anything else is executed as a file
+// (newBindings set). The caller prints val or merges newBindings.
+func EvalStarlarkOnce(thread *starlark.Thread, name, src string, globals starlark.StringDict) (val starlark.Value, isExpr bool, newBindings starlark.StringDict, err error) {
+	if _, perr := starsyntax.LegacyFileOptions().ParseExpr(name, src, 0); perr == nil {
+		val, err = starlark.Eval(thread, name, src, globals)
+		return val, true, nil, err
+	}
+	newBindings, err = starlark.ExecFile(thread, name, src, globals)
+	return nil, false, newBindings, err
+}
+
+// evalStarlark executes src in the REPL context: expressions print a non-None
+// result, statements merge new bindings back into globals.
 func evalStarlark(thread *starlark.Thread, src string, globals starlark.StringDict, errOut io.Writer) int {
-	// Try as expression — prints the result value
-	val, err := starlark.Eval(thread, "<stdin>", src, globals)
-	if err == nil {
+	val, isExpr, newBindings, err := EvalStarlarkOnce(thread, "<stdin>", src, globals)
+	if err != nil {
+		fmt.Fprintf(errOut, "Starlark error: %v\n", err)
+		return 1
+	}
+	if isExpr {
 		if val != nil && val != starlark.None {
 			fmt.Println(val.String())
 		}
 		return 0
 	}
-
-	// Fall back to statement execution (def, for, if, assignments, load, etc.)
-	newBindings, err2 := starlark.ExecFile(thread, "<stdin>", src, globals)
-	if err2 != nil {
-		fmt.Fprintf(errOut, "Starlark error: %v\n", err2)
-		return 1
-	}
 	// Merge new definitions (functions, variables) back into the live globals
-	for k, v := range newBindings {
-		globals[k] = v
-	}
+	MergeStarlarkBindings(globals, newBindings, errOut)
 	return 0
 }
 
-// isBackgroundLine intentionally leaves '&' syntax in the shell program.
-// mvdan's runner handles background execution while preserving the configured
-// call/exec interceptors, policy gate, restricted checks, and audit trail. The
-// old direct /bin/sh launcher bypassed all of those controls.
-func isBackgroundLine(line string) (string, bool) {
-	return "", false
+// MergeStarlarkBindings copies Starlark bindings into globals. SESSION_ID,
+// names starting with __, and ADSSH_SESSION* are skipped so a statement
+// cannot re-point the session the gates and vbins use. One warning line
+// names the skipped bindings.
+func MergeStarlarkBindings(globals, newBindings starlark.StringDict, errOut io.Writer) {
+	var skipped []string
+	for k, v := range newBindings {
+		if security.ReservedSessionGlobal(k) {
+			skipped = append(skipped, k)
+			continue
+		}
+		globals[k] = v
+	}
+	if len(skipped) > 0 && errOut != nil {
+		sort.Strings(skipped)
+		fmt.Fprintf(errOut, "adssh: not assigned (reserved): %s\n", strings.Join(skipped, ", "))
+	}
 }
 
-// runBackground launches line as a background job and prints [N] PID XXXX.
-func runBackground(line string, out io.Writer) {
-	// Build a shell command via /bin/sh so that pipes and redirects work.
-	cmd := exec.Command("/bin/sh", "-c", line)
-	cmd.Stdout = out
-	cmd.Stderr = out
-
-	id, err := sys.NewJob(cmd)
-	if err != nil {
-		fmt.Fprintf(out, "bg: failed to start: %v\n", err)
-		return
+// newSessionState fixes the session id at construction, so a later write to
+// the SESSION_ID global does not move the gate or vbins.
+func newSessionState(globals starlark.StringDict, restricted bool, dirs *sys.DirStackState) *security.SessionState {
+	id := ""
+	if v, ok := globals["SESSION_ID"].(starlark.String); ok {
+		id = string(v)
 	}
-	fmt.Fprintf(out, "[%d] %d\n", id, cmd.Process.Pid)
+	return &security.SessionState{Restricted: restricted, Globals: globals, Dirs: dirs, SessionID: id}
 }
 
 // jobControlHandler returns an ExecHandler that intercepts jobs/fg/bg/wait.
@@ -460,10 +473,13 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// 4b. Shell history slice
 	shellHistory := make([]string, 0, 256)
 
-	// Bracketed paste is filtered before the line editor. The runner keeps the
-	// original reader so a foreground command still reads the real stdin.
+	// Bracketed paste is filtered before the line editor, and only when this
+	// session's output is a real tty that gets bracketed-paste mode. A pipe or
+	// an SSH channel has no way to mark a paste. The runner keeps the original
+	// reader so a foreground command still reads the real stdin.
 	heldPaste := &pasteState{}
-	editorIn := newPasteReader(in, heldPaste)
+	pasteTTY := bracketPasteTTY(out)
+	editorIn := editorInput(in, pasteTTY != nil, heldPaste)
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:            "adssh> ",
@@ -543,7 +559,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	})
 
 	envBridge := hybridEnv{globals: globals}
-	sessState := &security.SessionState{Restricted: restricted, Globals: globals, Dirs: dirs}
+	sessState := newSessionState(globals, restricted, dirs)
 
 	// Detect the interactive local session's controlling terminal so foreground
 	// external commands can run on a real PTY (so vim/top/htop/less work). This
@@ -570,10 +586,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		interp.ExecHandlers(
 			jobControlHandler(out),
 			security.BashInterceptorSession(sessState),
-			ptyExecHandler(ptyTTY, in, out),
+			ptyExecHandler(ptyTTY, in, out, errOut),
 			security.SessionExecHandler,
 		),
-		interp.OpenHandler(security.VirtualOpenHandler()),
+		interp.OpenHandler(security.OpenInterceptorSession(sessState)),
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating runner: %v\n", err)
@@ -584,11 +600,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// (interp.New always resolves runner.Dir to the process cwd when unset).
 	dirs.Init(runner.Dir)
 
-	// Ask the terminal to bracket pastes. A pipe has no way to mark a paste,
-	// so the filter stays idle unless this session's output is a real tty.
-	if tty := bracketPasteTTY(out); tty != nil {
-		_, _ = io.WriteString(tty, "\x1b[?2004h")
-		defer func() { _, _ = io.WriteString(tty, "\x1b[?2004l") }()
+	// Ask the terminal to bracket pastes. The filter above is installed only
+	// in this case.
+	if pasteTTY != nil {
+		_, _ = io.WriteString(pasteTTY, "\x1b[?2004h")
+		defer func() { _, _ = io.WriteString(pasteTTY, "\x1b[?2004l") }()
 	}
 
 	// 4c. REPL start time for $SECONDS
@@ -598,7 +614,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	trapExit := ""
 
 	// Git branch in \g is off unless ADSSH_GIT_PROMPT or `set gitprompt on`.
-	gitPrompt := gitPromptFromEnv(os.Getenv("ADSSH_GIT_PROMPT"))
+	// Restricted mode and an SSH session child (it runs behind the listener's
+	// monitor gate) never show it.
+	gitAllowed := gitPromptPermitted(restricted, security.RemoteGateEnabled())
+	gitPrompt := gitPromptInitial(os.Getenv("ADSSH_GIT_PROMPT"), gitAllowed)
 
 	for {
 		// 4c. Update $SECONDS and $RANDOM each iteration.
@@ -711,9 +730,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				if err != nil {
 					fmt.Fprintf(errOut, "source: %v\n", err)
 				} else {
-					for k, v := range newBindings {
-						globals[k] = v
-					}
+					MergeStarlarkBindings(globals, newBindings, errOut)
 				}
 			} else {
 				pf, err := syntax.NewParser().Parse(strings.NewReader(src), path)
@@ -736,17 +753,8 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		}
 
 		// set gitprompt is the prompt switch. It is not the shell set builtin.
-		if next, ok, gerr := applyGitPrompt(line, gitPrompt); ok {
-			if gerr != nil {
-				fmt.Fprintf(errOut, "%v\n", gerr)
-			} else {
-				gitPrompt = next
-				state := "off"
-				if gitPrompt {
-					state = "on"
-				}
-				fmt.Fprintf(out, "gitprompt %s\n", state)
-			}
+		if next, ok := handleGitPromptLine(line, gitPrompt, gitAllowed, out, errOut); ok {
+			gitPrompt = next
 			continue
 		}
 
@@ -832,17 +840,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			callHook(globals, "__preexec__", starlark.Tuple{starlark.String(line)})
 
 			// Collect continuation lines for multi-line constructs
-			for needsContinuation(buf) {
-				rl.SetPrompt("...   ")
-				next, nextErr := rl.Readline()
-				if nextErr != nil {
-					break
-				}
-				if strings.TrimSpace(next) == "" {
-					break
-				}
-				buf += "\n" + next
-			}
+			buf = readStarlarkBlock(rl, buf, out)
 			rl.SetPrompt(prompt)
 
 			exitCode := evalStarlark(thread, buf, globals, errOut)
@@ -856,12 +854,6 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				line = strings.TrimSpace(line[1:])
 			} else if strings.HasPrefix(line, "$ ") {
 				line = strings.TrimSpace(line[2:])
-			}
-
-			// Background execution: command ending with '&'
-			if bgCmd, isBg := isBackgroundLine(line); isBg {
-				runBackground(bgCmd, out)
-				continue
 			}
 
 			// 4k. cd interception (cd -, OLDPWD, dirstack)

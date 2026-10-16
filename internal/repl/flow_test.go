@@ -233,3 +233,85 @@ func TestAccumulateScriptChunks(t *testing.T) {
 		t.Fatalf("partial executed: %q", got)
 	}
 }
+
+func TestRunFlowExitIsNotCaught(t *testing.T) {
+	ex, out, _ := newFlowExec(t, false)
+	err := RunFlow("try { exit 3 } catch { echo CAUGHT }", ex)
+	if status, ok := err.(interp.ExitStatus); !ok || status != 3 {
+		t.Fatalf("err %v", err)
+	}
+	if strings.Contains(out.String(), "CAUGHT") {
+		t.Fatalf("exit was caught: %q", out.String())
+	}
+
+	ex, out, _ = newFlowExec(t, false)
+	err = RunFlow("try { exit 0; echo after } catch { echo CAUGHT }", ex)
+	if err != nil {
+		t.Fatalf("err %v", err)
+	}
+	if out.String() != "" {
+		t.Fatalf("ran past exit: %q", out.String())
+	}
+
+	ex, out, _ = newFlowExec(t, false)
+	err = RunFlow("if exit 4 { echo THEN } else { echo ELSE }", ex)
+	if status, ok := err.(interp.ExitStatus); !ok || status != 4 {
+		t.Fatalf("err %v", err)
+	}
+	if out.String() != "" {
+		t.Fatalf("branch ran after exit: %q", out.String())
+	}
+}
+
+func TestRunFlowIfUsesLastConditionStatus(t *testing.T) {
+	ex, out, _ := newFlowExec(t, false)
+	if err := RunFlow("if false; true { echo THEN } else { echo ELSE }", ex); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "THEN\n" {
+		t.Fatalf("stdout %q", out.String())
+	}
+
+	ex, out, _ = newFlowExec(t, false)
+	if err := RunFlow("if true; false { echo THEN } else { echo ELSE }", ex); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "ELSE\n" {
+		t.Fatalf("stdout %q", out.String())
+	}
+}
+
+func TestRunFlowIfConditionDenialDoesNotEnterElse(t *testing.T) {
+	ex, out, _ := newFlowExec(t, true)
+	err := RunFlow("if /bin/echo x; true { echo THEN } else { echo ELSE }", ex)
+	if err == nil {
+		t.Fatal("expected a denial")
+	}
+	if _, ok := err.(interp.ExitStatus); ok {
+		t.Fatalf("denial became exit status: %v", err)
+	}
+	if strings.Contains(out.String(), "THEN") || strings.Contains(out.String(), "ELSE") {
+		t.Fatalf("stdout %q", out.String())
+	}
+}
+
+func TestAccumulateScriptKeepsStarlarkBlock(t *testing.T) {
+	var got []string
+	src := "def f():\n    x = 1\n\n    return x\nprint(f())\necho shell\n"
+	err := AccumulateScript(src, func(chunk string, line int, ignore bool) error {
+		got = append(got, chunk)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"def f():\n    x = 1\n\n    return x", "print(f())", "echo shell"}
+	if len(got) != len(want) {
+		t.Fatalf("chunks %q", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("chunk %d %q want %q", i, got[i], want[i])
+		}
+	}
+}

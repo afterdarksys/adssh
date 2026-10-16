@@ -17,10 +17,10 @@ import (
 // Threats: brace if/else and try/catch are an execution path. Each body is
 // parsed and passed through the caller-supplied Gate before any statement
 // runs. A syntax error, an empty body, or a gate error runs nothing. Only a
-// direct non-zero interp.ExitStatus is catchable. A policy denial, a
-// restricted-mode rejection, or any other runner error is returned and does
-// not enter catch or else. Incomplete, oversized, or still-open input is not
-// executed.
+// direct non-zero interp.ExitStatus is catchable. exit is not: it ends the
+// block with its status. A policy denial, a restricted-mode rejection, or any
+// other runner error is returned and does not enter catch or else.
+// Incomplete, oversized, or still-open input is not executed.
 
 // FlowExec runs one brace if/else or try/catch chunk.
 // Gate is the session program gate. Runner is the session shell runner.
@@ -57,8 +57,8 @@ func RunFlow(src string, ex FlowExec) error {
 			return err
 		}
 		err = runStmts(ex.Ctx, ex.Runner, tryFile)
-		if err == nil {
-			return nil
+		if err == nil || ex.Runner.Exited() {
+			return err
 		}
 		if _, ok := err.(interp.ExitStatus); !ok {
 			return err
@@ -80,7 +80,10 @@ func RunFlow(src string, ex FlowExec) error {
 				return err
 			}
 		}
-		err = runStmts(ex.Ctx, ex.Runner, condFile)
+		err = runCondition(ex.Ctx, ex.Runner, condFile)
+		if ex.Runner.Exited() {
+			return err
+		}
 		if err != nil {
 			if _, ok := err.(interp.ExitStatus); !ok {
 				return err
@@ -139,15 +142,19 @@ func emptyBody(name string) error {
 	}
 }
 
-// runStmts runs each statement on its own and stops on a non-zero exit status.
-// Any other runner error is returned unchanged. A whole-file run would keep
-// going after false when set -e is off, and would hide a denial inside ExitStatus.
+// runStmts runs each statement on its own and stops on a non-zero exit status
+// or on exit. Any other runner error is returned unchanged. A whole-file run
+// would keep going after false when set -e is off, and would hide a denial
+// inside ExitStatus.
 func runStmts(ctx context.Context, runner *interp.Runner, f *syntax.File) error {
 	for _, stmt := range f.Stmts {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		err := runner.Run(ctx, stmt)
+		if runner.Exited() {
+			return err
+		}
 		if err == nil {
 			continue
 		}
@@ -162,20 +169,69 @@ func runStmts(ctx context.Context, runner *interp.Runner, f *syntax.File) error 
 	return nil
 }
 
+// runCondition runs every condition statement. The last status decides, as in
+// POSIX. A runner error that is not an exit status, or exit, stops the
+// condition and is returned.
+func runCondition(ctx context.Context, runner *interp.Runner, f *syntax.File) error {
+	var last error
+	for _, stmt := range f.Stmts {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := runner.Run(ctx, stmt)
+		if runner.Exited() {
+			return err
+		}
+		if err != nil {
+			if _, ok := err.(interp.ExitStatus); !ok {
+				return err
+			}
+		}
+		last = err
+	}
+	return last
+}
+
 // AccumulateScript splits a .adssh script into shell, Starlark, and flow chunks.
 // Blanks and comments are skipped only while no chunk is open. exit and quit end
 // the script only when no chunk is open. A leading "-" on the first line of a
-// chunk sets ignore. An incomplete chunk at EOF is returned and is not executed.
+// chunk sets ignore. A Starlark chunk keeps the lines after it while its
+// brackets are open or its last line ends in ':' or '\', and keeps blank and
+// indented lines, so a def or if block runs as one chunk. An incomplete chunk
+// at EOF is returned and is not executed.
 func AccumulateScript(src string, exec func(chunk string, line int, ignore bool) error) error {
 	sc := bufio.NewScanner(strings.NewReader(src))
 	sc.Buffer(make([]byte, 64*1024), parser.MaxChunkBytes+1)
 	var pending strings.Builder
 	var startLine int
 	ignore := false
+	starlarkOpen := false
 	lineNo := 0
+	flush := func() error {
+		chunk := strings.TrimRight(pending.String(), "\n")
+		pending.Reset()
+		starlarkOpen = false
+		chunkIgnore := ignore
+		ignore = false
+		return exec(chunk, startLine, chunkIgnore)
+	}
 	for sc.Scan() {
 		lineNo++
 		raw := sc.Text()
+		if starlarkOpen {
+			if needsContinuation(pending.String()) || strings.TrimSpace(raw) == "" ||
+				strings.HasPrefix(raw, " ") || strings.HasPrefix(raw, "\t") {
+				pending.WriteByte('\n')
+				pending.WriteString(raw)
+				if pending.Len() > parser.MaxChunkBytes {
+					return fmt.Errorf("line %d: %w", startLine, parser.ErrTooBig)
+				}
+				continue
+			}
+			if err := flush(); err != nil {
+				return err
+			}
+		}
 		if pending.Len() == 0 {
 			trimmed := strings.TrimSpace(raw)
 			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -195,15 +251,14 @@ func AccumulateScript(src string, exec func(chunk string, line int, ignore bool)
 			pending.WriteByte('\n')
 			pending.WriteString(raw)
 		}
-		switch parser.ClassifyChunk(pending.String()).Kind {
-		case parser.ChunkNeedMore:
+		chunk := parser.ClassifyChunk(pending.String())
+		switch {
+		case chunk.Kind == parser.ChunkNeedMore:
 			continue
+		case chunk.Kind == parser.ChunkReady && chunk.Mode == parser.ModeStarlark:
+			starlarkOpen = true
 		default:
-			chunk := pending.String()
-			pending.Reset()
-			chunkIgnore := ignore
-			ignore = false
-			if err := exec(chunk, startLine, chunkIgnore); err != nil {
+			if err := flush(); err != nil {
 				return err
 			}
 		}
@@ -213,6 +268,9 @@ func AccumulateScript(src string, exec func(chunk string, line int, ignore bool)
 			return fmt.Errorf("line %d: %w", lineNo+1, parser.ErrTooBig)
 		}
 		return err
+	}
+	if starlarkOpen {
+		return flush()
 	}
 	if pending.Len() > 0 {
 		err := parser.ClassifyChunk(pending.String()).Err
@@ -224,9 +282,30 @@ func AccumulateScript(src string, exec func(chunk string, line int, ignore bool)
 	return nil
 }
 
+// lineReader is the part of the line editor the continuation loops use.
+type lineReader interface {
+	Readline() (string, error)
+	SetPrompt(string)
+}
+
+// pasteTokenLine reports whether a continuation line carries a paste review
+// token. The token is not code: the paste stays held and the line is dropped.
+func pasteTokenLine(line string, out io.Writer) bool {
+	switch {
+	case strings.Contains(line, pasteHeldPrefix):
+		fmt.Fprintln(out, "paste held: not added to this block. Finish the block, then use safepaste show, run, or drop.")
+		return true
+	case strings.Contains(line, pasteRejectedLine):
+		fmt.Fprintln(out, "paste rejected: not added to this block.")
+		return true
+	}
+	return false
+}
+
 // readPending reads continuation lines until the chunk is ready or rejected.
 // Blank lines stay in the chunk. exit inside the chunk does not leave the shell.
-func readPending(rl *readline.Instance, line, prompt string, out io.Writer) (buf string, abort, eof bool, synErr error) {
+// A paste review token is not appended.
+func readPending(rl lineReader, line, prompt string, out io.Writer) (buf string, abort, eof bool, synErr error) {
 	defer rl.SetPrompt(prompt)
 	buf = line
 	for {
@@ -247,9 +326,33 @@ func readPending(rl *readline.Instance, line, prompt string, out io.Writer) (buf
 			if err != nil {
 				return "", true, false, nil
 			}
+			if pasteTokenLine(next, out) {
+				continue
+			}
 			buf += "\n" + next
 		default:
 			return buf, false, false, nil
 		}
 	}
+}
+
+// readStarlarkBlock collects continuation lines for a multi-line Starlark
+// construct. A blank line or a read error ends it. A paste review token is
+// not appended.
+func readStarlarkBlock(rl lineReader, buf string, out io.Writer) string {
+	for needsContinuation(buf) {
+		rl.SetPrompt("...   ")
+		next, err := rl.Readline()
+		if err != nil {
+			break
+		}
+		if pasteTokenLine(next, out) {
+			continue
+		}
+		if strings.TrimSpace(next) == "" {
+			break
+		}
+		buf += "\n" + next
+	}
+	return buf
 }

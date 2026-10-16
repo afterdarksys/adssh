@@ -39,3 +39,22 @@ func TestGuardSwitchStoredRaw(t *testing.T) {
 		t.Fatalf("state %s", cfg.GuardStatePath)
 	}
 }
+
+func TestSSHPermitRootDefaultsOff(t *testing.T) {
+	t.Setenv("ADSSH_SSH_PERMIT_ROOT", "")
+	if LoadFromEnv().SSHPermitRoot {
+		t.Fatal("unset ADSSH_SSH_PERMIT_ROOT permitted root")
+	}
+	for _, v := range []string{"on", "0", "false", "no", "root"} {
+		t.Setenv("ADSSH_SSH_PERMIT_ROOT", v)
+		if LoadFromEnv().SSHPermitRoot {
+			t.Fatalf("%q permitted root", v)
+		}
+	}
+	for _, v := range []string{"1", "true", "YES"} {
+		t.Setenv("ADSSH_SSH_PERMIT_ROOT", v)
+		if !LoadFromEnv().SSHPermitRoot {
+			t.Fatalf("%q did not permit root", v)
+		}
+	}
+}

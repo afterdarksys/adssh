@@ -1,25 +1,42 @@
 package repl
 
 import (
-	"bytes"
-	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
-	"time"
+	"syscall"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/afterdarksys/adssh/security"
 )
+
+// Threats: \g shows the branch of the repository the operator has cd'd into,
+// and that repository may be hostile. The segment never runs git or any other
+// program, so core.fsmonitor, filter drivers, and hooks in the repo's config
+// cannot execute. It reads .git/HEAD, or follows one `gitdir:` file once. A
+// relative gitdir may climb at most one directory, an absolute one must sit
+// under $HOME or the session cwd, and a second gitdir file is not followed.
+// Files are opened without following symlinks and without blocking, and must
+// be small regular files, so a FIFO or a device cannot hang the prompt. The
+// branch name is untrusted: C0, C1, DEL, and Unicode format characters
+// (bidi overrides, zero-width) are dropped and it is capped at 64 runes. The
+// work-tree dirty marker is gone: it needed git status, which runs repo
+// config. The toggle is refused in restricted mode and in an SSH session.
+// This does not stop a branch name that is merely misleading text.
 
 const (
-	gitPromptTimeout = 200 * time.Millisecond
-	gitPromptMaxOut  = 8 << 10
-	gitPromptMaxName = 64
+	gitPromptMaxName  = 64
+	gitPromptMaxFile  = 4096
+	gitPromptMaxDepth = 128
 )
 
-// gitPromptCache remembers one git status lookup for a single prompt draw.
-// PROMPT and RPROMPT share it so both escapes do not start a second git.
+// gitPromptCache remembers one HEAD lookup for a single prompt draw.
+// PROMPT and RPROMPT share it so both escapes do one lookup.
 type gitPromptCache struct {
 	enabled bool
 	cwd     string
@@ -53,6 +70,17 @@ func gitPromptFromEnv(v string) bool {
 	}
 }
 
+// gitPromptPermitted reports whether this session may show the segment.
+// Restricted mode and an SSH session child never do.
+func gitPromptPermitted(restricted, sshChild bool) bool {
+	return !restricted && !sshChild
+}
+
+// gitPromptInitial is the starting state: ADSSH_GIT_PROMPT, when permitted.
+func gitPromptInitial(env string, allowed bool) bool {
+	return allowed && gitPromptFromEnv(env)
+}
+
 // applyGitPrompt handles `set gitprompt` and `set gitprompt on|off`.
 // Any other line is left to the shell. An unknown value does not change the flag.
 func applyGitPrompt(line string, on bool) (next bool, handled bool, err error) {
@@ -74,77 +102,184 @@ func applyGitPrompt(line string, on bool) (next bool, handled bool, err error) {
 	return on, true, errors.New("set gitprompt: usage: set gitprompt [on|off]")
 }
 
-// gitPromptSegment runs git status for cwd. A missing repository, a timeout,
-// or any other error is an empty segment. The command is git itself, not a shell.
+// handleGitPromptLine applies a `set gitprompt` line and audits a change or a
+// refusal. Turning it on is refused when the session is not permitted.
+func handleGitPromptLine(line string, cur, allowed bool, out, errOut io.Writer) (next bool, handled bool) {
+	next, handled, err := applyGitPrompt(line, cur)
+	if !handled {
+		return cur, false
+	}
+	if err != nil {
+		fmt.Fprintf(errOut, "%v\n", err)
+		return cur, true
+	}
+	if next && !allowed {
+		logGitPrompt("refused", errOut)
+		fmt.Fprintln(errOut, "set gitprompt: not available in restricted mode or an SSH session")
+		return false, true
+	}
+	state := "off"
+	if next {
+		state = "on"
+	}
+	if next != cur {
+		logGitPrompt(state, errOut)
+	}
+	fmt.Fprintf(out, "gitprompt %s\n", state)
+	return next, true
+}
+
+func logGitPrompt(action string, errOut io.Writer) {
+	if err := security.DefaultEngine().LogEvent("GITPROMPT action=" + action); err != nil {
+		fmt.Fprintf(errOut, "adssh: warning: audit gitprompt: %v\n", err)
+	}
+}
+
+// gitPromptSegment returns the branch or short detached hash for cwd. A
+// missing repository or any read error is an empty segment.
 func gitPromptSegment(cwd string) string {
 	if cwd == "" {
 		return ""
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), gitPromptTimeout)
-	defer cancel()
-	// --no-optional-locks is a global option. Apple Git rejects it after status.
-	cmd := exec.CommandContext(ctx, "git", "--no-optional-locks", "-C", cwd, "status", "--porcelain=v1", "-b")
-	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
-	cmd.Stderr = io.Discard
-	var out limitedBuffer
-	out.remain = gitPromptMaxOut
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	gitDir := findGitDir(filepath.Clean(cwd))
+	if gitDir == "" {
 		return ""
 	}
-	return formatGitStatus(out.buf.String(), out.truncated)
+	head, ok := readSmallFile(filepath.Join(gitDir, "HEAD"))
+	if !ok {
+		return ""
+	}
+	return sanitizePromptToken(parseGitHead(head))
 }
 
-// formatGitStatus turns porcelain v1 -b output into "branch" or "branch*".
-// A branch name is untrusted. Control bytes are dropped so the prompt cannot
-// be rewritten. A truncated read is treated as dirty.
-func formatGitStatus(out string, truncated bool) string {
-	line, rest, _ := strings.Cut(out, "\n")
-	if !strings.HasPrefix(line, "## ") {
+// findGitDir walks up from cwd to the first .git entry and returns the
+// directory that holds HEAD, or "".
+func findGitDir(cwd string) string {
+	dir := cwd
+	for i := 0; i < gitPromptMaxDepth; i++ {
+		dotGit := filepath.Join(dir, ".git")
+		if info, err := os.Stat(dotGit); err == nil {
+			if info.IsDir() {
+				return dotGit
+			}
+			if info.Mode().IsRegular() {
+				return followGitdirFile(dir, dotGit, cwd)
+			}
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+	return ""
+}
+
+// followGitdirFile resolves a `gitdir: <path>` file once.
+func followGitdirFile(dir, dotGit, cwd string) string {
+	data, ok := readSmallFile(dotGit)
+	if !ok {
 		return ""
 	}
-	head := strings.TrimPrefix(line, "## ")
-	branch := head
-	if i := strings.Index(branch, "..."); i >= 0 {
-		branch = branch[:i]
-	}
-	switch {
-	case strings.HasPrefix(branch, "HEAD"):
-		branch = "HEAD"
-	case strings.HasPrefix(branch, "No commits yet on "):
-		branch = strings.TrimPrefix(branch, "No commits yet on ")
-		if i := strings.IndexAny(branch, " \t"); i >= 0 {
-			branch = branch[:i]
-		}
-	default:
-		if i := strings.IndexAny(branch, " \t"); i >= 0 {
-			branch = branch[:i]
-		}
-	}
-	branch = sanitizePromptToken(branch)
-	if branch == "" {
+	line, _, _ := strings.Cut(data, "\n")
+	target, found := strings.CutPrefix(strings.TrimSpace(line), "gitdir:")
+	target = strings.TrimSpace(target)
+	if !found || target == "" {
 		return ""
 	}
-	dirty := truncated
-	if !dirty {
-		for _, extra := range strings.Split(rest, "\n") {
-			if strings.TrimSpace(extra) != "" {
-				dirty = true
+	var resolved string
+	if filepath.IsAbs(target) {
+		resolved = filepath.Clean(target)
+		home, _ := os.UserHomeDir()
+		if !pathWithin(resolved, home) && !pathWithin(resolved, cwd) {
+			return ""
+		}
+	} else {
+		rel := filepath.Clean(target)
+		ups := 0
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			if part != ".." {
 				break
 			}
+			ups++
 		}
+		if ups > 1 {
+			return ""
+		}
+		resolved = filepath.Join(dir, rel)
 	}
-	if dirty {
-		return branch + "*"
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return ""
 	}
-	return branch
+	return resolved
 }
 
+func pathWithin(path, root string) bool {
+	if root == "" {
+		return false
+	}
+	root = filepath.Clean(root)
+	if root == string(filepath.Separator) {
+		return false
+	}
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+}
+
+// readSmallFile reads a regular file of at most gitPromptMaxFile bytes. It
+// does not follow a symlink and does not block on a FIFO or a device.
+func readSmallFile(path string) (string, bool) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > gitPromptMaxFile {
+		return "", false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, gitPromptMaxFile))
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
+}
+
+// parseGitHead turns HEAD into a branch name or a 7-character short hash.
+func parseGitHead(head string) string {
+	line, _, _ := strings.Cut(head, "\n")
+	line = strings.TrimSpace(line)
+	if ref, ok := strings.CutPrefix(line, "ref:"); ok {
+		branch, ok := strings.CutPrefix(strings.TrimSpace(ref), "refs/heads/")
+		if !ok {
+			return ""
+		}
+		return branch
+	}
+	if (len(line) == 40 || len(line) == 64) && isLowerHex(line) {
+		return line[:7]
+	}
+	return ""
+}
+
+func isLowerHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// sanitizePromptToken drops control and format characters and caps the rune count.
 func sanitizePromptToken(s string) string {
 	var b strings.Builder
 	n := 0
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		if r == utf8.RuneError || r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) ||
+			unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
 		if n >= gitPromptMaxName {
@@ -154,27 +289,4 @@ func sanitizePromptToken(s string) string {
 		n++
 	}
 	return b.String()
-}
-
-// limitedBuffer keeps at most remain bytes and remembers that the rest was dropped.
-type limitedBuffer struct {
-	buf       bytes.Buffer
-	remain    int
-	truncated bool
-}
-
-func (w *limitedBuffer) Write(p []byte) (int, error) {
-	if w.remain <= 0 {
-		w.truncated = true
-		return len(p), nil
-	}
-	if len(p) > w.remain {
-		_, _ = w.buf.Write(p[:w.remain])
-		w.remain = 0
-		w.truncated = true
-		return len(p), nil
-	}
-	_, _ = w.buf.Write(p)
-	w.remain -= len(p)
-	return len(p), nil
 }

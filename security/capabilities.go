@@ -13,24 +13,24 @@ import (
 // These are deliberately coarse and stable: adding a builtin should map onto an
 // existing capability whenever possible so operators' policies keep working.
 const (
-	CapNet          = "net"
-	CapTCP          = "tcp"
-	CapRegex        = "regex"
-	CapStrings      = "strings"
-	CapDatabases    = "databases"
-	CapFileops      = "fileops"
-	CapProc         = "proc"
-	CapStdio        = "stdio"
-	CapCrypto       = "crypto"
-	CapData         = "data"
-	CapCloud        = "cloud"
-	CapK8s          = "k8s"
-	CapContainers   = "containers"
-	CapSecrets      = "secrets"
-	CapSecurity     = "security"
-	CapVCS          = "vcs"
-	CapNotify       = "notify"
-	CapTemplate     = "template"
+	CapNet        = "net"
+	CapTCP        = "tcp"
+	CapRegex      = "regex"
+	CapStrings    = "strings"
+	CapDatabases  = "databases"
+	CapFileops    = "fileops"
+	CapProc       = "proc"
+	CapStdio      = "stdio"
+	CapCrypto     = "crypto"
+	CapData       = "data"
+	CapCloud      = "cloud"
+	CapK8s        = "k8s"
+	CapContainers = "containers"
+	CapSecrets    = "secrets"
+	CapSecurity   = "security"
+	CapVCS        = "vcs"
+	CapNotify     = "notify"
+	CapTemplate   = "template"
 
 	// CapUnclassified tags a starlark.* builtin path that no rule below matches.
 	// It is a FAIL-CLOSED hook: a strict policy can deny
@@ -76,6 +76,14 @@ var nsCapabilities = map[string][]string{
 	"expect":     {CapProc, CapStdio},
 }
 
+// netDeviceCapabilities classifies the pseudo-commands the shell OPEN handler
+// gates for bash network redirections (`> /dev/tcp/host/port`), so policies on
+// input.capabilities see that egress exactly like net.* Starlark builtins.
+var netDeviceCapabilities = map[string][]string{
+	"/dev/tcp": {CapNet, CapTCP},
+	"/dev/udp": {CapNet},
+}
+
 // ClassifyCapabilities returns the capability groups a governed command touches.
 //
 // It returns nil for any command that is not a governed Starlark builtin (i.e.
@@ -88,6 +96,9 @@ var nsCapabilities = map[string][]string{
 // starlark.* path that matches no rule returns ["unclassified"] so a strict
 // policy has a fail-closed hook (see CapUnclassified).
 func ClassifyCapabilities(command string) []string {
+	if caps, ok := netDeviceCapabilities[command]; ok {
+		return dedupeSorted(caps)
+	}
 	if !strings.HasPrefix(command, starlarkPrefix) {
 		return nil
 	}

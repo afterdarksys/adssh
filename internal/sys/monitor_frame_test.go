@@ -148,27 +148,27 @@ func TestValidateMonitorArgsBounds(t *testing.T) {
 }
 
 func TestDecodeMonitorAuthRejects(t *testing.T) {
-	if _, err := DecodeMonitorAuth([]byte(`{"args":[]}`)); !errors.Is(err, errMonitorInvalidArgument) {
+	if _, err := DecodeMonitorAuth([]byte(`{"id":1,"args":[]}`)); !errors.Is(err, errMonitorInvalidArgument) {
 		t.Fatalf("empty args = %v", err)
 	}
-	if _, err := DecodeMonitorAuth([]byte(`{}`)); !errors.Is(err, errMonitorInvalidArgument) {
+	if _, err := DecodeMonitorAuth([]byte(`{"id":1}`)); !errors.Is(err, errMonitorInvalidArgument) {
 		t.Fatalf("missing args = %v", err)
 	}
-	_, err := DecodeMonitorAuth([]byte(`{"args":["ls"],"session_id":"sekret"}`))
+	_, err := DecodeMonitorAuth([]byte(`{"id":1,"args":["ls"],"session_id":"sekret"}`))
 	if err == nil || !errors.Is(err, errMonitorInvalidArgument) {
 		t.Fatalf("unknown field = %v", err)
 	}
 	if strings.Contains(err.Error(), "sekret") {
 		t.Fatal("value leaked")
 	}
-	if _, err := DecodeMonitorAuth([]byte(`{"args":["ls"]}{"args":["ls"]}`)); !errors.Is(err, errMonitorInvalidArgument) {
+	if _, err := DecodeMonitorAuth([]byte(`{"id":1,"args":["ls"]}{"id":2,"args":["ls"]}`)); !errors.Is(err, errMonitorInvalidArgument) {
 		t.Fatalf("junk = %v", err)
 	}
-	req, err := DecodeMonitorAuth([]byte("{\"args\":[\"ls\"]}\n"))
+	req, err := DecodeMonitorAuth([]byte("{\"id\":1,\"args\":[\"ls\"]}\n"))
 	if err != nil || len(req.Args) != 1 || req.Args[0] != "ls" {
 		t.Fatalf("whitespace = %v %#v", err, req)
 	}
-	req, err = DecodeMonitorAuth([]byte(`{"args":[""]}`))
+	req, err = DecodeMonitorAuth([]byte(`{"id":1,"args":[""]}`))
 	if err != nil || len(req.Args) != 1 || req.Args[0] != "" {
 		t.Fatalf("empty element = %v %#v", err, req)
 	}
@@ -215,11 +215,12 @@ func TestMonitorClientHappy(t *testing.T) {
 					return
 				}
 			case MonitorFrameAuthorize:
-				if _, err := DecodeMonitorAuth(payload); err != nil {
+				req, err := DecodeMonitorAuth(payload)
+				if err != nil {
 					errCh <- err
 					return
 				}
-				body, err := json.Marshal(MonitorAuthResponse{OK: true})
+				body, err := json.Marshal(MonitorAuthResponse{ID: req.ID, ArgsDigest: MonitorArgsDigest(req.Args), OK: true})
 				if err != nil {
 					errCh <- err
 					return
@@ -267,22 +268,39 @@ func serveMonitorResponse(t *testing.T, typ byte, payload []byte) *MonitorClient
 	return NewMonitorClient(client)
 }
 
+// serveMonitorAnswer answers one authorize request with ok and errText,
+// echoing the request id and digest.
+func serveMonitorAnswer(t *testing.T, ok bool, errText string) *MonitorClient {
+	t.Helper()
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+	go func() {
+		_, payload, err := ReadMonitorFrame(server)
+		if err != nil {
+			return
+		}
+		req, err := DecodeMonitorAuth(payload)
+		if err != nil {
+			return
+		}
+		body, err := json.Marshal(MonitorAuthResponse{ID: req.ID, ArgsDigest: MonitorArgsDigest(req.Args), OK: ok, Error: errText})
+		if err != nil {
+			return
+		}
+		_ = WriteMonitorFrame(server, MonitorFrameAuthorize, body)
+	}()
+	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	return NewMonitorClient(client)
+}
+
 func TestMonitorClientDenyShapes(t *testing.T) {
-	body, err := json.Marshal(MonitorAuthResponse{OK: true, Error: "not allowed"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mc := serveMonitorResponse(t, MonitorFrameAuthorize, body)
-	err = mc.Authorize([]string{"ls"})
+	mc := serveMonitorAnswer(t, true, "not allowed")
+	err := mc.Authorize([]string{"ls"})
 	if err == nil || err.Error() != "not allowed" || errors.Is(err, errMonitorDenied) {
 		t.Fatalf("ok+error = %v", err)
 	}
 
-	body, err = json.Marshal(MonitorAuthResponse{OK: false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mc = serveMonitorResponse(t, MonitorFrameAuthorize, body)
+	mc = serveMonitorAnswer(t, false, "")
 	err = mc.Authorize([]string{"ls"})
 	if err == nil || err.Error() != "adssh: ssh monitor: denied" || !errors.Is(err, errMonitorDenied) {
 		t.Fatalf("ok false = %v", err)

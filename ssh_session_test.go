@@ -127,3 +127,13 @@ func TestParseSSHSessionArgsRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestSSHOverlaySessionCarriesPrincipals(t *testing.T) {
+	s := newSSHOverlaySession(sshSessionOpts{sessionID: "ov-1", user: "alice", principals: []string{"ops", "dba"}})
+	if s.ID != "ov-1" || s.User != "alice" {
+		t.Fatalf("session = %+v", s)
+	}
+	if len(s.Principals) != 2 || s.Principals[0] != "ops" || s.Principals[1] != "dba" {
+		t.Fatalf("principals = %v", s.Principals)
+	}
+}

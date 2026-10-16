@@ -155,7 +155,7 @@ allow = true { input.user == "alice"; input.groups[_] == "ops" }
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	globals := starlark.StringDict{"SESSION_ID": starlark.String(sessionID)}
 
-	if _, err := eng.callHandler(false, globals)(context.Background(), []string{"deploy"}); err != nil {
+	if _, err := eng.callHandler(&SessionState{Globals: globals})(context.Background(), []string{"deploy"}); err != nil {
 		t.Fatalf("authenticated SSH identity was not used by policy: %v", err)
 	}
 }
@@ -179,7 +179,7 @@ func TestInterceptor_EnforcesConfiguredEntitlements(t *testing.T) {
 	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	globals := starlark.StringDict{"SESSION_ID": starlark.String(sessionID)}
-	handler := eng.callHandler(false, globals)
+	handler := eng.callHandler(&SessionState{Globals: globals})
 
 	if _, err := handler(context.Background(), []string{"ls"}); err != nil {
 		t.Fatalf("explicitly entitled command denied: %v", err)

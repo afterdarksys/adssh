@@ -11,11 +11,9 @@ import (
 // MaybeRunSessionChild refuses a --session-child re-exec on platforms that
 // cannot apply the rlimit protocol. A normal process start returns.
 func MaybeRunSessionChild() {
-	for _, a := range os.Args {
-		if a == "--session-child" {
-			fmt.Fprintf(os.Stderr, "adssh: session child: not supported\n")
-			os.Exit(1)
-		}
+	if len(os.Args) > 1 && os.Args[1] == "--session-child" {
+		fmt.Fprintf(os.Stderr, "adssh: session child: not supported\n")
+		os.Exit(1)
 	}
 }
 

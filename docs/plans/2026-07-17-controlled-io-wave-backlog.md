@@ -9,6 +9,8 @@ Lead with the security fix, not the features — that's the on-brand deliverable
 
 ## SEC-1 (headline / real bug): network egress bypasses the enforcement core
 
+**DONE 2026-10-16:** `(*Engine).OpenHandlerSession` gates `/dev/tcp`/`/dev/udp` (restricted deny, policy/CM/four-eyes/audit, 10s dial timeout) and hard-denies `/dev/fd/N` for N >= 3; the ungated `VirtualOpenHandler` is deleted.
+
 `security/openhandler.go` already implements bash's `/dev/tcp/host/port` and
 `/dev/udp/host/port` by calling `net.Dial` **directly** — no `EvaluatePolicy`, no
 `BuildPolicyContext`, no `LogCommand`, no audit-chain entry. The OpenHandler is a hole

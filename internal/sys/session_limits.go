@@ -17,8 +17,9 @@ import (
 // session. The credential is applied only when that session is marked, the
 // process is root, and the unix user and groups resolve. A lookup, parse, or
 // GroupIds error returns before Credential is set, and the caller must not
-// start the process. A requested rlimit above the current hard limit is
-// clamped down; the hard limit is never raised. A zero limit is not applied.
+// start the process. Each rlimit sets soft and hard to the requested value,
+// clamped to the current hard limit; the hard limit is never raised and the
+// dropped user cannot raise it back. A zero limit is not applied.
 // In-process Starlark and virtual binaries share this process and are not
 // covered. An SSH session process is already under these rlimits and its
 // in-process virtual binaries share that process, not the listener. The

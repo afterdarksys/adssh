@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"go.starlark.net/starlark"
 
@@ -23,6 +25,17 @@ import (
 // and they are policy-bypassable. A native exploit can still execve. Argument
 // errors do not include the value. This process must not construct an engine
 // or replace the default engine. The listener's gate is the monitor client.
+// SIGINT and SIGQUIT are caught here, not ignored, so the commands this
+// process runs get the default disposition; the PTY's ISIG delivers Ctrl-C
+// to the foreground process group. SIGTSTP, SIGTTIN, and SIGTTOU stay
+// ignored in this process for job control; the --session-child wrapper
+// resets them for wrapped commands, and a command run with every session
+// limit at zero keeps them ignored. The environment and working directory
+// are the listener's allowlist for the target user. After the gate is
+// installed the process is marked: every local policy evaluation denies, and
+// vbins that change engine or session state (elevate, cm, lease, grant,
+// identity, 4eyes, gateway, ...) or evaluate policy locally (why, ??) are
+// refused before dispatch and recorded by the listener as denied.
 
 type sshSessionOpts struct {
 	sessionID  string
@@ -62,7 +75,9 @@ func runSSHSession(args []string) int {
 		fmt.Fprintf(os.Stderr, "adssh: ssh session: monitor gate is not installed\n")
 		return 1
 	}
-	overlay := &sys.Session{ID: opts.sessionID, User: opts.user}
+	// Local policy evaluation and state-changing vbins are refused from here on.
+	security.MarkRemoteGateProcess()
+	overlay := newSSHOverlaySession(opts)
 	if err := sys.RegisterSession(overlay); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
@@ -72,6 +87,8 @@ func runSSHSession(args []string) int {
 		_ = os.Setenv("SHELL", binaryPath)
 	}
 	sys.SetupSignals()
+	// SIGINT also cancels the running command's context.
+	installSessionSignals(overlay)
 	globals := starlark.StringDict{}
 	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{
 		Env:        globals,
@@ -92,6 +109,16 @@ func runSSHSession(args []string) int {
 		repl.Start(globals, opts.restricted, opts.history, os.Stdin, os.Stdout, os.Stderr)
 	}
 	return 0
+}
+
+// newSSHOverlaySession is the child's view of the listener's session. The
+// principals are the listener's --principal values.
+func newSSHOverlaySession(opts sshSessionOpts) *sys.Session {
+	return &sys.Session{
+		ID:         opts.sessionID,
+		User:       opts.user,
+		Principals: append([]string(nil), opts.principals...),
+	}
 }
 
 func parseSSHSessionArgs(args []string) (sshSessionOpts, error) {
@@ -177,4 +204,21 @@ func nextSessionValue(args []string, i *int) (string, error) {
 		return "", errors.New("adssh: ssh session: invalid value")
 	}
 	return v, nil
+}
+
+// installSessionSignals catches SIGINT and SIGQUIT in the session process.
+// A caught signal is reset to the default by execve and an ignored one is
+// not, so commands this process runs die on Ctrl-C and Ctrl-\ while this
+// process survives (SetupSignals catches them too). SIGINT also cancels the
+// running command's context.
+func installSessionSignals(overlay *sys.Session) {
+	ch := make(chan os.Signal, 4)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT)
+	go func() {
+		for sig := range ch {
+			if sig == syscall.SIGINT {
+				overlay.CancelCommand()
+			}
+		}
+	}()
 }

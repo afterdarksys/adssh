@@ -13,6 +13,10 @@ type GatewayPolicyRequest struct {
 	Listen     string
 	Name       string
 	TargetHost string
+	// TargetIP is the address TargetHost resolved to and the one that will
+	// be dialed. Empty when the caller did not resolve. It reaches policy as
+	// input.gateway.target_ip in the same decision as target_host.
+	TargetIP   string
 	TargetPort uint32
 }
 
@@ -40,17 +44,33 @@ func (e *Engine) AuthorizeGateway(req GatewayPolicyRequest) error {
 	if err != nil {
 		return err
 	}
-	pctx := BuildPolicyContext("gateway", []string{req.Action, claim.Target}, req.SessionID)
+	if req.TargetIP != "" {
+		ip := net.ParseIP(req.TargetIP)
+		if ip == nil {
+			return fmt.Errorf("gateway: invalid target address")
+		}
+		claim.TargetIP = ip.String()
+	}
+	pctx := e.buildPolicyContext("gateway", []string{req.Action, claim.Target}, req.SessionID)
 	if req.User != "" {
 		pctx.User = req.User
+		pctx.IdentityUnknown = false
 	}
 	if req.Groups != nil {
 		pctx.Groups = append([]string(nil), req.Groups...)
 	}
 	pctx.Gateway = claim
 	cmd := fmt.Sprintf("gateway %s %s", req.Action, claim.Target)
+	if claim.TargetIP != "" {
+		cmd += " ip=" + claim.TargetIP
+	}
 	if err := e.LogCommand("GATEWAY", cmd); err != nil {
 		return fmt.Errorf("adssh: audit log failed: %w", err)
+	}
+	if pctx.IdentityUnknown {
+		e.rememberDeniedCommand(req.SessionID, []string{"gateway", req.Action, claim.Target})
+		auditErr := e.LogPolicyDecision("", cmd, false, "adssh: session identity unknown")
+		return joinDeny("adssh: gateway access denied: session identity unknown", auditErr)
 	}
 	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 	if policyErr != nil {

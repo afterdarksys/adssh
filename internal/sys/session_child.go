@@ -6,11 +6,27 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+// Threats: the --session-child re-exec applies the session rlimits before it
+// execs a session command. It is honoured only as argv[1], so a user
+// argument spelled --session-child neither triggers it nor skips the wrap;
+// a command is treated as already wrapped only when its path is this binary
+// and argv[1] is --session-child. Each limit sets the soft and the hard limit
+// to min(requested, current hard), so the dropped user cannot raise it back;
+// the hard limit is never raised. A zero limit is not applied. Before the
+// exec, job-control and interrupt signals are caught so the exec resets them
+// to the default: a session process ignores SIGINT, SIGQUIT, SIGTSTP,
+// SIGTTIN and SIGTTOU for itself, and an ignored disposition would otherwise
+// survive into every command. A signal that arrives between that point and
+// the exec is dropped. Commands that are not wrapped (every limit zero)
+// keep whatever disposition the caller had.
 
 func init() {
 	maybeRunSessionChild(os.Args)
@@ -31,22 +47,15 @@ func maybeRunSessionChild(args []string) {
 	}
 }
 
-// runSessionChild returns nil when --session-child is absent. Limits are
+// runSessionChild returns nil unless argv[1] is --session-child. Limits are
 // parsed and applied before the command tail is checked. A bad key, a bad
 // value, a missing "=", a missing "--", or a setrlimit error returns before
 // execProcess.
 func runSessionChild(args []string) error {
-	idx := -1
-	for i, a := range args {
-		if a == "--session-child" {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
+	if len(args) < 2 || args[1] != "--session-child" {
 		return nil
 	}
-	rest := args[idx+1:]
+	rest := args[2:]
 	var specs []string
 	var tail []string
 	seenDash := false
@@ -82,8 +91,15 @@ func runSessionChild(args []string) error {
 	if len(argv) == 0 {
 		argv = []string{target}
 	}
+	// A caught signal is reset to the default by execve; an ignored one is
+	// not. Notify replaces an inherited SIG_IGN with the runtime handler.
+	signal.Notify(make(chan os.Signal, 1), sessionDefaultSignals...)
 	return execProcess(target, argv, os.Environ())
 }
+
+// sessionDefaultSignals are the signals a session command must receive with
+// the default disposition.
+var sessionDefaultSignals = []os.Signal{syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU}
 
 func applyOneLimit(key string, value uint64) error {
 	res, err := limitResource(key)
@@ -97,13 +113,11 @@ func applyOneLimit(key string, value uint64) error {
 	if err := getRlimit(res, &cur); err != nil {
 		return err
 	}
-	next := cur
-	if cur.Max != unix.RLIM_INFINITY && value > cur.Max {
-		next.Cur = cur.Max
-	} else {
-		next.Cur = value
-		next.Max = cur.Max
+	limit := value
+	if cur.Max != unix.RLIM_INFINITY && limit > cur.Max {
+		limit = cur.Max
 	}
+	next := unix.Rlimit{Cur: limit, Max: limit}
 	return setRlimit(res, &next)
 }
 
@@ -125,17 +139,13 @@ func limitResource(key string) (int, error) {
 }
 
 // wrapSessionLimits rewrites cmd to re-exec this binary with --session-child
-// before the original argv. It does not rewrite when a limit is already being
-// applied, when every limit is zero, or when this process is a go test.
-// executable failure leaves Path and Args unchanged.
+// before the original argv. It does not rewrite a command that is already
+// this binary with --session-child as argv[1], when every limit is zero, or
+// when this process is a go test. executable failure leaves Path and Args
+// unchanged.
 func wrapSessionLimits(cmd *exec.Cmd) error {
 	if runningUnderTest() {
 		return nil
-	}
-	for _, a := range cmd.Args {
-		if a == "--session-child" {
-			return nil
-		}
 	}
 	limits := sessionLimits()
 	if !limits.any() {
@@ -144,6 +154,9 @@ func wrapSessionLimits(cmd *exec.Cmd) error {
 	exe, err := executable()
 	if err != nil {
 		return fmt.Errorf("adssh: session child: %w", err)
+	}
+	if cmd.Path == exe && len(cmd.Args) > 1 && cmd.Args[1] == "--session-child" {
+		return nil
 	}
 	args := []string{
 		exe,

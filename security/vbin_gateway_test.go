@@ -202,3 +202,197 @@ func parseGatewayStartOutput(t *testing.T, output string) (string, string) {
 	}
 	return values["id"], values["listen"]
 }
+
+func TestGatewayPolicyTargetIP(t *testing.T) {
+	hostnameOnly, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh.authz
+default allow = false
+default deny_reason = "gateway target is not allowed"
+allow {
+  input.command == "gateway"
+  input.gateway.target_host == "db.internal"
+  input.gateway.target_port == "5432"
+}
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := GatewayPolicyRequest{
+		User:       "alice",
+		Action:     "direct-tcpip",
+		TargetHost: "db.internal",
+		TargetIP:   "10.0.0.7",
+		TargetPort: 5432,
+	}
+	if err := hostnameOnly.AuthorizeGateway(req); err != nil {
+		t.Fatalf("hostname-only allow policy denied a resolved target: %v", err)
+	}
+
+	ipAware, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh.authz
+import future.keywords.in
+default allow = false
+default deny_reason = "gateway target is not allowed"
+blocked_ips := {"169.254.169.254", "10.0.0.66"}
+allow {
+  input.command == "gateway"
+  input.gateway.target_host == "db.internal"
+  not input.gateway.target_ip in blocked_ips
+}
+deny_reason = "resolved address is blocked" {
+  input.gateway.target_ip in blocked_ips
+}
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ipAware.AuthorizeGateway(req); err != nil {
+		t.Fatalf("allowed name and address denied: %v", err)
+	}
+	rebound := req
+	rebound.TargetIP = "10.0.0.66"
+	err = ipAware.AuthorizeGateway(rebound)
+	if err == nil || !strings.Contains(err.Error(), "resolved address is blocked") {
+		t.Fatalf("a blocked target_ip was allowed because the name is allowed: %v", err)
+	}
+
+	bad := req
+	bad.TargetIP = "not-an-address"
+	if err := hostnameOnly.AuthorizeGateway(bad); err == nil {
+		t.Fatal("a TargetIP that is not an address was accepted")
+	}
+}
+
+func TestGatewayTargetIPExamplePolicy(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "policy", "examples", "gateway_target_ip.rego"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := NewEngine(EngineConfig{PolicySource: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		host string
+		ip   string
+		port uint32
+		ok   bool
+	}{
+		{"name allowed, unresolved", "db.internal", "", 5432, true},
+		{"name allowed, address fine", "db.internal", "10.20.0.7", 5432, true},
+		{"name allowed, metadata address", "db.internal", "169.254.169.254", 5432, false},
+		{"name allowed, blocked subnet", "bastion.internal", "10.99.3.4", 22, false},
+		{"name allowed, wrong port", "db.internal", "10.20.0.7", 22, false},
+		{"unknown name, allowed subnet", "other.internal", "10.20.0.9", 5432, true},
+		{"unknown name, other address", "other.internal", "10.30.0.9", 5432, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := eng.AuthorizeGateway(GatewayPolicyRequest{
+				User:       "alice",
+				Action:     "direct-tcpip",
+				TargetHost: tc.host,
+				TargetIP:   tc.ip,
+				TargetPort: tc.port,
+			})
+			if tc.ok && err != nil {
+				t.Fatalf("denied: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatal("allowed")
+			}
+		})
+	}
+}
+
+func stubGatewayResolver(t *testing.T, names map[string]string) {
+	t.Helper()
+	prev := gatewayLookupIP
+	gatewayLookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+		if ip, ok := names[host]; ok {
+			return []net.IP{net.ParseIP(ip)}, nil
+		}
+		return nil, fmt.Errorf("no such host")
+	}
+	t.Cleanup(func() { gatewayLookupIP = prev })
+}
+
+func TestGatewayStartPolicyBlocksResolvedTargetIP(t *testing.T) {
+	stubGatewayResolver(t, map[string]string{"db.example": "169.254.169.254"})
+	eng, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh.authz
+default allow = false
+default deny_reason = "gateway target is not allowed"
+allow {
+  input.command == "gateway"
+  input.gateway.target_host == "db.example"
+  input.gateway.target_ip != "169.254.169.254"
+}
+deny_reason = "resolved address is blocked" {
+  input.gateway.target_ip == "169.254.169.254"
+}
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runGatewayVBin(t, eng, []string{"gateway", "start", "--listen", "127.0.0.1:0", "--target", "db.example:5432"})
+	if err == nil || !strings.Contains(err.Error(), "resolved address is blocked") {
+		t.Fatalf("a local gateway to a blocked resolved address started: %v", err)
+	}
+}
+
+func TestGatewayStartDialsResolvedAddress(t *testing.T) {
+	target, closeTarget := startGatewayEchoServer(t)
+	defer closeTarget()
+	_, port, _ := net.SplitHostPort(target)
+	stubGatewayResolver(t, map[string]string{"echo.example": "127.0.0.1"})
+	t.Setenv("ADSSH_GATEWAY_LOG", filepath.Join(t.TempDir(), "gw.jsonl"))
+	eng, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh.authz
+default allow = false
+allow {
+  input.command == "gateway"
+  input.gateway.target_host == "echo.example"
+  input.gateway.target_ip == "127.0.0.1"
+}
+allow {
+  input.command == "gateway"
+  input.args[0] == "stop"
+}
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := runGatewayVBin(t, eng, []string{"gateway", "start", "--listen", "127.0.0.1:0", "--target", "echo.example:" + port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, listen := parseGatewayStartOutput(t, output)
+	t.Cleanup(func() { _, _ = runGatewayVBin(t, eng, []string{"gateway", "stop", id}) })
+	conn, err := net.DialTimeout("tcp", listen, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	fmt.Fprintln(conn, "ping")
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil || line != "echo: ping\n" {
+		t.Fatalf("gateway did not dial the resolved address: %q %v", line, err)
+	}
+}
+
+func TestGatewayStartRefusesUnresolvableTarget(t *testing.T) {
+	stubGatewayResolver(t, map[string]string{})
+	eng, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh.authz
+default allow = true
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runGatewayVBin(t, eng, []string{"gateway", "start", "--listen", "127.0.0.1:0", "--target", "nowhere.example:22"}); err == nil {
+		t.Fatal("a gateway to an unresolvable name started")
+	}
+}

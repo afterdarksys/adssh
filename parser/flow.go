@@ -91,7 +91,9 @@ func ClassifyFlow(src string) Flow {
 }
 
 // ClassifyChunk reports whether src is ready to run, needs another line, or is rejected.
-// Starlark is ready on the first line. The caller keeps reading a Starlark block.
+// A Starlark chunk is ready on its first line. ClassifyChunk does not read the
+// rest of a Starlark block: the REPL continues it with needsContinuation, and
+// AccumulateScript keeps indented lines with it.
 func ClassifyChunk(src string) Chunk {
 	flow := ClassifyFlow(src)
 	switch flow.Kind {
@@ -104,7 +106,7 @@ func ClassifyChunk(src string) Chunk {
 	}
 	first := firstLine(src)
 	mode := DetermineMode(first)
-	if mode == ModeStarlark {
+	if mode == ModeStarlark || (ifKeyword(strings.TrimSpace(first)) && starlarkIf(strings.TrimSpace(src))) {
 		return Chunk{Kind: ChunkReady, Mode: ModeStarlark}
 	}
 	if ShellIncomplete(src) {
@@ -186,6 +188,44 @@ func firstLineEndsWithColon(src string) bool {
 	return strings.HasSuffix(line, ":")
 }
 
+// firstLineColonOutsideBrackets reports whether the first line closes every
+// (, [, and { it opens, so its trailing colon is a Starlark block opener and
+// not text inside a brace body.
+func firstLineColonOutsideBrackets(src string) bool {
+	line := stripTrailingComment(firstLine(src))
+	depth := 0
+	quote := byte(0)
+	escape := false
+	for i := 0; i < len(line); i++ {
+		b := line[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if quote != 0 {
+			if b == '\\' && quote == '"' {
+				escape = true
+			} else if b == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch b {
+		case '\\':
+			escape = true
+		case '\'', '"':
+			quote = b
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return depth == 0 && quote == 0
+}
+
 func stripTrailingComment(line string) string {
 	quote := byte(0)
 	escape := false
@@ -236,6 +276,9 @@ const (
 )
 
 func classifyIf(src string, i int) Flow {
+	if firstLineEndsWithColon(src) && firstLineColonOutsideBrackets(src) {
+		return Flow{Kind: FlowNot}
+	}
 	cond, brace, stop := scanCondition(src, i)
 	switch stop {
 	case stopPosix, stopColon, stopEOF:
@@ -323,8 +366,11 @@ func classifyTry(src string, i int) Flow {
 }
 
 // scanCondition scans the shell command between if and the then-body brace.
-// i is the index just after the if keyword. ${...} counts toward depth.
-// A word then or fi, or a colon outside quotes, stops the scan as not-a-brace-form.
+// i is the index just after the if keyword. ${...}, (...), [...], and {...}
+// inside them count toward depth. A word then or fi, or a colon outside quotes
+// and brackets, stops the scan as not-a-brace-form. A { at depth zero is the
+// body brace unless its matching } is followed by a colon: that is a Starlark
+// dict or set literal in an `if expr:` line.
 func scanCondition(src string, i int) (cond string, brace int, stop stopKind) {
 	start := i
 	quote := byte(0)
@@ -381,9 +427,10 @@ func scanCondition(src string, i int) (cond string, brace int, stop stopKind) {
 				i++
 				continue
 			}
-			if b == '{' {
+			switch b {
+			case '{', '(', '[':
 				depth++
-			} else if b == '}' {
+			case '}', ')', ']':
 				depth--
 			}
 			i++
@@ -431,7 +478,18 @@ func scanCondition(src string, i int) (cond string, brace int, stop stopKind) {
 			if flush() {
 				return "", 0, stopPosix
 			}
+			if _, next, _, incomplete := scanBlock(src, i); !incomplete && colonFollows(src, next) {
+				return "", 0, stopColon
+			}
 			return src[start:i], i, stopBrace
+		}
+		if b == '(' || b == '[' {
+			if flush() {
+				return "", 0, stopPosix
+			}
+			depth = 1
+			i++
+			continue
 		}
 		if isWordSep(b) {
 			if flush() {
@@ -446,10 +504,15 @@ func scanCondition(src string, i int) (cond string, brace int, stop stopKind) {
 	if flush() {
 		return "", 0, stopPosix
 	}
-	if quote != 0 || depth > 0 || escape {
-		return "", 0, stopEOF
-	}
 	return "", 0, stopEOF
+}
+
+// colonFollows reports whether the next non-blank byte on the same line is a colon.
+func colonFollows(src string, i int) bool {
+	for i < len(src) && (src[i] == ' ' || src[i] == '\t') {
+		i++
+	}
+	return i < len(src) && src[i] == ':'
 }
 
 func isWordSep(b byte) bool {

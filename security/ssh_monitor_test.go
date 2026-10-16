@@ -142,27 +142,33 @@ func TestServeSSHMonitorProtocolErrors(t *testing.T) {
 		{
 			name: "unknown field",
 			write: func(c net.Conn) error {
-				body := []byte(`{"args":["ls"],"session_id":"` + secret + `"}`)
+				body := []byte(`{"id":1,"args":["ls"],"session_id":"` + secret + `"}`)
 				return sys.WriteMonitorFrame(c, sys.MonitorFrameAuthorize, body)
 			},
 		},
 		{
 			name: "trailing junk",
 			write: func(c net.Conn) error {
-				return sys.WriteMonitorFrame(c, sys.MonitorFrameAuthorize, []byte(`{"args":["ls"]}{"a":1}`))
+				return sys.WriteMonitorFrame(c, sys.MonitorFrameAuthorize, []byte(`{"id":1,"args":["ls"]}{"a":1}`))
 			},
 		},
 		{
 			name: "empty args",
 			write: func(c net.Conn) error {
-				return sys.WriteMonitorFrame(c, sys.MonitorFrameAuthorize, []byte(`{"args":[]}`))
+				return sys.WriteMonitorFrame(c, sys.MonitorFrameAuthorize, []byte(`{"id":1,"args":[]}`))
 			},
 		},
 		{
 			name: "nul arg",
 			write: func(c net.Conn) error {
-				body := []byte(`{"args":["` + secret + `\u0000"]}`)
+				body := []byte(`{"id":1,"args":["` + secret + `\u0000"]}`)
 				return sys.WriteMonitorFrame(c, sys.MonitorFrameAuthorize, body)
+			},
+		},
+		{
+			name: "missing id",
+			write: func(c net.Conn) error {
+				return sys.WriteMonitorFrame(c, sys.MonitorFrameAuthorize, []byte(`{"args":["ls"]}`))
 			},
 		},
 		{
@@ -274,7 +280,7 @@ func TestServeSSHMonitorHappy(t *testing.T) {
 	if err != nil || typ != sys.MonitorFramePing || len(payload) != 0 {
 		t.Fatalf("ping type=%d payload=%d err=%v", typ, len(payload), err)
 	}
-	body, err := json.Marshal(sys.MonitorAuthRequest{Args: []string{"ls", "-l"}})
+	body, err := json.Marshal(sys.MonitorAuthRequest{ID: 41, Args: []string{"ls", "-l"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +288,7 @@ func TestServeSSHMonitorHappy(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := readAuth(t, client)
-	if !resp.OK || resp.Error != "" {
+	if !resp.OK || resp.Error != "" || resp.ID != 41 || resp.ArgsDigest != sys.MonitorArgsDigest([]string{"ls", "-l"}) {
 		t.Fatalf("resp = %+v", resp)
 	}
 	if calls.Load() != 1 {
@@ -301,9 +307,11 @@ func TestServeSSHMonitorGateErrorKeepsConnection(t *testing.T) {
 		}
 		return nil
 	})
+	var next uint64 = 5
 	writeAuth := func(args []string) {
 		t.Helper()
-		body, err := json.Marshal(sys.MonitorAuthRequest{Args: args})
+		next++
+		body, err := json.Marshal(sys.MonitorAuthRequest{ID: next, Args: args})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -332,7 +340,7 @@ func TestServeSSHMonitorSessionGone(t *testing.T) {
 		calls.Add(1)
 		return nil
 	})
-	body, err := json.Marshal(sys.MonitorAuthRequest{Args: []string{"ls"}})
+	body, err := json.Marshal(sys.MonitorAuthRequest{ID: 1, Args: []string{"ls"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +348,7 @@ func TestServeSSHMonitorSessionGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := readAuth(t, client)
-	if resp.OK || resp.Error != "adssh: ssh monitor: session is gone" {
+	if resp.OK || resp.Error != "adssh: ssh monitor: session is gone" || resp.ID != 1 {
 		t.Fatalf("resp = %+v", resp)
 	}
 	if calls.Load() != 0 {
@@ -364,7 +372,7 @@ func TestServeSSHMonitorDoesNotEchoArgument(t *testing.T) {
 	client, capc := dialMonitor(t, id, func([]string) error {
 		return errors.New("denied")
 	})
-	body, err := json.Marshal(sys.MonitorAuthRequest{Args: []string{"sekret-arg"}})
+	body, err := json.Marshal(sys.MonitorAuthRequest{ID: 1, Args: []string{"sekret-arg"}})
 	if err != nil {
 		t.Fatal(err)
 	}

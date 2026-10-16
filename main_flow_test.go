@@ -121,3 +121,53 @@ func TestEvalLineScriptRunsFlowBetweenCommands(t *testing.T) {
 		t.Fatalf("stdout %q", out.String())
 	}
 }
+
+func TestEvalOnceStarlarkRunsOnce(t *testing.T) {
+	sess, _, _ := flowSession(t, nil)
+	calls := 0
+	sess.Globals["bump"] = starlark.NewBuiltin("bump", func(_ *starlark.Thread, _ *starlark.Builtin, _ starlark.Tuple, _ []starlark.Tuple) (starlark.Value, error) {
+		calls++
+		return starlark.None, nil
+	})
+	if err := evalOnce(sess, "print(bump() + 1)"); err == nil {
+		t.Fatal("expected a Starlark error")
+	}
+	if calls != 1 {
+		t.Fatalf("bump ran %d times", calls)
+	}
+	if err := evalOnce(sess, "x = bump()"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("statement ran bump %d times total", calls)
+	}
+}
+
+// A def in one script chunk must be callable from a later chunk.
+func TestEvalLineScriptMergesStarlarkBindings(t *testing.T) {
+	sess, _, _ := flowSession(t, nil)
+	src := "def twice(n):\n    return n * 2\n\nx = twice(21)\n"
+	if err := evalLineScript(sess, src); err != nil {
+		t.Fatalf("script: %v", err)
+	}
+	if got := sess.Globals["x"]; got == nil || got.String() != "42" {
+		t.Fatalf("binding not merged; x = %v", got)
+	}
+}
+
+func TestEvalOnceSkipsReservedBindings(t *testing.T) {
+	sess, _, errOut := flowSession(t, nil)
+	before := sess.Globals["SESSION_ID"]
+	if err := evalOnce(sess, "SESSION_ID = \"bob-session\"\nkept = 1\n"); err != nil {
+		t.Fatal(err)
+	}
+	if sess.Globals["SESSION_ID"] != before {
+		t.Fatalf("SESSION_ID = %v, want %v", sess.Globals["SESSION_ID"], before)
+	}
+	if sess.Globals["kept"] == nil {
+		t.Fatal("ordinary binding not merged")
+	}
+	if !strings.Contains(errOut.String(), "SESSION_ID") {
+		t.Fatalf("no warning: %q", errOut.String())
+	}
+}

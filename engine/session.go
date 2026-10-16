@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/afterdarksys/adssh/internal/starlarkext"
 	"github.com/afterdarksys/adssh/internal/sys"
@@ -29,6 +30,11 @@ import (
 // Session owns all per-session state that used to live in process globals or in
 // a shallow-copied shared Starlark dict. Everything here is constructed fresh in
 // NewSession; nothing is shared between two Sessions.
+//
+// NewSession binds SessionID to User on the session's security engine, and
+// every gate (shell commands, GateProgram, sys.exec_cmd) authorizes as that
+// principal. Call Close when the session ends to release the binding; after
+// Close, gate calls for that session ID are denied as identity unknown.
 type Session struct {
 	// SessionID identifies this session (also stored as Globals["SESSION_ID"]).
 	SessionID string
@@ -62,14 +68,27 @@ type Session struct {
 
 	// engine is the security engine this session's runner authorizes through.
 	engine *security.Engine
+	// bound is true when NewSession bound SessionID on engine; Close unbinds.
+	bound     bool
+	closeOnce sync.Once
 }
 
 // SessionOptions configures NewSession. The zero value is usable: it produces an
 // unrestricted session bound to the process-global default security engine, with
 // discarded I/O and the process cwd as its working directory.
+//
+// An empty SessionID is generated. User (with Groups) is the principal the
+// session authorizes as; the host must have authenticated it. An empty User
+// binds the current OS user and its groups at construction time, unless
+// SessionID is already registered in the process session registry (the
+// adssh binary's local REPL), in which case that registration supplies the
+// identity.
 type SessionOptions struct {
-	SessionID   string
-	User        string
+	SessionID string
+	User      string
+	// Groups are the policy groups of User (input.groups). Ignored when User
+	// is empty.
+	Groups      []string
 	Restricted  bool
 	In          io.Reader
 	Out         io.Writer
@@ -87,9 +106,45 @@ type SessionOptions struct {
 	ExecMiddleware []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc
 }
 
-// NewSession builds a fully isolated Session. It fails only if the shell runner
+// NewSession builds a fully isolated Session. It fails if the session identity
+// cannot be bound (no OS user for a zero-value User, or the session ID is
+// already bound to another principal on the engine) or if the shell runner
 // cannot be constructed.
 func NewSession(opts SessionOptions) (*Session, error) {
+	if opts.Engine == nil {
+		opts.Engine = security.DefaultEngine()
+	}
+	if opts.SessionID == "" {
+		opts.SessionID = sys.GenerateSessionID()
+		for sys.GetSession(opts.SessionID) != nil {
+			opts.SessionID = sys.GenerateSessionID()
+		}
+	}
+	// Bind the principal explicitly on this engine so the gate never falls
+	// back to the process identity for this named session.
+	bound := false
+	switch {
+	case opts.User != "":
+		if err := opts.Engine.BindSessionIdentity(opts.SessionID, opts.User, opts.Groups); err != nil {
+			return nil, err
+		}
+		bound = true
+	case sys.GetSession(opts.SessionID) != nil:
+		opts.User = sys.GetSession(opts.SessionID).User
+	default:
+		user, groups := security.CurrentOSIdentity()
+		if err := opts.Engine.BindSessionIdentity(opts.SessionID, user, groups); err != nil {
+			return nil, err
+		}
+		opts.User = user
+		bound = true
+	}
+	unbind := func() {
+		if bound {
+			opts.Engine.UnbindSessionIdentity(opts.SessionID)
+		}
+	}
+
 	dir := opts.Dir
 	if dir == "" {
 		if cwd, err := os.Getwd(); err == nil {
@@ -137,6 +192,7 @@ func NewSession(opts SessionOptions) (*Session, error) {
 		Restricted: opts.Restricted,
 		Globals:    globals,
 		Dirs:       dirs,
+		SessionID:  opts.SessionID,
 	}
 
 	// Session-aware security interceptor, then any caller middleware (sentinel).
@@ -162,9 +218,10 @@ func NewSession(opts SessionOptions) (*Session, error) {
 		interp.StdIO(in, out, errW),
 		interp.CallHandler(callGate),
 		interp.ExecHandlers(handlers...),
-		interp.OpenHandler(security.VirtualOpenHandler()),
+		interp.OpenHandler(opts.Engine.OpenHandlerSession(state)),
 	)
 	if err != nil {
+		unbind()
 		return nil, err
 	}
 
@@ -181,7 +238,20 @@ func NewSession(opts SessionOptions) (*Session, error) {
 		Err:         errW,
 		HistoryFile: opts.HistoryFile,
 		engine:      opts.Engine,
+		bound:       bound,
 	}, nil
+}
+
+// Close releases this session's identity binding on its engine. Later gate
+// calls for SessionID are denied as identity unknown. Close is idempotent and
+// does not stop a command that is already running.
+func (s *Session) Close() error {
+	s.closeOnce.Do(func() {
+		if s.bound && s.engine != nil {
+			s.engine.UnbindSessionIdentity(s.SessionID)
+		}
+	})
+	return nil
 }
 
 // GateProgram runs the DeclClause-keyword authorization pre-scan (export/
@@ -196,6 +266,7 @@ func (s *Session) GateProgram(node syntax.Node) error {
 		Restricted: s.Restricted,
 		Globals:    s.Globals,
 		Dirs:       s.Dirs,
+		SessionID:  s.SessionID,
 	}
 	if s.engine != nil {
 		return s.engine.GateProgramSession(state, node)

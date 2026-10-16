@@ -17,9 +17,16 @@ import (
 
 // handleRunShell returns a tool handler that executes POSIX shell commands.
 // Uses the same runner construction as starlarkext/exec.go: separate stdout/stderr
-// buffers, BashInterceptor for policy enforcement on subcommands, VirtualOpenHandler.
+// buffers, BashInterceptor for policy enforcement on subcommands, OpenInterceptorSession.
 // Returns structured output with exit_code, stdout, stderr.
+//
+// The session id is read once, when the handler is built. A later write to
+// the SESSION_ID global does not move the gate or vbins.
 func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHandlerFunc {
+	sid := ""
+	if v, ok := globals["SESSION_ID"].(starlark.String); ok {
+		sid = string(v)
+	}
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cmd, err := req.RequireString("command")
 		if err != nil {
@@ -38,18 +45,15 @@ func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHan
 			return mcp.NewToolResultError(fmt.Sprintf("parse error: %v", err)), nil
 		}
 
-		sid := ""
-		if v, ok := globals["SESSION_ID"].(starlark.String); ok {
-			sid = string(v)
-		}
+		state := &security.SessionState{Restricted: restricted, Globals: globals, SessionID: sid}
 		// Separate stdout and stderr buffers (MCP-03: returns exit_code, stdout, stderr)
 		var stdout, stderr bytes.Buffer
 		runner, err := interp.New(
 			interp.Env(security.NewSessionEnviron(sid)),
 			interp.StdIO(nil, &stdout, &stderr),
-			interp.CallHandler(security.CallInterceptor(restricted, globals)),
-			interp.ExecHandlers(security.BashInterceptor(restricted, globals), security.SessionExecHandler),
-			interp.OpenHandler(security.VirtualOpenHandler()),
+			interp.CallHandler(security.CallInterceptorSession(state)),
+			interp.ExecHandlers(security.BashInterceptorSession(state), security.SessionExecHandler),
+			interp.OpenHandler(security.OpenInterceptorSession(state)),
 		)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("runner init error: %v", err)), nil
@@ -57,7 +61,7 @@ func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHan
 
 		// DeclClause keywords (export/readonly/declare/...) bypass the call and
 		// exec handlers; gate them via the AST pre-scan before running.
-		if err := security.GateProgram(restricted, parserFile); err != nil {
+		if err := security.GateProgramSession(state, parserFile); err != nil {
 			if logErr := security.LogCommand("MCP:run_shell", cmd); logErr != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("exec error: %v (audit: %v)", err, logErr)), nil
 			}

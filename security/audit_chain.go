@@ -8,11 +8,14 @@ import (
 	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // ChainEntry is one line in the audit ledger.
@@ -62,9 +65,6 @@ func (e *Engine) InitChain(ledgerPath, keyPath, sessionID string) error {
 	e.chainPath = ledgerPath
 	e.chainSession = sessionID
 	e.chainKey = key
-	e.chainTailKnown = false
-	e.chainPrevHash = ""
-	e.chainNextSeq = 0
 	return nil
 }
 
@@ -75,24 +75,116 @@ func InitChain(ledgerPath, keyPath, sessionID string) error {
 	return defaultEngine.InitChain(ledgerPath, keyPath, sessionID)
 }
 
-// loadOrCreateChainKey reads the HMAC key from path, or generates and writes a new one.
-func loadOrCreateChainKey(path string) ([]byte, error) {
+// chainKeyError is the refusal for a key file that exists but cannot be used.
+type chainKeyError struct {
+	path  string
+	cause error
+}
+
+func (e *chainKeyError) Error() string {
+	msg := fmt.Sprintf("audit chain key %s is unreadable or the wrong size; restore it from backup or move it aside to start a new ledger", e.path)
+	if e.cause != nil {
+		return msg + ": " + e.cause.Error()
+	}
+	return msg
+}
+
+func (e *chainKeyError) Unwrap() error { return e.cause }
+
+// asChainKeyError keeps a chainKeyError as is and wraps any other error.
+func asChainKeyError(path string, err error) error {
+	var keyErr *chainKeyError
+	if errors.As(err, &keyErr) {
+		return err
+	}
+	return &chainKeyError{path: path, cause: err}
+}
+
+// readChainKey reads an existing key. A file that cannot be read or is not
+// exactly 32 bytes is an error, never a reason to make a new key.
+func readChainKey(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
-	if err == nil && len(data) == 32 {
-		return data, nil
+	if err != nil {
+		return nil, err
+	}
+	if len(data) != 32 {
+		return nil, &chainKeyError{path: path}
+	}
+	return data, nil
+}
+
+// loadOrCreateChainKey reads the HMAC key from path, or creates it when no
+// file exists there.
+//
+// Threats: adssh and adssh-mcp share the default key path, so two processes
+// can start together on a fresh host. The key is written in full to a 0600
+// temp file in the same directory, synced, and then hard-linked to path; the
+// link fails if path already exists, so the first creator wins and every
+// other creator reads the winner's key instead of overwriting it. A reader
+// never sees a partial key. An existing key file is never replaced: one that
+// cannot be read or is not exactly 32 bytes is an error, because a new key
+// would orphan the ledger. Not covered: filesystems without hard links (the
+// create fails closed) and a key file removed while processes run.
+func loadOrCreateChainKey(path string) ([]byte, error) {
+	key, err := readChainKey(path)
+	if err == nil {
+		return key, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, asChainKeyError(path, err)
 	}
 
-	// Generate new 32-byte key
-	key := make([]byte, 32)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("create key dir: %w", err)
+	}
+	key = make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
-		return nil, fmt.Errorf("generate key: %v", err)
+		return nil, fmt.Errorf("generate key: %w", err)
 	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return nil, fmt.Errorf("create key dir: %v", err)
+	tmp, err := os.CreateTemp(dir, ".chainkey-*")
+	if err != nil {
+		return nil, fmt.Errorf("write key: %w", err)
 	}
-	if err := os.WriteFile(path, key, 0600); err != nil {
-		return nil, fmt.Errorf("write key: %v", err)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if _, err := tmp.Write(key); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if os.IsExist(err) {
+			// Another process created the key first; use it.
+			existing, rerr := readChainKey(path)
+			if rerr != nil {
+				return nil, asChainKeyError(path, rerr)
+			}
+			return existing, nil
+		}
+		return nil, fmt.Errorf("write key: %w", err)
+	}
+	if d, err := os.Open(dir); err == nil {
+		serr := d.Sync()
+		cerr := d.Close()
+		if serr != nil {
+			return nil, fmt.Errorf("sync key dir: %w", serr)
+		}
+		if cerr != nil {
+			return nil, fmt.Errorf("sync key dir: %w", cerr)
+		}
+	} else {
+		return nil, fmt.Errorf("sync key dir: %w", err)
 	}
 	return key, nil
 }
@@ -155,11 +247,44 @@ func currentHostname() string {
 	return h
 }
 
-// readLastChainLine reads the last non-empty line of the ledger.
-// A missing or empty file starts at seq 0. A file that exists but cannot be
-// read, or a last line that does not parse, is an error. Callers must not
-// treat that error as a new genesis entry.
-func readLastChainLine(path string) (prevHash string, nextSeq int64, err error) {
+// chainLockTimeout bounds how long AppendChain waits for another process
+// that holds the ledger lock. A stuck holder makes the append fail closed
+// instead of hanging the gate.
+const chainLockTimeout = 5 * time.Second
+
+// chainLockPoll is the retry interval while the ledger lock is held elsewhere.
+const chainLockPoll = 10 * time.Millisecond
+
+// lockChainFile takes an exclusive advisory lock on f, retrying a
+// non-blocking flock until chainLockTimeout passes. The lock belongs to the
+// open file description and is released when f is closed.
+func lockChainFile(f *os.File) error {
+	deadline := time.Now().Add(chainLockTimeout)
+	for {
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if err == unix.EINTR {
+			continue
+		}
+		if err != unix.EWOULDBLOCK {
+			return fmt.Errorf("audit chain: lock ledger: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("audit chain: ledger lock held by another process for more than %v", chainLockTimeout)
+		}
+		time.Sleep(chainLockPoll)
+	}
+}
+
+// readLastChainLine reads the last non-empty line of the ledger by reading
+// backward from the end, so the cost does not grow with the ledger. It checks
+// the tail entry's HMAC against key. A missing or empty file starts at seq 0.
+// A file that exists but cannot be read, a last line that does not parse, a
+// line longer than chainScanMax, or a tail whose HMAC does not verify is an
+// error. Callers must not treat that error as a new genesis entry.
+func readLastChainLine(path string, key []byte) (prevHash string, nextSeq int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -169,34 +294,85 @@ func readLastChainLine(path string) (prevHash string, nextSeq int64, err error) 
 	}
 	defer f.Close()
 
-	var lastLine string
-	scanner := newChainScanner(f)
-	for scanner.Scan() {
-		if line := scanner.Text(); strings.TrimSpace(line) != "" {
-			lastLine = line
-		}
-	}
-	if err := scanner.Err(); err != nil {
+	info, err := f.Stat()
+	if err != nil {
 		return "", 0, err
 	}
-	if lastLine == "" {
-		return "", 0, nil
-	}
+	end := info.Size()
 
+	// Collect bytes from the end until the buffer holds one whole non-empty
+	// line: a newline before some non-whitespace, or the start of the file.
+	const block = 64 * 1024
+	var buf []byte
+	pos := end
+	for {
+		trimmed := strings.TrimRight(string(buf), " \t\r\n")
+		if trimmed != "" {
+			if i := strings.LastIndexByte(trimmed, '\n'); i >= 0 || pos == 0 {
+				lastLine := strings.TrimSpace(trimmed[i+1:])
+				if len(lastLine) > chainScanMax {
+					return "", 0, fmt.Errorf("%w: tail line exceeds %d bytes", errChainTailUnverified, chainScanMax)
+				}
+				return parseChainTail(lastLine, key)
+			}
+		} else if pos == 0 {
+			return "", 0, nil
+		}
+		if int64(len(buf)) > chainScanMax+block {
+			return "", 0, fmt.Errorf("%w: tail line exceeds %d bytes", errChainTailUnverified, chainScanMax)
+		}
+		n := int64(block)
+		if pos < n {
+			n = pos
+		}
+		pos -= n
+		chunk := make([]byte, n)
+		if _, err := f.ReadAt(chunk, pos); err != nil {
+			return "", 0, err
+		}
+		buf = append(chunk, buf...)
+	}
+}
+
+// errChainTailUnverified marks a ledger tail that does not parse or verify.
+var errChainTailUnverified = errors.New("audit chain")
+
+// parseChainTail parses the tail entry and checks its HMAC over its own
+// prev_hash. A tail that does not verify was written without the key or
+// changed afterward, so the next entry must not chain onto it.
+func parseChainTail(line string, key []byte) (prevHash string, nextSeq int64, err error) {
 	var entry ChainEntry
-	if err := json.Unmarshal([]byte(lastLine), &entry); err != nil {
-		return "", 0, fmt.Errorf("audit chain: corrupt tail: %w", err)
+	if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		return "", 0, fmt.Errorf("%w: corrupt tail: %v", errChainTailUnverified, err)
 	}
 	if entry.Hash == "" {
-		return "", 0, fmt.Errorf("audit chain: corrupt tail: empty hash")
+		return "", 0, fmt.Errorf("%w: corrupt tail: empty hash", errChainTailUnverified)
+	}
+	want, err := computeHash(key, entry.PrevHash, entry)
+	if err != nil {
+		return "", 0, err
+	}
+	if !hmac.Equal([]byte(want), []byte(entry.Hash)) {
+		return "", 0, fmt.Errorf("%w: tail entry seq %d fails HMAC check", errChainTailUnverified, entry.Seq)
 	}
 	return entry.Hash, entry.Seq + 1, nil
 }
 
 // AppendChain appends a new entry to the HMAC chain ledger and Syncs it.
-// It is a no-op if InitChain has not been called. The tail cache advances
-// only after Sync succeeds. A write or Sync failure forgets the cache so the
-// next append rescans and fails closed on a partial line.
+// It is a no-op if InitChain has not been called.
+//
+// Threats: one ledger may be shared by cooperating processes on one host that
+// hold the same key (adssh and adssh-mcp default to the same path, and two
+// REPL windows do too). Each append takes an exclusive flock on the ledger,
+// reads the tail from disk under that lock, and writes and Syncs before the
+// lock is released, so processes cannot fork the chain into duplicate seqs.
+// The in-memory tail is a record of this engine's last write, never the
+// source of the next seq. A tail whose HMAC does not verify, or a partial
+// tail line, fails the append closed. A lock held longer than
+// chainLockTimeout fails the append closed rather than hanging the gate.
+// Not covered: sharing a ledger across hosts (flock over NFS or other network
+// filesystems is not reliable), writers that ignore the lock, and truncation
+// of the most recent entries, which VerifyChain cannot see.
 func (e *Engine) AppendChain(entry ChainEntry) error {
 	e.chainMu.Lock()
 	defer e.chainMu.Unlock()
@@ -205,17 +381,28 @@ func (e *Engine) AppendChain(entry ChainEntry) error {
 		return nil
 	}
 
-	if !e.chainTailKnown {
-		prevHash, nextSeq, err := readLastChainLine(e.chainPath)
-		if err != nil {
-			return err
-		}
-		e.chainPrevHash = prevHash
-		e.chainNextSeq = nextSeq
-		e.chainTailKnown = true
+	if err := os.MkdirAll(filepath.Dir(e.chainPath), 0700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(e.chainPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	// Closing f releases the flock, after the write has been Synced.
+	defer f.Close()
+	if err := lockChainFile(f); err != nil {
+		return err
 	}
 
-	entry.Seq = e.chainNextSeq
+	prevHash, nextSeq, err := readLastChainLine(e.chainPath, e.chainKey)
+	if err != nil {
+		if errors.Is(err, errChainTailUnverified) {
+			return fmt.Errorf("%w; the ledger tail does not verify; rotate the ledger (move %s aside) to continue — do not edit it", err, e.chainPath)
+		}
+		return err
+	}
+
+	entry.Seq = nextSeq
 	entry.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	if entry.SessionID == "" {
 		entry.SessionID = e.chainSession
@@ -226,8 +413,8 @@ func (e *Engine) AppendChain(entry ChainEntry) error {
 	if entry.Hostname == "" {
 		entry.Hostname = currentHostname()
 	}
-	entry.PrevHash = e.chainPrevHash
-	hash, err := computeHash(e.chainKey, e.chainPrevHash, entry)
+	entry.PrevHash = prevHash
+	hash, err := computeHash(e.chainKey, prevHash, entry)
 	if err != nil {
 		return err
 	}
@@ -237,32 +424,13 @@ func (e *Engine) AppendChain(entry ChainEntry) error {
 	if err != nil {
 		return err
 	}
-
-	if err := os.MkdirAll(filepath.Dir(e.chainPath), 0700); err != nil {
-		e.chainTailKnown = false
-		return err
-	}
-
-	f, err := os.OpenFile(e.chainPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		e.chainTailKnown = false
-		return err
-	}
-	defer f.Close()
+	data = append(data, '\n')
 	if _, err := f.Write(data); err != nil {
-		e.chainTailKnown = false
-		return err
-	}
-	if _, err := f.Write([]byte("\n")); err != nil {
-		e.chainTailKnown = false
 		return err
 	}
 	if err := syncFile(f); err != nil {
-		e.chainTailKnown = false
 		return err
 	}
-	e.chainPrevHash = entry.Hash
-	e.chainNextSeq = entry.Seq + 1
 	return nil
 }
 

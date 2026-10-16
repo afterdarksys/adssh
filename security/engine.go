@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/syslog"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/open-policy-agent/opa/rego"
@@ -79,14 +80,11 @@ type Engine struct {
 	// hmac chain — chainMu also guards auditChangeID and the tail cache.
 	// The cache is valid for one process and one ledger. Another process
 	// appending to the same file is outside the contract.
-	chainMu        sync.Mutex
-	chainPath      string
-	chainKey       []byte
-	chainSession   string
-	auditChangeID  string
-	chainTailKnown bool
-	chainPrevHash  string
-	chainNextSeq   int64
+	chainMu       sync.Mutex
+	chainPath     string
+	chainKey      []byte
+	chainSession  string
+	auditChangeID string
 
 	// active change-management tickets, keyed by authenticated session ID.
 	// The empty key is retained for legacy single-session package APIs.
@@ -111,6 +109,83 @@ type Engine struct {
 	// last denial, keyed by authenticated session ID.
 	denialMu    sync.RWMutex
 	lastDenials map[string]CommandExplanation
+
+	// identities binds a session ID to the principal it authorizes as. It is
+	// consulted before the process-global sys session registry, so an embedded
+	// session never borrows the host identity or another engine's binding.
+	identityMu sync.RWMutex
+	identities map[string]sessionIdentity
+}
+
+// sessionIdentity is the principal bound to one session ID on one engine.
+// refs counts identical bindings so the last Unbind removes it.
+type sessionIdentity struct {
+	user   string
+	groups []string
+	refs   int
+}
+
+// BindSessionIdentity binds sessionID to user and groups on this engine. Policy
+// evaluation for that session ID then sees exactly this principal.
+//
+// Threats: it stops a named session from authorizing as the host process
+// user and stops a second caller from rebinding a live session ID to another
+// principal. It does not authenticate user; the host must. Rebinding an ID to
+// the same principal is counted and needs a matching Unbind.
+func (e *Engine) BindSessionIdentity(sessionID, user string, groups []string) error {
+	if sessionID == "" {
+		return fmt.Errorf("adssh: session identity: empty session ID")
+	}
+	if user == "" {
+		return fmt.Errorf("adssh: session identity: empty user")
+	}
+	e.identityMu.Lock()
+	defer e.identityMu.Unlock()
+	if e.identities == nil {
+		e.identities = map[string]sessionIdentity{}
+	}
+	if cur, ok := e.identities[sessionID]; ok {
+		if cur.user != user || !slices.Equal(cur.groups, groups) {
+			return fmt.Errorf("adssh: session identity: session %s is already bound to another principal", sessionID)
+		}
+		cur.refs++
+		e.identities[sessionID] = cur
+		return nil
+	}
+	e.identities[sessionID] = sessionIdentity{
+		user:   user,
+		groups: append([]string(nil), groups...),
+		refs:   1,
+	}
+	return nil
+}
+
+// UnbindSessionIdentity releases one binding of sessionID. When the last
+// binding goes, the session ID is unknown to this engine again and named
+// gate calls for it are denied.
+func (e *Engine) UnbindSessionIdentity(sessionID string) {
+	e.identityMu.Lock()
+	defer e.identityMu.Unlock()
+	cur, ok := e.identities[sessionID]
+	if !ok {
+		return
+	}
+	cur.refs--
+	if cur.refs <= 0 {
+		delete(e.identities, sessionID)
+		return
+	}
+	e.identities[sessionID] = cur
+}
+
+func (e *Engine) boundIdentity(sessionID string) (string, []string, bool) {
+	e.identityMu.RLock()
+	defer e.identityMu.RUnlock()
+	cur, ok := e.identities[sessionID]
+	if !ok {
+		return "", nil, false
+	}
+	return cur.user, append([]string(nil), cur.groups...), true
 }
 
 // defaultEngine is the process-global engine that every package-level shim
@@ -127,6 +202,7 @@ func newDefaultEngine() *Engine {
 		vbins:       map[string]VirtualBinary{},
 		cmTickets:   map[string]cmTicketState{},
 		lastDenials: map[string]CommandExplanation{},
+		identities:  map[string]sessionIdentity{},
 	}
 }
 
@@ -166,6 +242,7 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		vbins:       map[string]VirtualBinary{},
 		cmTickets:   map[string]cmTicketState{},
 		lastDenials: map[string]CommandExplanation{},
+		identities:  map[string]sessionIdentity{},
 	}
 
 	// Seed the vbin registry from the package default (built by init()).
@@ -205,6 +282,9 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		}
 	}
 
+	if cfg.AuditLogURL != "" && cfg.AuditLogPath == "" {
+		return nil, fmt.Errorf("engine: AuditLogURL is set but AuditLogPath is empty; the webhook sink needs the audit logger")
+	}
 	if cfg.AuditLogPath != "" {
 		if err := e.InitAuditLog(cfg.AuditLogPath, cfg.AuditLogURL, cfg.AuditLogToken); err != nil {
 			return nil, err

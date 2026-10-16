@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -172,7 +173,23 @@ func main() {
 		}
 	}
 
+	// The local process identity is the OS account this binary runs as, taken
+	// from the kernel, not from $USER, which the caller can set to anything.
+	localUser, localGroups, err := localIdentity()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+		os.Exit(1)
+	}
+
 	if sahMode {
+		// sah never registers a session, so the identity is bound on the
+		// engine directly; an unbound session id is denied as unknown. The
+		// REPL below registers its session instead, so elevation and agent
+		// claims from the registry stay visible to policy.
+		if err := eng.Security().BindSessionIdentity(sessionID, localUser, localGroups); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+			os.Exit(1)
+		}
 		os.Exit(runSAH(eng.Security(), sessionID))
 	}
 
@@ -192,7 +209,7 @@ func main() {
 	outCast := sys.NewOutputBroadcaster(os.Stdout)
 	localSession := &sys.Session{
 		ID:   sessionID,
-		User: os.Getenv("USER"),
+		User: localUser,
 		Out:  outCast,
 	}
 	if err := sys.RegisterSession(localSession); err != nil {
@@ -232,30 +249,22 @@ func main() {
 			fmt.Fprintf(errOut, "adssh: ssh session: pty is not a file\n")
 			return
 		}
+		// History, profile, and rc paths come from the target user's home,
+		// not from this listener's config.
 		err := sys.SpawnSSHSession(sys.SSHSessionSpec{
-			SessionID:   sessionID,
-			User:        user,
-			Principals:  principals,
-			Restricted:  cfg.Restricted,
-			MenuPath:    eng.Security().GetMenuForUser(user, principals),
-			HistoryFile: cfg.HistoryFile,
-			ProfilePath: cfg.ProfilePath,
-			RCPath:      cfg.RCPath,
-			PTY:         slave,
+			SessionID:  sessionID,
+			User:       user,
+			Principals: principals,
+			Restricted: cfg.Restricted,
+			MenuPath:   eng.Security().GetMenuForUser(user, principals),
+			PTY:        slave,
 		})
 		if err != nil {
 			fmt.Fprintf(errOut, "adssh: %v\n", err)
 		}
 	}
 	gatewayAuthorizer := func(req sys.GatewayAuthRequest) error {
-		return eng.Security().AuthorizeGateway(security.GatewayPolicyRequest{
-			SessionID:  req.SessionID,
-			User:       req.User,
-			Groups:     req.Principals,
-			Action:     "direct-tcpip",
-			TargetHost: req.TargetHost,
-			TargetPort: req.TargetPort,
-		})
+		return eng.Security().AuthorizeGateway(directTCPIPPolicyRequest(req))
 	}
 
 	// 6b. Inject SSH management builtins into `sys` dict
@@ -265,13 +274,15 @@ func main() {
 			if err := starlark.UnpackArgs(b.Name(), args, kwargs, "address", &addr); err != nil {
 				return nil, err
 			}
-			if err := sys.EnableSSH(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter, gatewayAuthorizer); err != nil {
+			if err := enableSSHWithHangup(func() error {
+				return sys.EnableSSHWithOptions(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot}, sshStarter, gatewayAuthorizer)
+			}); err != nil {
 				return nil, err
 			}
 			return starlark.None, nil
 		})
 		disableSSH := starlark.NewBuiltin("disable_ssh", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
-			if err := sys.DisableSSH(); err != nil {
+			if err := disableSSHClearHangup(sys.DisableSSH); err != nil {
 				return nil, err
 			}
 			return starlark.None, nil
@@ -300,10 +311,13 @@ func main() {
 	}
 
 	if cfg.ServeAddr != "" {
-		if err := sys.EnableSSH(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sshStarter, gatewayAuthorizer); err != nil {
+		if err := sys.EnableSSHWithOptions(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot}, sshStarter, gatewayAuthorizer); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start SSH server: %v\n", err)
 			os.Exit(1)
 		}
+		// SIGHUP on the listener stops new logins and leaves running SSH
+		// sessions alone instead of exiting.
+		onHangup(listenerHangup)
 	}
 
 	// Instrumentation agent: a hardened HTTP listener that runs only NAMED,
@@ -387,18 +401,17 @@ func evalOnce(sess *engine.Session, src string) error {
 	mode := parser.DetermineMode(src)
 
 	if mode == parser.ModeStarlark {
-		// Try expression first
-		val, err := starlark.Eval(sess.Thread, "<-c>", src, sess.Globals)
-		if err == nil {
-			if val != nil && val != starlark.None {
-				fmt.Println(val.String())
-			}
-			return nil
+		// Parse decides expression or statements, so src runs exactly once.
+		val, isExpr, newBindings, err := repl.EvalStarlarkOnce(sess.Thread, "<-c>", src, sess.Globals)
+		if err != nil {
+			return fmt.Errorf("starlark error: %v", err)
 		}
-		// Fall back to statement (def, assignment, etc.)
-		if _, err2 := starlark.ExecFile(sess.Thread, "<-c>", src, sess.Globals); err2 != nil {
-			return fmt.Errorf("starlark error: %v", err2)
+		if isExpr && val != nil && val != starlark.None {
+			fmt.Println(val.String())
 		}
+		// A def or assignment in one script chunk is visible to the next.
+		// Reserved session names are not merged.
+		repl.MergeStarlarkBindings(sess.Globals, newBindings, sess.Err)
 		return nil
 	}
 
@@ -465,9 +478,15 @@ func sahExecute(sec *security.Engine, sessionID string, command []string) (strin
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// The child sees an allowlisted environment, never the listener's
+	// ADSSH_* settings or tokens, and its output is capped while it runs so a
+	// policy-allowed `yes` cannot grow memory for the 30 seconds.
+	cmd.Env = sahChildEnv()
+	cmd.WaitDelay = 2 * time.Second
+	stdout := &sahCappedBuffer{limit: sahOutputCap}
+	stderr := &sahCappedBuffer{limit: sahOutputCap}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	runErr := cmd.Run()
 	out := security.RedactSensitiveText(stdout.String())
 	errOut := security.RedactSensitiveText(stderr.String())
@@ -480,6 +499,65 @@ func sahExecute(sec *security.Engine, sessionID string, command []string) (strin
 	}
 	return "", "", 0, errors.New("execute_failed")
 }
+
+// localIdentity resolves the account this process runs as and its group
+// names. A resolution failure is an error, not a fallback to $USER.
+func localIdentity() (string, []string, error) {
+	u, err := osuser.Current()
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve local user: %v", err)
+	}
+	if u.Username == "" {
+		return "", nil, errors.New("resolve local user: empty username")
+	}
+	var groups []string
+	if gids, err := u.GroupIds(); err == nil {
+		for _, gid := range gids {
+			if g, err := osuser.LookupGroupId(gid); err == nil {
+				groups = append(groups, g.Name)
+			}
+		}
+	}
+	return u.Username, groups, nil
+}
+
+// sahOutputCap bounds each of stdout and stderr captured from a sah child.
+// The frame response caps again at 4 KiB; this cap exists so the buffer
+// stops growing while the child is still running.
+const sahOutputCap = 64 * 1024
+
+// sahChildEnv is the environment a sah child receives: locale and path only,
+// plus the caller's HOME, USER and LOGNAME. Nothing named ADSSH_* and no
+// token-looking variable crosses into the child.
+func sahChildEnv() []string {
+	env := make([]string, 0, 8)
+	for _, name := range []string{"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TERM"} {
+		if v, ok := os.LookupEnv(name); ok && v != "" {
+			env = append(env, name+"="+v)
+		}
+	}
+	return env
+}
+
+// sahCappedBuffer keeps the first limit bytes written and reports every write
+// as complete so the child is not killed with EPIPE.
+type sahCappedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *sahCappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := b.limit - b.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		b.buf.Write(p)
+	}
+	return n, nil
+}
+
+func (b *sahCappedBuffer) String() string { return b.buf.String() }
 
 func printHelp() {
 	fmt.Print(`adssh — programmable DevOps shell
@@ -535,18 +613,29 @@ ENVIRONMENT VARIABLES
   ADSSH_GIT_PROMPT        Git branch in the \g prompt escape (1/true/yes/on; default off)
   ADSSH_RESTRICTED        Enable restricted mode (true/false)
   ADSSH_SERVE             SSH server address (:2222)
+  ADSSH_SSH_PERMIT_ROOT   Allow SSH login as root or any uid-0 name (1/true/yes; default off)
   ADSSH_GUARD             SSH listener jail switch (off/on; unset follows guard.yaml)
   ADSSH_GUARD_CONFIG      Jail config (default: ~/.adssh/guard.yaml)
   ADSSH_GUARD_STATE       Ban file (default: ~/.adssh/guard-state.json)
   ADSSH_POLICY            Path to Rego policy file
   ADSSH_ENTITLEMENTS      Path to entitlements YAML
   ADSSH_AUDIT_LOG         Audit log path (default: ~/.adssh/audit.log)
+  ADSSH_AUDIT_URL         SIEM webhook (https; host checked at send time, private needs ADSSH_CALLBACK_ALLOW_PRIVATE)
+  ADSSH_CONTROLPLANE_URL  Device-login control plane origin (https; unset fails closed)
+  ADSSH_OIDC_ISSUER       OIDC issuer for identity oidc import (unset fails closed)
+  ADSSH_OIDC_JWKS_URL     https JWKS URL for that issuer
+  ADSSH_OIDC_ADMIN_ISSUER Issuer for identity oidc import --provider admin
+  ADSSH_OIDC_ADMIN_JWKS_URL https JWKS URL for the admin issuer
+  ADSSH_OIDC_LOGIN_AUDIENCE Required aud for identity oidc import (unset fails closed)
+  ADSSH_OIDC_ADMIN_AUDIENCE Required aud for --provider admin (unset fails closed)
+  ADSSH_CALLBACK_ALLOW_PRIVATE Allow private-range callback hosts (1/true/yes; default off)
   ADSSH_AGENT_SERVE       Instrumentation-agent HTTP address (127.0.0.1:7777)
   ADSSH_AGENT_TOKEN       Bearer token for the instrumentation agent (required)
   ADSSH_AGENT_TASKS       Task allowlist (default: ~/.adssh/instrument-tasks.yaml)
   ADSSH_RECORD_DIR        Session recording directory (default: ~/.adssh/recordings)
   ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
   ADSSH_RC                RC script (default: ~/.adsshrc)
+  ADSSH_ADMIN_KEYS        admin serve named-key file (0600 name=key; approve/deny/unban)
 
 Run 'adssh --init' to create a starter config in ~/.adssh/
 `)
@@ -777,7 +866,12 @@ func runInit() error {
 	}
 
 	files := map[string]string{
-		"authorized_keys": "# Add SSH public keys here (one per line) to allow remote access via adssh --serve\n",
+		"authorized_keys": "# SSH public keys for adssh --serve, one per line.\n" +
+			"# Each key must name the logins it may use:\n" +
+			"#   user=\"alice\" ssh-ed25519 AAAA... alice@laptop\n" +
+			"#   user=\"alice,deploy\" ssh-ed25519 AAAA... shared\n" +
+			"# A line without user= is refused. Root needs ADSSH_SSH_PERMIT_ROOT=1.\n" +
+			"# CA keys: cert-authority ssh-ed25519 AAAA... (certs bind by principal)\n",
 
 		"policy.rego": `package adssh.authz
 
@@ -892,4 +986,52 @@ func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricte
 	}
 
 	repl.Start(globals, restricted, historyFile, in, out, errOut)
+}
+
+// directTCPIPPolicyRequest maps a listener direct-tcpip check to one gateway
+// policy decision: the requested name and the address it resolved to are
+// both in the input.
+func directTCPIPPolicyRequest(req sys.GatewayAuthRequest) security.GatewayPolicyRequest {
+	return security.GatewayPolicyRequest{
+		SessionID:  req.SessionID,
+		User:       req.User,
+		Groups:     req.Principals,
+		Action:     "direct-tcpip",
+		TargetHost: req.TargetHost,
+		TargetIP:   req.TargetIP,
+		TargetPort: req.TargetPort,
+	}
+}
+
+// onHangup is sys.OnHangup; tests replace it.
+var onHangup = sys.OnHangup
+
+// enableSSHWithHangup starts the SSH listener and, once it is running, makes
+// SIGHUP stop accepting connections instead of exiting the process.
+func enableSSHWithHangup(enable func() error) error {
+	if err := enable(); err != nil {
+		return err
+	}
+	onHangup(listenerHangup)
+	return nil
+}
+
+// disableSSHClearHangup stops the SSH listener and restores the default
+// SIGHUP action (propagate to jobs, exit).
+func disableSSHClearHangup(disable func() error) error {
+	if err := disable(); err != nil {
+		return err
+	}
+	onHangup(nil)
+	return nil
+}
+
+// listenerHangup is the --serve SIGHUP action: stop accepting SSH
+// connections, keep the running sessions and this process.
+func listenerHangup() {
+	if err := sys.StopAcceptingSSH(); err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: SIGHUP: %v\n", err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "adssh: SIGHUP: no longer accepting SSH connections; running sessions continue")
 }

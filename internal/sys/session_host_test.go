@@ -78,8 +78,8 @@ func TestRegisterSessionCapFull(t *testing.T) {
 		UnregisterSession(fresh)
 		t.Fatal("registration past the cap succeeded")
 	}
-	if err := RegisterSession(&Session{ID: filler, User: "cap"}); err != nil {
-		t.Fatalf("replacing the filler: %v", err)
+	if err := RegisterSession(&Session{ID: filler, User: "cap"}); err == nil {
+		t.Fatal("a second registration of the filler id succeeded")
 	}
 }
 

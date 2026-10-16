@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/afterdarksys/adssh/security"
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.starlark.net/starlark"
 )
@@ -34,5 +35,34 @@ func TestRunShellHonorsRequestCancellation(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("canceled MCP shell request still executed")
+	}
+}
+
+// run_shell gates under the session bound when the handler was built, not a
+// later SESSION_ID global.
+func TestRunShellUsesBoundSessionID(t *testing.T) {
+	var ids []string
+	security.SetRemoteGate(func(_ bool, _ []string, id string) error {
+		ids = append(ids, id)
+		return nil
+	})
+	t.Cleanup(func() { security.SetRemoteGate(nil) })
+	globals := starlark.StringDict{"SESSION_ID": starlark.String("mcp-real")}
+	handler := handleRunShell(globals, false)
+	globals["SESSION_ID"] = starlark.String("bob-session")
+	result, err := handler(context.Background(), shellRequest("true"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("run_shell error: %+v", result.Content)
+	}
+	if len(ids) == 0 {
+		t.Fatal("gate not called")
+	}
+	for _, id := range ids {
+		if id != "mcp-real" {
+			t.Fatalf("gate ids = %v", ids)
+		}
 	}
 }

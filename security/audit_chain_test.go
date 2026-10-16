@@ -17,9 +17,6 @@ func resetChain() {
 	defaultEngine.chainMu.Lock()
 	defer defaultEngine.chainMu.Unlock()
 	defaultEngine.chainPath, defaultEngine.chainKey, defaultEngine.chainSession = "", nil, ""
-	defaultEngine.chainTailKnown = false
-	defaultEngine.chainPrevHash = ""
-	defaultEngine.chainNextSeq = 0
 }
 
 // readChainLines reads the ledger file and returns its non-empty lines, in order.

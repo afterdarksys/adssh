@@ -2,7 +2,10 @@ package sys
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,17 +14,28 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Threats: monitor frames are length-prefixed and capped at 1 MiB. An
 // oversized length is rejected before the body is allocated. A short write
 // fails closed so the stream cannot desync. JSON objects reject unknown
-// fields and a second value. Arguments are bounded, reject NUL, and an
-// argument error does not include the argument. Empty args are rejected
-// before any gate. The client fails closed on I/O errors, a malformed
-// response, a wrong type, OK=false, or OK=true with an error. There is no
-// client deadline: four-eyes may wait for its TTL. Frames do not carry a
-// session id. Payloads are not logged.
+// fields and a second value. Arguments are bounded, must be UTF-8, reject
+// NUL, and an argument error does not include the argument. Empty args are
+// rejected before any gate. Every authorize request carries a request id;
+// a client starts at a random id and adds one per request, and the listener
+// closes the socket on a repeated, older, or skipped id. Every response
+// echoes the id and a SHA-256 of the length-prefixed arguments. The client
+// fails closed on I/O errors, a malformed response, a wrong type, an id or
+// digest that does not match the request, OK=false, or OK=true with an
+// error, and after a mismatch it refuses every later call without touching
+// the socket. A process that holds a copy of the socket can still inject
+// requests for the same session; a queued answer can only satisfy a later
+// request for the identical arguments at the identical id, which policy
+// already allowed. The session process sets FD_CLOEXEC on fd 3 so the
+// commands it runs do not inherit the socket. There is no client deadline:
+// four-eyes may wait for its TTL. Frames do not carry a session id.
+// Payloads are not logged.
 
 const (
 	MaxMonitorFrame       = 1 << 20
@@ -36,32 +50,37 @@ var (
 	errMonitorDenied          = errors.New("adssh: ssh monitor: denied")
 	errMonitorClosed          = errors.New("adssh: ssh monitor: closed")
 	errMonitorFrameTooLarge   = errors.New("adssh: ssh monitor: frame too large")
+	errMonitorDesync          = errors.New("adssh: ssh monitor: response does not match request")
 )
 
 // MonitorAuthRequest is the authorize payload. The session id is not a field:
-// the listener binds it when it accepts the socket.
+// the listener binds it when it accepts the socket. ID is the request
+// sequence number and is never zero.
 type MonitorAuthRequest struct {
+	ID   uint64   `json:"id"`
 	Args []string `json:"args"`
 }
 
-// MonitorAuthResponse is the authorize result. OK with a non-empty Error is denied.
+// MonitorAuthResponse is the authorize result. ID and ArgsDigest echo the
+// request. OK with a non-empty Error is denied.
 type MonitorAuthResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	ID         uint64 `json:"id"`
+	ArgsDigest string `json:"args_sha256"`
+	OK         bool   `json:"ok"`
+	Error      string `json:"error,omitempty"`
 }
 
 // SSHSessionSpec is the listener's description of one SSH login. The child
-// receives these values on its argv. It does not choose them.
+// receives these values on its argv. It does not choose them. History,
+// profile, and rc paths are not fields: they derive from the target user's
+// home so one user never runs another's rc.
 type SSHSessionSpec struct {
-	SessionID   string
-	User        string
-	Principals  []string
-	Restricted  bool
-	MenuPath    string
-	HistoryFile string
-	ProfilePath string
-	RCPath      string
-	PTY         *os.File
+	SessionID  string
+	User       string
+	Principals []string
+	Restricted bool
+	MenuPath   string
+	PTY        *os.File
 }
 
 var (
@@ -132,15 +151,29 @@ func ValidateMonitorArgs(args []string) error {
 		return errMonitorInvalidArgument
 	}
 	for _, arg := range args {
-		if len(arg) > maxMonitorArgLen || strings.ContainsRune(arg, 0) {
+		if len(arg) > maxMonitorArgLen || strings.ContainsRune(arg, 0) || !utf8.ValidString(arg) {
 			return errMonitorInvalidArgument
 		}
 	}
 	return nil
 }
 
+// MonitorArgsDigest binds a response to the arguments it answers. Each
+// argument is length-prefixed so boundaries cannot shift.
+func MonitorArgsDigest(args []string) string {
+	h := sha256.New()
+	var n [8]byte
+	for _, arg := range args {
+		binary.BigEndian.PutUint64(n[:], uint64(len(arg)))
+		h.Write(n[:])
+		h.Write([]byte(arg))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // DecodeMonitorAuth parses one authorize payload. Unknown fields, a second
-// JSON value, and invalid arguments fail closed. Trailing whitespace is EOF.
+// JSON value, a zero or missing id, and invalid arguments fail closed.
+// Trailing whitespace is EOF.
 func DecodeMonitorAuth(payload []byte) (MonitorAuthRequest, error) {
 	dec := json.NewDecoder(bytes.NewReader(payload))
 	dec.DisallowUnknownFields()
@@ -150,6 +183,9 @@ func DecodeMonitorAuth(payload []byte) (MonitorAuthRequest, error) {
 	}
 	var extra any
 	if err := dec.Decode(&extra); err != io.EOF {
+		return MonitorAuthRequest{}, errMonitorInvalidArgument
+	}
+	if req.ID == 0 {
 		return MonitorAuthRequest{}, errMonitorInvalidArgument
 	}
 	if err := ValidateMonitorArgs(req.Args); err != nil {
@@ -174,59 +210,94 @@ func decodeMonitorResponse(payload []byte) (MonitorAuthResponse, error) {
 
 // MonitorClient is the session process's monitor socket. The mutex covers one
 // round trip so frames cannot interleave. Methods do not set a deadline.
+// Once a round trip fails the client is broken and refuses every call.
 type MonitorClient struct {
-	conn net.Conn
-	mu   sync.Mutex
+	conn   net.Conn
+	mu     sync.Mutex
+	nextID uint64
+	broken bool
 }
 
 // NewMonitorClient wraps the monitor connection. The caller keeps it open for
-// the life of the session.
+// the life of the session. The first request id is random, so a process that
+// cannot read the socket cannot predict it. A random-source failure leaves
+// the client broken.
 func NewMonitorClient(conn net.Conn) *MonitorClient {
-	return &MonitorClient{conn: conn}
+	c := &MonitorClient{conn: conn}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		c.broken = true
+		return c
+	}
+	// 62 bits keeps the sequence far from wrapping; +1 keeps it nonzero.
+	c.nextID = binary.BigEndian.Uint64(b[:])>>2 + 1
+	return c
 }
 
 // Ping checks that the listener is answering before the REPL starts.
 func (c *MonitorClient) Ping() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.broken {
+		return errMonitorClosed
+	}
 	if err := WriteMonitorFrame(c.conn, MonitorFramePing, nil); err != nil {
+		c.broken = true
 		return errMonitorClosed
 	}
 	typ, payload, err := readMonitorClientFrame(c.conn)
 	if err != nil {
+		c.broken = true
 		return err
 	}
 	if typ != MonitorFramePing || len(payload) != 0 {
+		c.broken = true
 		return errMonitorClosed
 	}
 	return nil
 }
 
 // Authorize asks the listener to allow args. The session id is not sent.
-// Validation runs before the connection is touched.
+// Validation runs before the connection is touched. A response whose id or
+// argument digest differs from this request is a desync: the call is denied
+// and the client is broken.
 func (c *MonitorClient) Authorize(args []string) error {
 	if err := ValidateMonitorArgs(args); err != nil {
 		return err
 	}
-	body, err := json.Marshal(MonitorAuthRequest{Args: args})
-	if err != nil {
-		return errMonitorClosed
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.broken {
+		return errMonitorClosed
+	}
+	id := c.nextID
+	c.nextID++
+	body, err := json.Marshal(MonitorAuthRequest{ID: id, Args: args})
+	if err != nil {
+		c.broken = true
+		return errMonitorClosed
+	}
 	if err := WriteMonitorFrame(c.conn, MonitorFrameAuthorize, body); err != nil {
+		c.broken = true
 		return errMonitorClosed
 	}
 	typ, payload, err := readMonitorClientFrame(c.conn)
 	if err != nil {
+		c.broken = true
 		return err
 	}
 	if typ != MonitorFrameAuthorize {
+		c.broken = true
 		return errMonitorClosed
 	}
 	resp, err := decodeMonitorResponse(payload)
 	if err != nil {
+		c.broken = true
 		return errMonitorClosed
+	}
+	if resp.ID != id || resp.ArgsDigest != MonitorArgsDigest(args) {
+		c.broken = true
+		return errMonitorDesync
 	}
 	if !resp.OK || resp.Error != "" {
 		if resp.Error == "" {

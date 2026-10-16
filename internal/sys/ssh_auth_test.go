@@ -35,12 +35,14 @@ func newEd25519Signer(t *testing.T) ssh.Signer {
 }
 
 func TestPublicKeyCallbackValidatesCertificatesAndSeparatesCAKeys(t *testing.T) {
+	stubUsers(t, map[string]string{"alice": "1001"})
 	caSigner := newEd25519Signer(t)
 	userSigner := newEd25519Signer(t)
 	directSigner := newEd25519Signer(t)
 
 	authorizedKeysPath := filepath.Join(t.TempDir(), "authorized_keys")
 	contents := append([]byte("cert-authority "), ssh.MarshalAuthorizedKey(caSigner.PublicKey())...)
+	contents = append(contents, []byte(`user="alice" `)...)
 	contents = append(contents, ssh.MarshalAuthorizedKey(directSigner.PublicKey())...)
 	if err := os.WriteFile(authorizedKeysPath, contents, 0o600); err != nil {
 		t.Fatal(err)
@@ -49,7 +51,7 @@ func TestPublicKeyCallbackValidatesCertificatesAndSeparatesCAKeys(t *testing.T) 
 	if err != nil {
 		t.Fatalf("loadAuthorizedKeys: %v", err)
 	}
-	callback := publicKeyCallback(keys)
+	callback := publicKeyCallback(keys, SSHServerOptions{})
 	conn := testConnMetadata{user: "alice"}
 
 	valid := &ssh.Certificate{

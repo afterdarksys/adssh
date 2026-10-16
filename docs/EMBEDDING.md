@@ -111,6 +111,7 @@ func runFor(eng *engine.Engine, user, script string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer sess.Close() // releases the session's identity binding
 
 	// Shell: parse then run on the session's engine-authorized runner.
 	f, err := syntax.NewParser().Parse(strings.NewReader(script), "")
@@ -130,11 +131,32 @@ func runFor(eng *engine.Engine, user, script string) (string, error) {
 }
 ```
 
-`SessionOptions` fields: `SessionID`, `User`, `Restricted`, `In`/`Out`/`Err`,
-`HistoryFile`, `Dir`, and `ExecMiddleware` (extra exec middlewares appended after
-the security interceptor — tests use it to install a sentinel in place of real OS
-exec). If `Engine` is left nil here it defaults to the process-global engine;
-`eng.NewSession` fills it with `eng` for you.
+`SessionOptions` fields: `SessionID`, `User`, `Groups`, `Restricted`,
+`In`/`Out`/`Err`, `HistoryFile`, `Dir`, and `ExecMiddleware` (extra exec
+middlewares appended after the security interceptor — tests use it to install a
+sentinel in place of real OS exec). If `Engine` is left nil here it defaults to
+the process-global engine; `eng.NewSession` fills it with `eng` for you.
+
+### Session identity
+
+`NewSession` binds `SessionID` to `User` and `Groups` on the session's engine
+(`security.Engine.BindSessionIdentity`). Policy sees that principal as
+`input.user` and `input.groups` for every shell command, `GateProgram`
+declaration, and Starlark `sys.exec_cmd` the session runs. The host must
+authenticate `User` first; adssh does not.
+
+- An empty `SessionID` is generated.
+- An empty `User` binds the current OS user and its groups when the session is
+  created. If that lookup fails, `NewSession` returns an error.
+- Opening a second session with a live `SessionID` and a different principal on
+  the same engine returns an error. The same ID on two engines does not share
+  an identity.
+- Call `sess.Close()` when the session ends. After `Close`, a gate call for that
+  session ID is denied with `adssh: access denied: session identity unknown`.
+- A non-empty session ID that is neither bound on the engine nor registered by
+  the adssh binary's SSH or local session table is always denied. It never falls
+  back to the process user. Pass an empty session ID to
+  `Security().AuthorizeCommand` to authorize as the process user.
 
 ---
 
@@ -217,6 +239,15 @@ _ = data
 
 To append your own event or command record through the engine, use
 `sec.LogEvent(...)`, `sec.LogCommand(source, cmd)` or `sec.AppendChain(security.ChainEntry{...})`.
+
+Several engines and processes on one host can share one ledger if they use the
+same key file. `adssh` and `adssh-mcp` do this by default. Each append takes an
+exclusive `flock` on the ledger, reads the tail from disk, and writes and syncs
+before it releases the lock, so the chain stays one sequence. If another process
+holds the lock for more than 5 seconds, the append returns an error. It also
+returns an error if the tail entry fails its HMAC check or is a partial line.
+Do not share a ledger across hosts. `flock` on NFS and other network filesystems
+is not reliable.
 
 ---
 

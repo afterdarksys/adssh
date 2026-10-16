@@ -2,12 +2,21 @@
 
 package sys
 
-import "golang.org/x/sys/unix"
+import (
+	"syscall"
 
-// Darwin's x/sys has no SOCK_CLOEXEC. FD_CLOEXEC is set before the caller
-// starts a child. A fork between socketpair and these fcntls can inherit
-// the pair.
+	"golang.org/x/sys/unix"
+)
+
+// Threats: darwin's x/sys has no SOCK_CLOEXEC, so the pair is created
+// without it and FD_CLOEXEC is set with fcntl. syscall.ForkLock is held for
+// reading across socketpair and both fcntls; os/exec takes it for writing
+// around fork, so a concurrent spawn cannot fork in that window and inherit
+// another session's pair. A fork that does not go through the syscall
+// package (cgo, a native library) does not take the lock and is not covered.
 func cloexecSocketpair() ([2]int, error) {
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
 	if err != nil {
 		return [2]int{}, err
