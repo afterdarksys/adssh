@@ -11,6 +11,18 @@ Goal: an adssh build Ryan can put on a real host, log into over SSH, administer 
 5. **Default `.adsshrc` error.** `set_keymap` is called before the REPL defines it, so every new install prints "Error loading profiles".
 6. **Security review of the login path** (auth callback, certificate checks, session spawn, privilege drop, monitor socket, attach) by a separate reviewer, after items 1, 2 and 4 land.
 
+## P0 for internet-facing (security review of 9bbece9, 2026-10-16)
+
+The review verdict: OK for a loopback-only beta on one host where every key and certificate is bound to a named human account, no principal doubles as a role or system account, and the testers are trusted with forwarding. Not OK for internet-facing until these land:
+
+- **R1 (high)**: honour certificate extensions. Refuse a session channel without `permit-pty` and refuse direct-tcpip without `permit-port-forwarding`; honour `no-port-forwarding` on raw keys; make the gateway deny unless the policy has an explicit gateway rule.
+- **R2**: principals are both login names and policy groups. Filter privileged role names (`FilterUnprivileged`) before `BindSessionIdentity`, and separate groups (a cert extension or a `group:` prefix) from login names.
+- **R3**: refuse accounts that are nologin or false, locked, or expired, and uids below `UID_MIN` unless allowlisted.
+- **R4**: `--session-child` runs from `internal/sys`'s init in every importing binary (a broad sudo rule becomes a root shell). Move it into adssh's main and require a listener-only marker.
+- **R5**: DoS caps: pre-auth connections per source, connections per user, and a deadline before `shell`.
+- **R6**: document that the chain records commands the session reports. Offer auditd for a complete execve record.
+- Low: behind a tunnel every source is 127.0.0.1 (guard and addr= lose the real source); a raw key bound to several names gives one person several four-eyes identities.
+
 ## P1: before a public beta announcement
 
 7. **Licensing before any public release.** Waves 2 and 3 of the open-core split still sit in core: four-eyes, change management, evidence, elevate/grants, leases, identity/SSH CA, gateway, grid. A release tagged before they move ships them under Apache 2.0 for good. [R] wait for waves 2 and 3, or knowingly ship them as core. Also [R]: the legal entity name and a lawyer's read of the ee/LICENSE grant.
