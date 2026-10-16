@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 func TestMain(m *testing.M) {
@@ -117,6 +119,12 @@ authz := {"allow": allow}
 	if err != nil {
 		t.Fatal(err)
 	}
+	// prepareMCP registers the agent session; a named session that nothing
+	// registered or bound is denied as identity unknown.
+	if err := sys.RegisterSession(&sys.Session{ID: "sess-1", User: "bound-agent"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sys.UnregisterSession("sess-1") })
 	called := false
 	var sawSession string
 	handler := policyGate(eng, "admin_explain", func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -154,8 +162,8 @@ func TestClassifyAdminTools(t *testing.T) {
 	if classifyAgentRisk("identity_status", mcp.CallToolRequest{}) != "read" {
 		t.Fatal("identity status risk")
 	}
-	if classifyAgentRisk("admin_approve", mcp.CallToolRequest{}) != "mutable" {
-		t.Fatal("approve risk")
+	if classifyAgentRisk("admin_approve", mcp.CallToolRequest{}) != "unknown" {
+		t.Fatal("removed approve tool still classified")
 	}
 	if classifyAgentRisk("identity_device_login", mcp.CallToolRequest{}) != "mutable" {
 		t.Fatal("device login risk")
@@ -311,4 +319,40 @@ func containsArg(args []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestAdminToolsCannotApproveOrDeny(t *testing.T) {
+	eng, err := engine.New(engine.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server.NewMCPServer("test", "0", server.WithToolCapabilities(false))
+	registerGovernedAdminTools(s, &sync.Mutex{}, eng, mcpAgentConfig{})
+	tools := s.ListTools()
+	for _, name := range []string{"admin_approve", "admin_deny"} {
+		if _, ok := tools[name]; ok {
+			t.Fatalf("tool %s is still registered", name)
+		}
+	}
+	if _, ok := tools["admin_list_approvals"]; !ok {
+		t.Fatal("read-only approval list is missing")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pending"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pending := `{"request_id":"req-mcp","requester":"alice","rule":{"pattern":"*"}}`
+	if err := os.WriteFile(filepath.Join(dir, "pending", "req-mcp.json"), []byte(pending), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sec, err := security.NewEngine(security.EngineConfig{FourEyesDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sec.DecideRequest("req-mcp", "bob", security.FourEyesSurfaceShell, true); err == nil {
+		t.Fatal("the MCP process decided a four-eyes request")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pending", "req-mcp.json")); err != nil {
+		t.Fatalf("pending request changed: %v", err)
+	}
 }

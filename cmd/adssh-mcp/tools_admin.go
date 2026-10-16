@@ -18,13 +18,20 @@ import (
 )
 
 // Threats: these tools read the local admin surfaces and run the device-login
-// client. They do not print bearers or approval tokens. A missing security
+// client. They cannot approve or deny a four-eyes request, and the process
+// refuses every decision once they are registered. They do not print bearers
+// or approval tokens. A missing security
 // engine fails closed. Tool arguments named agent_id or session_id stay
 // command arguments and do not replace the process claim. Device login stores
 // an opaque bearer and does not import groups. This does not wire provision,
 // enroll, or execute.
 
+// registerGovernedAdminTools registers the read-only admin tools and the
+// identity tools. There is no approve or deny tool: an agent must not decide
+// a four-eyes request. ForbidFourEyesDecisions also closes run_shell and
+// eval_starlark paths to `4eyes approve` in this process.
 func registerGovernedAdminTools(s *server.MCPServer, toolMu *sync.Mutex, eng *engine.Engine, agent mcpAgentConfig) {
+	security.ForbidFourEyesDecisions()
 	add := func(tool mcp.Tool, name string, handler server.ToolHandlerFunc) {
 		s.AddTool(tool, serializedHandler(toolMu, policyGate(eng, name, handler, agent)))
 	}
@@ -47,18 +54,6 @@ func registerGovernedAdminTools(s *server.MCPServer, toolMu *sync.Mutex, eng *en
 		mcp.WithDescription("Explain whether a command would be allowed. The command is split on whitespace and is not passed to a shell. Nothing is executed."),
 		mcp.WithString("command", mcp.Required(), mcp.Description("Command and arguments separated by whitespace")),
 	), "admin_explain", handleAdminExplain())
-	add(mcp.NewTool("admin_approve",
-		mcp.WithDescription("Approve a pending four-eyes request by its public request id. The response does not include the approval token."),
-		mcp.WithString("approver", mcp.Required(), mcp.Description("Distinct approver identity")),
-		mcp.WithString("request_id", mcp.Description("Public request id")),
-		mcp.WithString("id", mcp.Description("Public request id when request_id is omitted")),
-	), "admin_approve", handleAdminDecision(true))
-	add(mcp.NewTool("admin_deny",
-		mcp.WithDescription("Deny a pending four-eyes request by its public request id. The response does not include the approval token."),
-		mcp.WithString("approver", mcp.Required(), mcp.Description("Distinct approver identity")),
-		mcp.WithString("request_id", mcp.Description("Public request id")),
-		mcp.WithString("id", mcp.Description("Public request id when request_id is omitted")),
-	), "admin_deny", handleAdminDecision(false))
 	add(mcp.NewTool("identity_status",
 		mcp.WithDescription("Return the bound MCP session id, user, and principals. No token and no elevation are returned."),
 	), "identity_status", handleIdentityStatus())
@@ -199,29 +194,6 @@ func handleAdminExplain() server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		return mcpJSONResult(explanation)
-	}
-}
-
-func handleAdminDecision(approve bool) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		eng, err := securityEngineFromMCP(ctx)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		approver, _ := mcpStringArg(req, "approver")
-		requestID, ok := mcpStringArg(req, "request_id")
-		if !ok {
-			requestID, _ = mcpStringArg(req, "id")
-		}
-		if approve {
-			err = eng.ApproveRequestAs(requestID, approver)
-		} else {
-			err = eng.DenyRequestAs(requestID, approver)
-		}
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return mcpJSONResult(map[string]bool{"ok": true})
 	}
 }
 

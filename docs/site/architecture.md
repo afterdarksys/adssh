@@ -28,15 +28,19 @@ systemapi starts adssh as a child. The break-glass policy is `default allow = tr
 
 ## Local admin API
 
-`admin serve` listens on `127.0.0.1:8787` unless `--listen` is set. `--listen` can bind a non-loopback address. The API key is then the only authenticator besides `/healthz`.
+`admin serve` listens on `127.0.0.1:8787` unless `--listen` is set. `--listen` accepts a loopback IP, a hostname whose every address is loopback, or `unix:/absolute/path`. `0.0.0.0`, `::`, an empty host, and any non-loopback address are refused. A Unix socket is created mode `0600` in a directory that is owned by the user, is not a symlink, and grants no group or other access. An existing path is refused unless it is a socket nobody answers on. The server sets read, write, idle, and header timeouts and caps request bodies at 1 MiB.
+
+Approvers authenticate with named keys. `ADSSH_ADMIN_KEYS` (or `--keys-file`) names a mode `0600` file of `name=key` lines, owned by the user and opened without following a symlink. A name matches `[A-Za-z0-9_.-]{1,64}`. A key is at least 32 bytes with no whitespace. A duplicate name or key refuses the file. The matching key's name is the request's principal. It is the only approver identity `POST /v1/approvals/approve` and `/deny` use. A body that sends `approver` gets 400. `POST /v1/guard/unban` also needs a named key.
+
+`ADSSH_ADMIN_API_KEY` (or `--api-key`, `--api-key-env`) is the legacy shared key. It reads sessions, gateways, approvals, explanations, evidence, recordings, elevations, leases, and guard status. It gets 403 on approve, deny, and unban.
 
 Routes: `/healthz`, `/v1/sessions`, `/v1/gateways`, `/v1/approvals`, `/v1/approvals/approve`, `/v1/approvals/deny`, `/v1/explain`, `/v1/evidence`, `/v1/recordings`, `/v1/elevations`, `/v1/leases`, `/v1/guard`, `/v1/guard/unban`. The schema is `docs/openapi/admin.yaml`.
 
 The SSH listener jail counts failed handshakes and connection rate on `adssh --serve`. `GET /v1/guard` reports the effective config and active bans. `POST /v1/guard/unban` removes one ban. The operator document is `docs/guard.md`.
 
-`/healthz` is unauthenticated and is not audited. Every other request is audited with method, path, status, and the SHA-256 fingerprint of the API key. The body and the query string are not logged. An empty API key is refused. The compare hashes both sides with SHA-256 and then compares the digests.
+`/healthz` is unauthenticated and is not audited. Every other request is audited with method, path, status, the SHA-256 fingerprint of the presented key, and the principal (`bob`, `legacy`, or `none`). The body, the query string, and the key are not logged. `ADMIN_HTTP_START` records each key name with a fingerprint prefix. An empty key is refused. Each presented key is compared against every configured key by hashing both sides with SHA-256 and comparing the digests in constant time.
 
-`GET /v1/approvals` returns the pending request, including the approval token, to a caller who presents the admin API key. The same token is stored in a mode `0600` file under `~/.adssh/foureyes/pending`. MCP `admin_list_approvals` does not serialize that token.
+`GET /v1/approvals` returns public request ids. It does not return the stored token. MCP `admin_list_approvals` returns the same view.
 
 ## Identity
 
@@ -48,6 +52,10 @@ The client requires TLS 1.3 and the system CA pool. It refuses non-HTTPS URLs ex
 
 ## Approval
 
-A new four-eyes request stores a secret token inside the `0600` JSON file. The public request id is the filename. Operator prompts and webhook payloads use the request id and a fingerprint of the token. They do not print the token.
+A four-eyes request is a mode `0600` JSON file named by its request id, 32 random hex characters. The request id is a public handle, not a credential. Prompts, `4eyes pending`, and `GET /v1/approvals` show it. A legacy token field is still stored in the file and is never shown.
+
+A decision is authorized by the approver's identity. On HTTP that is the named admin key. In the shell it is the session user, only when the code that registered the session set it (the local shell or an SSH login). A session renamed by `identity device login` or any other runtime identity change cannot approve or deny. A verified OIDC import can, once it marks the session `oidc-verified`. Agent sessions cannot decide. MCP has no approve or deny tool, and `adssh-mcp` refuses every decision in its process, including `4eyes approve` through `run_shell`. The requester cannot decide their own request. A rule's configured approver must match.
+
+A decision claims the pending file by atomic rename, so one approve or deny wins and the other gets "already decided". It then writes `FOUREYES_DECISION request=<id> approver=<name> decision=approve|deny surface=http|shell|api` to the audit chain. Only after that write succeeds is the approved or denied marker written. If the audit write fails, the claim is put back and no marker is written.
 
 `ADSSH_4EYES_WEBHOOK` receives a JSON notice when a four-eyes request is created, and when policy denies `gateway`, `lease`, or `elevate`. Other denials do not send a notice. `ADSSH_APPROVAL_LINK_BASE` may add an `approval_link`. A discarded webhook error does not authorize the command.

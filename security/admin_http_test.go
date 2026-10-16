@@ -154,12 +154,16 @@ func TestAdminHTTPUnequalKeyRejected(t *testing.T) {
 }
 
 func TestFormatAdminHTTPStartRefusesEmptyKey(t *testing.T) {
-	if got := formatAdminHTTPStart("127.0.0.1:0", ""); got != "admin: http listening on 127.0.0.1:0 auth=refused-empty-key" {
+	if got := formatAdminHTTPStart("127.0.0.1:0", "", nil); got != "admin: http listening on 127.0.0.1:0 auth=refused-empty-key" {
 		t.Fatalf("empty key start = %q", got)
 	}
-	got := formatAdminHTTPStart("127.0.0.1:0", "secret")
-	if !strings.Contains(got, "auth=token") || strings.Contains(got, "secret") {
+	got := formatAdminHTTPStart("127.0.0.1:0", "secret", nil)
+	if !strings.Contains(got, "auth=token") || !strings.Contains(got, "legacy=read-only") || strings.Contains(got, "secret") {
 		t.Fatalf("token start leaked or mislabeled: %q", got)
+	}
+	named := formatAdminHTTPStart("127.0.0.1:0", "", []AdminKey{{Name: "bob", Key: strings.Repeat("k", 40)}})
+	if !strings.Contains(named, "named=bob") || !strings.Contains(named, "legacy=off") || strings.Contains(named, "kkkk") {
+		t.Fatalf("named start leaked or mislabeled: %q", named)
 	}
 }
 
@@ -182,47 +186,49 @@ func TestAdminHTTPApproveAndDeny(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	keys := []AdminKey{
+		{Name: "alice", Key: testAdminKey("alice")},
+		{Name: "bob", Key: testAdminKey("bob")},
+		{Name: "carol", Key: testAdminKey("carol")},
+	}
 	seed("abcdef123456", "alice", "bob")
-	handler := NewAdminHTTPHandler(eng, "secret")
-	post := func(path, body string, auth bool) *httptest.ResponseRecorder {
+	handler := NewAdminHTTPHandlerWithKeys(eng, "secret", keys)
+	post := func(path, body, key string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-		if auth {
-			req.Header.Set("Authorization", "Bearer secret")
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
 		}
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := post("/v1/approvals/approve", `{"token":"abcdef123456","approver":"bob"}`, false); rec.Code != http.StatusUnauthorized {
+	if rec := post("/v1/approvals/approve", `{"token":"abcdef123456"}`, ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth approve = %d", rec.Code)
 	}
-	if rec := post("/v1/approvals/approve", `{"token":"../evil","approver":"bob"}`, true); rec.Code != http.StatusBadRequest {
+	if rec := post("/v1/approvals/approve", `{"token":"../evil"}`, testAdminKey("bob")); rec.Code != http.StatusBadRequest {
 		t.Fatalf("traversal approve = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := post("/v1/approvals/approve", `{"token":"abcdef123456","approver":"alice"}`, true); rec.Code != http.StatusBadRequest {
+	if rec := post("/v1/approvals/approve", `{"token":"abcdef123456"}`, testAdminKey("alice")); rec.Code != http.StatusBadRequest {
 		t.Fatalf("self approve = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := post("/v1/approvals/approve", `{"token":"abcdef123456","approver":"bob"}`, true); rec.Code != http.StatusOK {
+	if rec := post("/v1/approvals/approve", `{"token":"abcdef123456"}`, testAdminKey("bob")); rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d body=%s", rec.Code, rec.Body.String())
 	}
 	seed("deniedtoken1", "alice", "bob")
-	if rec := post("/v1/approvals/deny", `{"token":"deniedtoken1"}`, true); rec.Code != http.StatusBadRequest {
-		t.Fatalf("deny without approver = %d", rec.Code)
-	}
-	if rec := post("/v1/approvals/deny", `{"token":"../evil","approver":"carol"}`, true); rec.Code != http.StatusBadRequest {
+	if rec := post("/v1/approvals/deny", `{"token":"../evil"}`, testAdminKey("carol")); rec.Code != http.StatusBadRequest {
 		t.Fatalf("traversal deny = %d body=%s", rec.Code, rec.Body.String())
 	}
 	if err := eng.DenyRequest("../evil"); err == nil {
 		t.Fatal("DenyRequest accepted a path token")
 	}
-	if rec := post("/v1/approvals/deny", `{"token":"deniedtoken1","approver":"carol"}`, true); rec.Code != http.StatusBadRequest {
+	if rec := post("/v1/approvals/deny", `{"token":"deniedtoken1"}`, testAdminKey("carol")); rec.Code != http.StatusBadRequest {
 		t.Fatalf("wrong approver deny = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := post("/v1/approvals/deny", `{"token":"deniedtoken1","approver":"alice"}`, true); rec.Code != http.StatusBadRequest {
+	if rec := post("/v1/approvals/deny", `{"token":"deniedtoken1"}`, testAdminKey("alice")); rec.Code != http.StatusBadRequest {
 		t.Fatalf("self deny = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := post("/v1/approvals/deny", `{"token":"deniedtoken1","approver":"bob"}`, true); rec.Code != http.StatusOK {
+	if rec := post("/v1/approvals/deny", `{"request_id":"deniedtoken1"}`, testAdminKey("bob")); rec.Code != http.StatusOK {
 		t.Fatalf("deny = %d body=%s", rec.Code, rec.Body.String())
 	}
 }

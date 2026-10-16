@@ -9,13 +9,24 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/afterdarksys/adssh/internal/sys"
 )
 
-// Threats: the approval token is a CSPRNG secret stored in a 0600 file. The
-// filename is a separate public request id. Lookup of a presented secret uses
-// a SHA-256 compare. A direct filename that exists and does not match does not
-// fall through to a scan. This does not stop a process that can already read
-// the pending directory from reading the token.
+// Threats: a pending request is named by its request id, 32 hex characters
+// from crypto/rand. The request id is a public handle: it is printed to the
+// requester, listed by `4eyes pending` and GET /v1/approvals, and it is enough
+// to name the request in approve or deny. It is not a credential, and neither
+// is the legacy token field stored beside it, which is never displayed. What
+// authorizes a decision is the approver's authenticated identity: a named
+// admin key on HTTP, or a shell session whose user was not renamed at runtime
+// (see shellApprover). The requester cannot decide their own request and a
+// rule's configured approver must match. A decision claims the pending file by
+// atomic rename, so only one approve or deny can win, and it is written to the
+// audit chain before the marker. A marker write that fails after the audit
+// event is reverted in the chain and the claim is restored; a claim left by a
+// crash is swept after its TTL and logged. This does not stop a process running as the
+// OS account that owns the four-eyes directory from writing a marker itself.
 
 func randomHex(n int) (string, error) {
 	buf := make([]byte, n)
@@ -33,6 +44,9 @@ func (e *Engine) createFourEyesPending(cmd string, rule FourEyesRule, sessionID 
 	token, err := randomHex(16)
 	if err != nil {
 		return FourEyesPending{}, "", fmt.Errorf("foureyes: generate token: %w", err)
+	}
+	if err := checkRequesterIdentity(sessionID); err != nil {
+		return FourEyesPending{}, "", err
 	}
 	hostname, _ := os.Hostname()
 	requester := approvalActor(sessionID)
@@ -77,6 +91,25 @@ func (e *Engine) createFourEyesPending(cmd string, rule FourEyesRule, sessionID 
 		return FourEyesPending{}, "", fmt.Errorf("foureyes: pending request is group or world readable")
 	}
 	return pending, pendingFile, nil
+}
+
+// checkRequesterIdentity refuses a request from a session whose user was
+// renamed at runtime without verification. Otherwise alice could rename her
+// session to carol, request, and approve the request as alice.
+func checkRequesterIdentity(sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	session := sys.GetSession(sessionID)
+	if session == nil {
+		return nil
+	}
+	switch source := session.IdentitySource(); source {
+	case "", sys.IdentitySourceOIDCVerified:
+		return nil
+	default:
+		return fmt.Errorf("foureyes: identity set by %s cannot request approval; reconnect or import a verified identity", source)
+	}
 }
 
 func timeNowRFC3339() string {

@@ -34,6 +34,6 @@ A policy denial of `lease` can send the optional approval webhook. The notice do
 
 ## Evidence
 
-Lease request, grant, and revoke events are HMAC chain lines. `evidence` builds a lease view from those lines after it hashes the chain entries. The digest does not include that view. Command text is omitted from the lease list. `GET /v1/leases` and MCP `admin_list_leases` fail closed with `chain_unavailable` when the chain path is not configured.
+Lease request, grant, and revoke events are HMAC chain lines. Each is written before the step it records. A failed write stops the lease before the secret is read or the child runs. Only event lines count. A typed command that looks like a lease line is ignored. `evidence` builds a lease view from those lines after it hashes the chain entries. The digest does not include that view. Command text is omitted from the lease list. `GET /v1/leases` and MCP `admin_list_leases` fail closed with `chain_unavailable` when the chain path is not configured.
 
 A `sah/1` frame `lease_id` does not authorize `execute`. The provision, enroll, and execute handoff is not wired.

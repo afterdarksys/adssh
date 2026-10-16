@@ -17,8 +17,10 @@ import (
 // Threats: list endpoints read the operator's recording directory and the
 // HMAC ledger. They do not create a second store that could disagree with
 // those files. A missing or unverified chain fails closed for elevations and
-// leases. Recording names are basenames only. This does not hide an approval
-// token from an authenticated admin-key holder on GET /v1/approvals.
+// leases. Recording names are basenames only. Elevation and lease history is
+// read only from "event" entries written by LogEvent; a "cmd" entry whose
+// text a user typed to look like ELEVATE_REQUEST or LEASE_REQUEST is ignored.
+// Approval listings never carry the stored token.
 
 var errChainUnavailable = errors.New("chain_unavailable")
 
@@ -254,6 +256,9 @@ func (e *Engine) readVerifiedChain() ([]ChainEntry, bool, error) {
 func elevationsFromEntries(entries []ChainEntry) []ElevationListItem {
 	items := make([]ElevationListItem, 0)
 	for _, entry := range entries {
+		if !isEngineEvent(entry) {
+			continue
+		}
 		if matches := elevateRequestPattern.FindStringSubmatch(entry.Command); matches != nil {
 			items = append(items, ElevationListItem{
 				SessionID: matches[1],
@@ -303,6 +308,9 @@ func leasesFromEntries(entries []ChainEntry) []LeaseEvidence {
 	order := make([]string, 0)
 	byID := map[string]*LeaseEvidence{}
 	for _, entry := range entries {
+		if !isEngineEvent(entry) {
+			continue
+		}
 		cmd := entry.Command
 		switch {
 		case strings.HasPrefix(cmd, "LEASE_REQUEST "):
@@ -343,6 +351,12 @@ func leasesFromEntries(entries []ChainEntry) []LeaseEvidence {
 		out = append(out, *byID[id])
 	}
 	return out
+}
+
+// isEngineEvent is true for a ledger entry written by LogEvent. Typed shell
+// input is logged as Type "cmd" with a Source, so it cannot pass.
+func isEngineEvent(entry ChainEntry) bool {
+	return entry.Type == "event" && entry.Source == ""
 }
 
 func parseLeaseFields(cmd string) map[string]string {

@@ -2,10 +2,13 @@ package security
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,28 +21,51 @@ import (
 	"github.com/afterdarksys/adssh/internal/sys"
 )
 
-// Threats: a device-login access token is an opaque bearer for its TTL. The
-// client refuses plaintext off-box URLs, redirects, metadata hosts, and query
-// keys that would place a code in a URL. It writes the token to a 0600 file
-// and logs only a SHA-256 fingerprint. It does not treat the bearer as an
-// OIDC JWT, clears any previous OIDC provider and eligible roles, and does
-// not attach groups. A stolen token file is a bearer until
-// it expires. The server, not this client, decides membership.
+// Threats: a device-login access token is an opaque bearer for its TTL, and a
+// successful login renames the session user, which drives Rego input.user and
+// username-keyed entitlements. The control-plane origin therefore comes only
+// from the operator's ADSSH_CONTROLPLANE_URL (https origin, no path); unset
+// fails closed, and a caller-supplied URL must equal that origin, so a user
+// cannot point the flow at a host that vouches for any name. The client
+// refuses plaintext, private, and metadata hosts, redirects, and query keys
+// that would place a code in a URL. Polling never runs faster than 1s and
+// adds 5s on slow_down (RFC 8628). The token is written to a 0600 temp file
+// in the destination directory and renamed over a regular-file destination;
+// a symlink or non-regular destination is refused and an existing parent
+// directory's mode is not changed. Only a SHA-256 fingerprint is logged, and
+// it is logged before the session user changes: a failed audit write leaves
+// the identity unchanged and removes the stored bearer. It
+// does not treat the bearer as an OIDC JWT, clears any previous OIDC provider
+// and eligible roles, and does not attach groups. A stolen token file is a
+// bearer until it expires. The configured control plane, not this client,
+// decides who the user is; a compromised control plane is not covered.
 
 const deviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
 
 var deviceUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._@-]{0,128}$`)
 
+// deviceLoginError carries a machine-readable code and an optional detail
+// for the operator. Error() is the code, then ": " and the detail when set.
 type deviceLoginError struct {
-	code string
+	code   string
+	detail string
 }
 
-func (e deviceLoginError) Error() string { return e.code }
+func (e deviceLoginError) Error() string {
+	if e.detail == "" {
+		return e.code
+	}
+	return e.code + ": " + e.detail
+}
 
 func deviceErr(code string) error { return deviceLoginError{code: code} }
 
-// DeviceLoginRequest starts a username-first device flow against an existing
-// control plane. Client may be injected for tests. URL checks always run.
+func deviceErrDetail(code, detail string) error { return deviceLoginError{code: code, detail: detail} }
+
+// DeviceLoginRequest starts a username-first device flow against the control
+// plane pinned by ADSSH_CONTROLPLANE_URL. URL is optional; when set it must
+// equal the pinned origin. Client may be injected for tests. URL checks
+// always run.
 type DeviceLoginRequest struct {
 	URL         string
 	Username    string
@@ -90,12 +116,13 @@ func DeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLoginResult
 	if err != nil {
 		return DeviceLoginResult{}, deviceErr("token_file_rejected")
 	}
-	base, err := validateCallbackURL(req.URL)
+	base, err := controlPlaneOrigin()
 	if err != nil {
+		return DeviceLoginResult{}, err
+	}
+	if req.URL != "" && !sameControlPlaneOrigin(base, req.URL) {
 		return DeviceLoginResult{}, deviceErr("url_rejected")
 	}
-	base.RawQuery = ""
-	base.Fragment = ""
 
 	client := req.Client
 	if client == nil {
@@ -139,6 +166,9 @@ func DeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLoginResult
 	} else if start.Interval > 0 {
 		interval = time.Duration(start.Interval) * time.Second
 	}
+	if interval < deviceMinInterval {
+		interval = deviceMinInterval
+	}
 
 	deviceCode := start.DeviceCode
 	defer func() { deviceCode = "" }()
@@ -161,16 +191,13 @@ func DeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLoginResult
 			zeroBytes(body)
 			switch code {
 			case "authorization_pending":
-				if err := deviceSleep(ctx, deadline, interval); err != nil {
+				if err := deviceSleepFn(ctx, deadline, interval); err != nil {
 					return DeviceLoginResult{}, err
 				}
 				continue
 			case "slow_down":
-				if req.IntervalSet && interval == 0 {
-					continue
-				}
 				interval += 5 * time.Second
-				if err := deviceSleep(ctx, deadline, interval); err != nil {
+				if err := deviceSleepFn(ctx, deadline, interval); err != nil {
 					return DeviceLoginResult{}, err
 				}
 				continue
@@ -195,11 +222,60 @@ func DeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLoginResult
 			return DeviceLoginResult{}, deviceErr("token_file_rejected")
 		}
 		zeroBytes(secret)
+		// Record the rename before it happens. If the audit write fails the
+		// session keeps its identity and the stored bearer is removed.
+		if err := engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_DEVICE_LOGIN user=%s fingerprint=%s", req.Username, fingerprint)); err != nil {
+			_ = os.Remove(tokenPath)
+			return DeviceLoginResult{}, deviceErr("audit_failed")
+		}
 		session.SetIdentity(req.Username, nil)
+		session.SetIdentitySource(sys.IdentitySourceDeviceLogin)
 		session.SetOIDC("", nil)
-		engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_DEVICE_LOGIN user=%s fingerprint=%s", req.Username, fingerprint))
 		return DeviceLoginResult{TokenFile: tokenPath, Fingerprint: fingerprint}, nil
 	}
+}
+
+// deviceMinInterval is the polling floor. An interval of 0 would busy-poll.
+const deviceMinInterval = time.Second
+
+// deviceSleepFn waits between polls. Tests replace it to record intervals.
+var deviceSleepFn = deviceSleep
+
+// controlPlaneOrigin parses ADSSH_CONTROLPLANE_URL. It must be an https
+// origin (scheme and host[:port]) with no path, query, fragment, or userinfo,
+// and it must pass validateCallbackURL.
+func controlPlaneOrigin() (*url.URL, error) {
+	raw := strings.TrimSpace(os.Getenv("ADSSH_CONTROLPLANE_URL"))
+	if raw == "" {
+		return nil, deviceErrDetail("control plane not configured", "set ADSSH_CONTROLPLANE_URL to the https origin of the control plane")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Opaque != "" ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
+		strings.Contains(raw, "#") {
+		return nil, deviceErrDetail("url_rejected", "ADSSH_CONTROLPLANE_URL must be an https origin (scheme and host[:port]) with no path, query, fragment, or userinfo")
+	}
+	validated, err := validateCallbackURL(raw)
+	switch {
+	case errors.Is(err, errPrivateHost):
+		return nil, deviceErrDetail("url_rejected", fmt.Sprintf("ADSSH_CONTROLPLANE_URL host %s is a private address; set ADSSH_CALLBACK_ALLOW_PRIVATE=1 to allow it", parsed.Hostname()))
+	case errors.Is(err, errHostUnresolved):
+		return nil, deviceErrDetail("url_rejected", fmt.Sprintf("ADSSH_CONTROLPLANE_URL host %s did not resolve", parsed.Hostname()))
+	case err != nil:
+		return nil, deviceErrDetail("url_rejected", "ADSSH_CONTROLPLANE_URL must not name localhost, a metadata service, a link-local or loopback address")
+	}
+	return &url.URL{Scheme: validated.Scheme, Host: validated.Host}, nil
+}
+
+func sameControlPlaneOrigin(pinned *url.URL, raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return false
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return false
+	}
+	return parsed.Scheme == pinned.Scheme && strings.EqualFold(parsed.Host, pinned.Host)
 }
 
 func deviceTokenPath(path string) (string, error) {
@@ -322,19 +398,50 @@ func deviceSleep(ctx context.Context, deadline time.Time, interval time.Duration
 	}
 }
 
+// writeDeviceToken stores the bearer. A missing parent directory is created
+// 0700; an existing parent keeps its mode. The bearer goes to an O_EXCL 0600
+// temp file in the same directory, is synced, and is renamed over the
+// destination, so a second login replaces the previous token. A destination
+// that exists and is not a regular file (including a symlink) is refused.
 func writeDeviceToken(path string, secret []byte) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	dirInfo, err := os.Lstat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+	case err != nil:
+		return err
+	case !dirInfo.IsDir():
+		return errors.New("parent")
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("destination")
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp := filepath.Join(dir, "."+filepath.Base(path)+".tmp-"+hex.EncodeToString(suffix[:]))
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = file.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
 	if _, err := file.Write(secret); err != nil {
 		return err
 	}
@@ -348,6 +455,18 @@ func writeDeviceToken(path string, secret []byte) error {
 	if info.Mode().Perm()&0o077 != 0 {
 		return errors.New("mode")
 	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		committed = true
+		return err
+	}
+	committed = true
 	return nil
 }
 

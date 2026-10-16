@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/afterdarksys/adssh/internal/sys"
@@ -26,7 +28,12 @@ admin gateways [--json]
 admin approvals [--json]
 admin explain [--json] -- command [args...]
 admin evidence [--session id] [--change id] [--since time] [--until time] [--out path]
-admin serve --listen addr [--api-key key|--api-key-env name]`
+admin serve [--listen 127.0.0.1:port|[::1]:port|unix:/path] [--keys-file path] [--api-key key|--api-key-env name]
+
+--keys-file (or ADSSH_ADMIN_KEYS) names a 0600 file of name=key lines. A
+named key can approve, deny, and unban as that name. The legacy
+--api-key/ADSSH_ADMIN_API_KEY key can only read. --listen accepts a loopback
+address or a Unix socket in a 0700 directory.`
 }
 
 func (adminBinary) Run(ctx context.Context, args []string) error {
@@ -115,7 +122,7 @@ func adminApprovals(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	pending, err := ListPending()
+	pending, err := engineFromContext(ctx).ListApprovalsPublic()
 	if err != nil {
 		return err
 	}
@@ -130,9 +137,14 @@ func adminApprovals(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintln(hc.Stdout, "admin: pending approvals")
 	for _, p := range pending {
-		fmt.Fprintf(hc.Stdout, "  %s requester=%s command=%q submitted=%s\n", p.Token, p.Requester, RedactSensitiveText(p.Command), p.Timestamp)
-		fmt.Fprintf(hc.Stdout, "    approve: 4eyes approve %s\n", p.Token)
-		fmt.Fprintf(hc.Stdout, "    deny:    4eyes deny %s\n", p.Token)
+		id := p.RequestID
+		if id == "" {
+			fmt.Fprintf(hc.Stdout, "  legacy fingerprint=%s requester=%s command=%q submitted=%s\n", p.Fingerprint, p.Requester, RedactSensitiveText(p.Command), p.Timestamp)
+			continue
+		}
+		fmt.Fprintf(hc.Stdout, "  %s requester=%s command=%q submitted=%s\n", id, p.Requester, RedactSensitiveText(p.Command), p.Timestamp)
+		fmt.Fprintf(hc.Stdout, "    approve: 4eyes approve %s\n", id)
+		fmt.Fprintf(hc.Stdout, "    deny:    4eyes deny %s\n", id)
 	}
 	return nil
 }
@@ -203,6 +215,7 @@ func adminServe(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
 	listen := "127.0.0.1:8787"
 	apiKey := os.Getenv("ADSSH_ADMIN_API_KEY")
+	keysFile := os.Getenv("ADSSH_ADMIN_KEYS")
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--listen":
@@ -223,21 +236,41 @@ func adminServe(ctx context.Context, args []string) error {
 				return fmt.Errorf("admin serve: --api-key-env requires a value")
 			}
 			apiKey = os.Getenv(args[i])
+		case "--keys-file":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("admin serve: --keys-file requires a value")
+			}
+			keysFile = args[i]
 		default:
 			return fmt.Errorf("admin serve: unknown option %q", args[i])
 		}
 	}
-	listener, err := net.Listen("tcp", listen)
+	var keys []AdminKey
+	if keysFile != "" {
+		loaded, err := LoadAdminKeysFile(keysFile)
+		if err != nil {
+			return fmt.Errorf("admin serve: %w", err)
+		}
+		keys = loaded
+	}
+	listener, err := adminListen(ctx, listen)
 	if err != nil {
-		return fmt.Errorf("admin serve: listen: %w", err)
+		return fmt.Errorf("admin serve: %w", err)
 	}
 	defer listener.Close()
 
 	actual := listener.Addr().String()
+	if listener.Addr().Network() == "unix" {
+		actual = "unix:" + actual
+	}
 	engine := engineFromContext(ctx)
-	engine.LogEvent(fmt.Sprintf("ADMIN_HTTP_START: listen=%s auth=%t", actual, apiKey != ""))
-	fmt.Fprintln(hc.Stdout, formatAdminHTTPStart(actual, apiKey))
-	server := adminHTTPServerTimeouts(NewAdminHTTPHandler(engine, apiKey))
+	if err := engine.LogEvent(fmt.Sprintf("ADMIN_HTTP_START: listen=%s legacy=%t keys=%s",
+		actual, apiKey != "", emptyDash(adminKeyFingerprints(keys)))); err != nil {
+		return fmt.Errorf("admin serve: audit: %w", err)
+	}
+	fmt.Fprintln(hc.Stdout, formatAdminHTTPStart(actual, apiKey, keys))
+	server := adminHTTPServerTimeouts(NewAdminHTTPHandlerWithKeys(engine, apiKey, keys))
 	errCh := make(chan error, 1)
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
@@ -255,6 +288,107 @@ func adminServe(ctx context.Context, args []string) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// adminLookupIPAddr resolves a --listen hostname. Tests replace it.
+var adminLookupIPAddr = net.DefaultResolver.LookupIPAddr
+
+// adminListen binds the admin API.
+//
+// Threats: the admin API carries approval and unban authority over plaintext
+// HTTP, so it must not be reachable off the host. A TCP address must be a
+// loopback IP, or a hostname whose every address is loopback; the listener
+// binds the resolved IP literal so a later lookup cannot move it. 0.0.0.0, ::,
+// an empty host, and a host with any non-loopback address are refused.
+// unix:/path creates a 0600 socket in a directory that is not a symlink, is
+// owned by this user, and grants no group or other access. An existing path is
+// refused unless it is a socket nobody answers on. This does not stop another
+// process of the same OS user from connecting; the admin key still applies.
+func adminListen(ctx context.Context, spec string) (net.Listener, error) {
+	if path, ok := strings.CutPrefix(spec, "unix:"); ok {
+		return adminListenUnix(path)
+	}
+	host, port, err := net.SplitHostPort(spec)
+	if err != nil {
+		return nil, fmt.Errorf("listen %q: %w", spec, err)
+	}
+	if host == "" {
+		return nil, fmt.Errorf("listen %q: host is required and must be loopback", spec)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		addrs, err := adminLookupIPAddr(lookupCtx, host)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("listen %q: resolve: %w", spec, err)
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("listen %q: no addresses", spec)
+		}
+		for _, addr := range addrs {
+			if !addr.IP.IsLoopback() {
+				return nil, fmt.Errorf("listen %q: %s is not loopback", spec, addr.IP)
+			}
+		}
+		ip = addrs[0].IP
+	}
+	if !ip.IsLoopback() {
+		return nil, fmt.Errorf("listen %q: %s is not loopback; use a loopback address or unix:/path", spec, ip)
+	}
+	listener, err := net.Listen("tcp", net.JoinHostPort(ip.String(), port))
+	if err != nil {
+		return nil, fmt.Errorf("listen: %w", err)
+	}
+	if tcp, ok := listener.Addr().(*net.TCPAddr); !ok || !tcp.IP.IsLoopback() {
+		_ = listener.Close()
+		return nil, fmt.Errorf("listen %q: bound address is not loopback", spec)
+	}
+	return listener, nil
+}
+
+func adminListenUnix(path string) (net.Listener, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("listen unix: path must be absolute")
+	}
+	path = filepath.Clean(path)
+	dirInfo, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("listen unix: %w", err)
+	}
+	if !dirInfo.IsDir() {
+		return nil, fmt.Errorf("listen unix: parent is not a directory")
+	}
+	if dirInfo.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("listen unix: parent directory must be 0700")
+	}
+	if st, ok := dirInfo.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+		return nil, fmt.Errorf("listen unix: parent directory is owned by another user")
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("listen unix: %s exists and is not a socket", path)
+		}
+		conn, dialErr := net.DialTimeout("unix", path, 500*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("listen unix: %s is in use", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("listen unix: remove stale socket: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("listen unix: %w", err)
+	}
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("listen unix: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("listen unix: chmod: %w", err)
+	}
+	return listener, nil
 }
 
 func parseJSONFlag(name string, args []string) (bool, error) {

@@ -24,7 +24,7 @@ Each tool runs entitlement, then the destructive dry-run check, then policy, the
 
 Destructive classification for `run_shell` matches fragments such as `rm`, `delete`, `destroy`, `terminate`, `kubectl delete`, `terraform apply`, `terraform destroy`, `tofu apply`, `tofu destroy`, `docker rm`, `docker rmi`, `git push --force`, and `chmod 777`.
 
-`admin_list_*`, `admin_explain`, and `identity_status` are read. `admin_approve`, `admin_deny`, and `identity_device_login` are mutable.
+`admin_list_*`, `admin_explain`, and `identity_status` are read. `identity_device_login` is mutable.
 
 ## Governed tools
 
@@ -38,12 +38,13 @@ These tools are registered. They still pass the gate above. A missing security e
 | `admin_list_elevations` | Chain lines plus active grants. A missing chain fails closed. |
 | `admin_list_leases` | Lease metadata. Command text and secret values are omitted. |
 | `admin_explain` | A denial explanation. The command is split on whitespace and is not executed. |
-| `admin_approve` / `admin_deny` | `{"ok":true}` after a distinct approver acts on a public request id. The token is not echoed. |
 | `identity_status` | `session_id`, `user`, and `principals`. No token and no elevation. |
 | `identity_device_login` | Device-login client. Result is `token_file` and `fingerprint`. The bearer is not printed. |
 
 `identity_device_login` stores an opaque bearer in a mode `0600` file and sets the session user with no groups. It is not an OIDC group import. The authorization server stays in systemapi. A bad duration returns `device_login_failed` and does not dial.
 
-`GET /v1/approvals` on `admin serve` still returns the token to an authenticated admin-key holder. MCP list does not.
+There is no approve or deny tool. An agent must not decide a four-eyes request. Registering these tools also forbids every four-eyes decision in the `adssh-mcp` process, so `4eyes approve` through `run_shell` or `eval_starlark` fails too. A human approves in the shell or with a named key on `admin serve`.
+
+Neither `admin_list_approvals` nor `GET /v1/approvals` returns the stored token.
 
 None of these tools provision a machine, enroll it, or hand adssh a systemapi lease.

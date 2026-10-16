@@ -7,16 +7,35 @@ package security
 // durable writes succeed, and a failed remote POST does not authorize anything.
 // An unconfigured audit file (nil) is not a failure. This does not cover a
 // disk that reports Sync success and then loses the sector.
+// The remote POST carries ADSSH_AUDIT_TOKEN as a bearer. When the engine is
+// built, ADSSH_AUDIT_URL is checked for syntax only (https, a host, no
+// userinfo or fragment, not a blocked name or literal blocked IP), with no
+// network call, so DNS that is down or slow cannot stop adssh from starting.
+// At POST time the host is resolved with a bound of auditResolveTimeout; an
+// unresolved host, or an answer holding a private, metadata, link-local, or
+// loopback address, fails that one POST closed before a connection is opened,
+// and the bearer is never sent. The checked address is the one dialed, and
+// callbackDialContext checks it again at connect time. Failures go to stderr
+// at most once per auditWarnInterval, naming only the host. The POST uses TLS
+// 1.3 and refuses redirects. This does not authenticate the SIEM beyond its
+// certificate, and dropped POSTs are not retried (the flat log and the chain
+// stay the record).
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/syslog"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -66,6 +85,16 @@ func (e *Engine) InitAuditLog(path, url, token string) error {
 		}
 	}
 
+	if url != "" {
+		parsed, err := validateCallbackURLSyntax(url)
+		if errors.Is(err, errPrivateHost) {
+			return fmt.Errorf("audit webhook URL rejected: %w", auditPrivateHostError(parsed, url))
+		}
+		if err != nil || parsed.Scheme != "https" || strings.Contains(url, "#") {
+			return fmt.Errorf("audit webhook URL rejected: ADSSH_AUDIT_URL must be an https URL with a host and no userinfo or fragment, and must not name localhost, a metadata service, or a link-local address")
+		}
+		url = parsed.String()
+	}
 	e.remoteAuditURL = url
 	e.remoteAuditToken = token
 
@@ -145,26 +174,131 @@ func (e *Engine) dispatchAuditEvent(payload map[string]interface{}) {
 		return
 	}
 
-	url := e.remoteAuditURL
+	target := e.remoteAuditURL
 	token := e.remoteAuditToken
 	go func() {
-		req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "adssh: audit webhook request to %s failed: %v\n", url, err)
-			return
+		if err := postAuditEvent(context.Background(), target, token, data); err != nil {
+			host := ""
+			if parsed, perr := neturl.Parse(target); perr == nil {
+				host = parsed.Hostname()
+			}
+			auditWarn(host, err)
 		}
-		req.Header.Set("Content-Type", "application/json")
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Do(req)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "adssh: audit webhook POST to %s failed: %v\n", url, err)
-			return
-		}
-		resp.Body.Close()
 	}()
+}
+
+// auditResolveTimeout bounds the DNS lookup for the audit host at POST time.
+var auditResolveTimeout = 5 * time.Second
+
+// auditWarnInterval is the minimum gap between two stderr warnings about a
+// failed audit POST, so a down SIEM does not flood the terminal.
+const auditWarnInterval = time.Minute
+
+var (
+	auditWarnWriter io.Writer = os.Stderr
+	auditWarnLast   atomic.Int64
+)
+
+// auditWarn writes one line naming the host and the cause, at most once per
+// auditWarnInterval. It never prints the URL path, query, or bearer.
+func auditWarn(host string, err error) {
+	now := time.Now().UnixNano()
+	last := auditWarnLast.Load()
+	if last != 0 && now-last < int64(auditWarnInterval) {
+		return
+	}
+	if !auditWarnLast.CompareAndSwap(last, now) {
+		return
+	}
+	var uerr *neturl.Error
+	if errors.As(err, &uerr) {
+		err = uerr.Err
+	}
+	fmt.Fprintf(auditWarnWriter, "adssh: audit webhook POST to %s failed: %v\n", host, err)
+}
+
+func auditPrivateHostError(parsed *neturl.URL, raw string) error {
+	host := ""
+	if parsed != nil {
+		host = parsed.Hostname()
+	} else if p, err := neturl.Parse(raw); err == nil {
+		host = p.Hostname()
+	}
+	return fmt.Errorf("ADSSH_AUDIT_URL: host %s resolves to a private address; set ADSSH_CALLBACK_ALLOW_PRIVATE=1 to allow it", host)
+}
+
+// auditResolveHost resolves the audit host within auditResolveTimeout and
+// refuses an answer holding any blocked address. The error names the cause.
+func auditResolveHost(ctx context.Context, host string) ([]net.IP, error) {
+	rctx, cancel := context.WithTimeout(ctx, auditResolveTimeout)
+	defer cancel()
+	ips, err := callbackLookupIP(rctx, host)
+	if err == nil && len(ips) == 0 {
+		err = errors.New("no addresses")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ADSSH_AUDIT_URL: host %s did not resolve: %v", host, err)
+	}
+	switch checkResolvedIPs(ips) {
+	case nil:
+		return ips, nil
+	case errPrivateHost:
+		return nil, fmt.Errorf("ADSSH_AUDIT_URL: host %s resolves to a private address; set ADSSH_CALLBACK_ALLOW_PRIVATE=1 to allow it", host)
+	default:
+		return nil, fmt.Errorf("ADSSH_AUDIT_URL: host %s resolves to a blocked address", host)
+	}
+}
+
+// auditDialContext resolves and checks the audit host, then dials only the
+// checked addresses through callbackDialContext, which checks them again at
+// connect time. A literal IP host was checked at construction and goes
+// straight to callbackDialContext.
+func auditDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, errDialDenied
+	}
+	if net.ParseIP(host) != nil {
+		return callbackDialContext(ctx, network, addr)
+	}
+	ips, err := auditResolveHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, ip := range ips {
+		conn, err := callbackDialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// postAuditEvent sends one audit event. Any failure, including an unresolved
+// or refused host, returns an error and sends nothing.
+func postAuditEvent(ctx context.Context, target, token string, data []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("audit webhook request failed")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := callbackHTTPClient(5 * time.Second)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		return errDialDenied
+	}
+	transport.DialContext = auditDialContext
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+	return resp.Body.Close()
 }
 
 func (e *Engine) LogCommand(source string, cmd string) error {

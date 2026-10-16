@@ -28,7 +28,7 @@ func TestAdminGuardRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewAdminHTTPHandler(eng, "secret")
+	handler := NewAdminHTTPHandlerWithKeys(eng, "secret", []AdminKey{{Name: "ops", Key: testAdminKey("ops")}})
 
 	wrong := httptest.NewRecorder()
 	wrongReq := httptest.NewRequest(http.MethodGet, "/v1/guard", nil)
@@ -54,10 +54,18 @@ func TestAdminGuardRoutes(t *testing.T) {
 		t.Fatalf("wrong key POST = %d", postWrong.Code)
 	}
 
+	legacy := httptest.NewRecorder()
+	legacyReq := httptest.NewRequest(http.MethodPost, "/v1/guard/unban", strings.NewReader(`{"addr":"203.0.113.10"}`))
+	legacyReq.Header.Set("Authorization", "Bearer secret")
+	handler.ServeHTTP(legacy, legacyReq)
+	if legacy.Code != http.StatusForbidden {
+		t.Fatalf("legacy key POST = %d", legacy.Code)
+	}
+
 	post := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, "/v1/guard/unban", strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("Authorization", "Bearer "+testAdminKey("ops"))
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		return rec

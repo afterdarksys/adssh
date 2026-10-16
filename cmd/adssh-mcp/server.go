@@ -266,7 +266,7 @@ func classifyAgentRisk(toolName string, req mcp.CallToolRequest) string {
 	switch {
 	case toolName == "list_sessions" || toolName == "audit_log" || toolName == "cloud_query" || toolName == "admin_explain" || toolName == "identity_status" || strings.HasPrefix(toolName, "admin_list_"):
 		return "read"
-	case toolName == "container_exec" || toolName == "eval_starlark" || toolName == "admin_approve" || toolName == "admin_deny" || toolName == "identity_device_login":
+	case toolName == "container_exec" || toolName == "eval_starlark" || toolName == "identity_device_login":
 		return "mutable"
 	case toolName == "run_shell":
 		command, _ := req.GetArguments()["command"].(string)

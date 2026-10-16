@@ -103,7 +103,11 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 			return fmt.Errorf("4eyes approve: usage: 4eyes approve <request-id>")
 		}
 		token := args[2]
-		if err := engineFromContext(ctx).ApproveRequestAs(token, approvalActor(SessionIDFromContext(ctx))); err != nil {
+		approver, err := shellApprover(SessionIDFromContext(ctx))
+		if err != nil {
+			return err
+		}
+		if err := engineFromContext(ctx).DecideRequest(token, approver, FourEyesSurfaceShell, true); err != nil {
 			return err
 		}
 		fmt.Fprintf(hc.Stdout, "%s%s✓%s Approved request: %s\n", ansiBold, ansiGreen, ansiReset, token)
@@ -115,7 +119,11 @@ func (fourEyesBinary) Run(ctx context.Context, args []string) error {
 			return fmt.Errorf("4eyes deny: usage: 4eyes deny <request-id>")
 		}
 		token := args[2]
-		if err := engineFromContext(ctx).DenyRequestAs(token, approvalActor(SessionIDFromContext(ctx))); err != nil {
+		approver, err := shellApprover(SessionIDFromContext(ctx))
+		if err != nil {
+			return err
+		}
+		if err := engineFromContext(ctx).DecideRequest(token, approver, FourEyesSurfaceShell, false); err != nil {
 			return err
 		}
 		fmt.Fprintf(hc.Stdout, "%s%s✗%s Denied request: %s\n", ansiBold, ansiRed, ansiReset, token)

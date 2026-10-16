@@ -2,6 +2,7 @@ package security
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/afterdarksys/adssh/internal/sys"
@@ -30,7 +32,16 @@ type FourEyesPending struct {
 	Hostname  string       `json:"hostname"`
 	Timestamp string       `json:"timestamp"`
 	Rule      FourEyesRule `json:"rule"`
+	// Status is set by ListPending: pending, or claimed while a decision is
+	// in progress. It is not stored in the request file.
+	Status string `json:"status,omitempty"`
 }
+
+// ListPending statuses.
+const (
+	FourEyesStatusPending = "pending"
+	FourEyesStatusClaimed = "claimed"
+)
 
 // FourEyesDir returns the HOME-derived base directory for four-eyes IPC files.
 // The default engine (and any engine constructed without an explicit
@@ -331,6 +342,63 @@ func approvalActor(sessionID string) string {
 	return ""
 }
 
+// Four-eyes decision surfaces recorded in FOUREYES_DECISION.
+const (
+	FourEyesSurfaceHTTP  = "http"
+	FourEyesSurfaceShell = "shell"
+	FourEyesSurfaceAPI   = "api"
+)
+
+// fourEyesDecisionsForbidden is set once by a process that must never approve
+// or deny, such as the MCP server. It cannot be cleared.
+var fourEyesDecisionsForbidden atomic.Bool
+
+// ForbidFourEyesDecisions makes every approve and deny in this process fail.
+// adssh-mcp calls it at startup so an agent cannot approve through any tool,
+// including run_shell or eval_starlark.
+func ForbidFourEyesDecisions() { fourEyesDecisionsForbidden.Store(true) }
+
+var (
+	errFourEyesDecisionsForbidden = errors.New("foureyes: this process cannot approve or deny requests")
+	errFourEyesAudit              = errors.New("foureyes: audit write failed; decision not recorded")
+)
+
+// shellApprover returns the identity a shell session may approve or deny as.
+//
+// Threats: SetIdentity renames a session at runtime (identity device login,
+// OIDC import), so session.User alone is caller-asserted. Only a session whose
+// user was set by the code that registered it (empty identity source: the
+// local shell, an SSH login), or one whose source a verifier set to
+// oidc-verified, may decide. A managed agent session, an unregistered session
+// id, a missing session id, and a process that forbade decisions are refused.
+// This does not stop the OS account that owns the four-eyes directory from
+// writing a marker file by hand.
+func shellApprover(sessionID string) (string, error) {
+	if fourEyesDecisionsForbidden.Load() {
+		return "", errFourEyesDecisionsForbidden
+	}
+	if sessionID == "" {
+		return "", fmt.Errorf("foureyes: approving identity requires a registered session")
+	}
+	session := sys.GetSession(sessionID)
+	if session == nil {
+		return "", fmt.Errorf("foureyes: approving identity requires a registered session")
+	}
+	if session.ManagedAgent() != nil {
+		return "", fmt.Errorf("foureyes: agent sessions cannot approve or deny")
+	}
+	switch source := session.IdentitySource(); source {
+	case "", sys.IdentitySourceOIDCVerified:
+	default:
+		return "", fmt.Errorf("foureyes: identity set by %s cannot approve or deny", source)
+	}
+	user := session.Info().User
+	if user == "" {
+		return "", fmt.Errorf("foureyes: approving identity is unavailable")
+	}
+	return user, nil
+}
+
 func validApprovalToken(token string) bool {
 	if token == "" || len(token) > 128 || filepath.Base(token) != token {
 		return false
@@ -343,9 +411,37 @@ func validApprovalToken(token string) bool {
 	return true
 }
 
-// ApproveRequestAs validates the approving actor against the pending request.
+// ApproveRequestAs approves as a caller-asserted identity through the Go API.
 // The requester may never self-approve; a configured rule approver must match.
 func (e *Engine) ApproveRequestAs(token, approver string) error {
+	return e.DecideRequest(token, approver, FourEyesSurfaceAPI, true)
+}
+
+// DenyRequestAs denies as a caller-asserted identity through the Go API, with
+// the same identity checks as ApproveRequestAs.
+func (e *Engine) DenyRequestAs(token, approver string) error {
+	return e.DecideRequest(token, approver, FourEyesSurfaceAPI, false)
+}
+
+// DecideRequest approves or denies one pending request as approver. The
+// caller must already have authenticated approver; surface names how.
+//
+// Order: identity checks, then an atomic rename of the pending file to a
+// claimed name (a second decision loses with "already decided"), then a
+// FOUREYES_DECISION audit event, then the marker. If the audit write fails the
+// claim is put back and no marker is written. If the marker write fails after
+// the audit event, FOUREYES_DECISION_REVERTED is logged and the claim is put
+// back, so the chain never holds a decision that did not take effect without
+// its revert. Claims older than their TTL are swept first (see
+// sweepStaleClaims).
+func (e *Engine) DecideRequest(token, approver, surface string, approve bool) error {
+	if fourEyesDecisionsForbidden.Load() {
+		return errFourEyesDecisionsForbidden
+	}
+	verb := "deny"
+	if approve {
+		verb = "approve"
+	}
 	if err := e.ensureFourEyesDirs(); err != nil {
 		return err
 	}
@@ -353,38 +449,136 @@ func (e *Engine) ApproveRequestAs(token, approver string) error {
 		return fmt.Errorf("foureyes: invalid approval token")
 	}
 	if approver == "" {
-		return fmt.Errorf("foureyes: approving identity is unavailable")
+		return fmt.Errorf("foureyes: %s identity is unavailable", verb)
 	}
+	e.sweepStaleClaims()
 
 	pending, pendingFile, markerName, err := e.locatePending(token)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("foureyes: request is not pending or was already decided")
+		}
 		return err
 	}
 	if pending.Requester != "" && approver == pending.Requester {
-		return fmt.Errorf("foureyes: requester %q cannot approve their own request", approver)
+		return fmt.Errorf("foureyes: requester %q cannot %s their own request", approver, verb)
 	}
 	if pending.Rule.Approver != "" && approver != pending.Rule.Approver {
 		return fmt.Errorf("foureyes: request requires approver %q", pending.Rule.Approver)
 	}
 
-	approvedPath := filepath.Join(e.fourEyesApprovedDir(), markerName)
+	claimed := filepath.Join(e.fourEyesPendingDir(), markerName+".claimed")
+	if err := os.Rename(pendingFile, claimed); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("foureyes: request %s already decided", markerName)
+		}
+		return fmt.Errorf("foureyes: claim pending request: %w", err)
+	}
+	// Stamp the claim time so the sweep measures how long the claim has been
+	// held, not how old the request is.
+	now := time.Now()
+	_ = os.Chtimes(claimed, now, now)
+	release := func(cause error) error {
+		if rerr := os.Rename(claimed, pendingFile); rerr != nil {
+			return fmt.Errorf("%w (restore pending request: %v)", cause, rerr)
+		}
+		return cause
+	}
+	// revert undoes a decision already written to the chain.
+	revert := func(cause error) error {
+		if lerr := e.LogEvent(fmt.Sprintf("FOUREYES_DECISION_REVERTED request=%s approver=%s reason=%q",
+			markerName, approver, cause.Error())); lerr != nil {
+			cause = fmt.Errorf("%w (audit revert: %v)", cause, lerr)
+		}
+		return release(cause)
+	}
+
+	if err := e.LogEvent(fmt.Sprintf("FOUREYES_DECISION request=%s approver=%s decision=%s surface=%s",
+		markerName, approver, verb, surface)); err != nil {
+		return release(fmt.Errorf("%w: %v", errFourEyesAudit, err))
+	}
+
+	dir := e.fourEyesDeniedDir()
+	field := "denied_at"
+	if approve {
+		dir = e.fourEyesApprovedDir()
+		field = "approved_at"
+	}
 	marker, err := json.Marshal(map[string]string{
-		"approved_at": time.Now().UTC().Format(time.RFC3339),
-		"approver":    approver,
+		field:      time.Now().UTC().Format(time.RFC3339),
+		"approver": approver,
+		"surface":  surface,
 	})
 	if err != nil {
-		return fmt.Errorf("foureyes: marshal approved marker: %w", err)
+		return revert(fmt.Errorf("foureyes: marshal %s marker: %w", verb, err))
 	}
-	if err := os.WriteFile(approvedPath, marker, 0600); err != nil {
-		return fmt.Errorf("foureyes: write approved marker: %w", err)
+	if err := writeExclusive0600(filepath.Join(dir, markerName), marker); err != nil {
+		return revert(fmt.Errorf("foureyes: write %s marker: %w", verb, err))
 	}
-	if err := os.Remove(pendingFile); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("foureyes: remove pending request: %w", err)
+	if err := os.Remove(claimed); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("foureyes: remove claimed request: %w", err)
 	}
 	return nil
 }
 
-// ApproveRequest writes an approved marker and removes the pending file.
+// sweepStaleClaims removes claimed requests held longer than their rule TTL
+// (default 300s). A claim that old belongs to a decision that crashed between
+// the claim and the marker; the requester has already timed out. Each removal
+// is logged as FOUREYES_CLAIM_EXPIRED before the file is deleted, and a claim
+// whose event cannot be logged is kept for the next sweep.
+func (e *Engine) sweepStaleClaims() {
+	dir := e.fourEyesPendingDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || !strings.HasSuffix(name, ".claimed") {
+			continue
+		}
+		info, err := ent.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		ttl := 300
+		if data, err := os.ReadFile(path); err == nil {
+			var p FourEyesPending
+			if json.Unmarshal(data, &p) == nil && p.Rule.TTL > 0 {
+				ttl = p.Rule.TTL
+			}
+		}
+		if now.Sub(info.ModTime()) <= time.Duration(ttl)*time.Second {
+			continue
+		}
+		if err := e.LogEvent(fmt.Sprintf("FOUREYES_CLAIM_EXPIRED request=%s", strings.TrimSuffix(name, ".claimed"))); err != nil {
+			continue
+		}
+		_ = os.Remove(path)
+	}
+}
+
+func writeExclusive0600(path string, data []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := file.Write(data)
+	cerr := file.Close()
+	if werr != nil {
+		_ = os.Remove(path)
+		return werr
+	}
+	if cerr != nil {
+		_ = os.Remove(path)
+		return cerr
+	}
+	return nil
+}
+
+// ApproveRequest approves as the local OS user through the Go API.
 func (e *Engine) ApproveRequest(token string) error {
 	return e.ApproveRequestAs(token, approvalActor(""))
 }
@@ -399,42 +593,6 @@ func ApproveRequestAs(token, approver string) error {
 // Deprecated: use Engine methods; retained for the binary until the engine facade lands.
 func ApproveRequest(token string) error {
 	return defaultEngine.ApproveRequest(token)
-}
-
-// DenyRequestAs writes a denied marker after the same identity checks as
-// ApproveRequestAs. The requester cannot deny their own request. A configured
-// rule approver must match. A missing pending file fails closed and writes
-// nothing.
-func (e *Engine) DenyRequestAs(token, approver string) error {
-	if err := e.ensureFourEyesDirs(); err != nil {
-		return err
-	}
-	if !validApprovalToken(token) {
-		return fmt.Errorf("foureyes: invalid approval token")
-	}
-	if approver == "" {
-		return fmt.Errorf("foureyes: denying identity is unavailable")
-	}
-
-	pending, pendingFile, markerName, err := e.locatePending(token)
-	if err != nil {
-		return err
-	}
-	if pending.Requester != "" && approver == pending.Requester {
-		return fmt.Errorf("foureyes: requester %q cannot deny their own request", approver)
-	}
-	if pending.Rule.Approver != "" && approver != pending.Rule.Approver {
-		return fmt.Errorf("foureyes: request requires approver %q", pending.Rule.Approver)
-	}
-
-	deniedPath := filepath.Join(e.fourEyesDeniedDir(), markerName)
-	if err := os.WriteFile(deniedPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
-		return fmt.Errorf("foureyes: write denied marker: %w", err)
-	}
-	if err := os.Remove(pendingFile); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("foureyes: remove pending request: %w", err)
-	}
-	return nil
 }
 
 // DenyRequest denies as the local OS user. Prefer DenyRequestAs when the
@@ -455,8 +613,11 @@ func DenyRequest(token string) error {
 	return defaultEngine.DenyRequest(token)
 }
 
-// ListPending returns all pending approval requests.
+// ListPending returns all pending approval requests, including requests
+// claimed by a decision still in progress (Status claimed). It sweeps stale
+// claims first.
 func (e *Engine) ListPending() ([]FourEyesPending, error) {
+	e.sweepStaleClaims()
 	entries, err := os.ReadDir(e.fourEyesPendingDir())
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -466,7 +627,14 @@ func (e *Engine) ListPending() ([]FourEyesPending, error) {
 	}
 	var out []FourEyesPending
 	for _, ent := range entries {
-		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+		status := FourEyesStatusPending
+		switch {
+		case ent.IsDir():
+			continue
+		case strings.HasSuffix(ent.Name(), ".json"):
+		case strings.HasSuffix(ent.Name(), ".claimed"):
+			status = FourEyesStatusClaimed
+		default:
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(e.fourEyesPendingDir(), ent.Name()))
@@ -477,6 +645,7 @@ func (e *Engine) ListPending() ([]FourEyesPending, error) {
 		if err := json.Unmarshal(data, &p); err != nil {
 			continue
 		}
+		p.Status = status
 		out = append(out, p)
 	}
 	return out, nil

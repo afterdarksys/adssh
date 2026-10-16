@@ -17,34 +17,18 @@ import (
 	"github.com/afterdarksys/adssh/internal/sys"
 )
 
+// audienceFor returns the audience pinOIDCProviders configured for provider.
 func audienceFor(t *testing.T, provider string) string {
 	t.Helper()
-	login := os.Getenv("ADSSH_OIDC_LOGIN_AUDIENCE")
-	admin := os.Getenv("ADSSH_OIDC_ADMIN_AUDIENCE")
-	if login != "" && admin != "" && login == admin {
-		t.Fatal("login and admin audiences must differ")
+	key := "ADSSH_OIDC_LOGIN_AUDIENCE"
+	if provider == OIDCProviderAdmin {
+		key = "ADSSH_OIDC_ADMIN_AUDIENCE"
 	}
-	switch provider {
-	case OIDCProviderLogin:
-		if login != "" {
-			return login
-		}
-		if admin != "" {
-			return admin + "-login"
-		}
-		return "login-audience"
-	case OIDCProviderAdmin:
-		if admin != "" {
-			return admin
-		}
-		if login != "" {
-			return login + "-admin"
-		}
-		return "admin-audience"
-	default:
-		t.Fatal("unknown provider")
-		return ""
+	value := os.Getenv(key)
+	if value == "" {
+		t.Fatalf("%s not pinned", key)
 	}
+	return value
 }
 
 func oidcClaims(issuer, audience, user string, groups []string, exp int64) map[string]any {
@@ -87,11 +71,12 @@ func TestOIDCRejectsWrongAudienceExpiredTamperedNoneAndOpaque(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(jwks)
 	}))
 	t.Cleanup(server.Close)
+	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-reject", User: "before"}
 	sys.RegisterSession(session)
@@ -107,7 +92,7 @@ func TestOIDCRejectsWrongAudienceExpiredTamperedNoneAndOpaque(t *testing.T) {
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, audience+"-other", "alice@example.com", []string{"ops"}, future)),
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience, "--jwks-url", server.URL,
+		"--provider", OIDCProviderLogin,
 	})
 	equalErr(t, err, "identity oidc import: audience mismatch")
 	assertOIDCUnset(t, session)
@@ -115,7 +100,7 @@ func TestOIDCRejectsWrongAudienceExpiredTamperedNoneAndOpaque(t *testing.T) {
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, audience, "alice@example.com", []string{"ops"}, time.Now().Add(-time.Hour).Unix())),
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience, "--jwks-url", server.URL,
+		"--provider", OIDCProviderLogin,
 	})
 	equalErr(t, err, "identity oidc import: token is expired")
 	assertOIDCUnset(t, session)
@@ -129,7 +114,7 @@ func TestOIDCRejectsWrongAudienceExpiredTamperedNoneAndOpaque(t *testing.T) {
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", tampered,
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience, "--jwks-url", server.URL,
+		"--provider", OIDCProviderLogin,
 	})
 	equalErr(t, err, "identity oidc import: signature verification failed")
 	assertOIDCUnset(t, session)
@@ -137,7 +122,7 @@ func TestOIDCRejectsWrongAudienceExpiredTamperedNoneAndOpaque(t *testing.T) {
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", unsignedJWT(t, "none", oidcClaims(issuer, audience, "alice@example.com", nil, future)),
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience, "--jwks-url", "http://127.0.0.1:1/jwks",
+		"--provider", OIDCProviderLogin,
 	})
 	equalErr(t, err, `identity oidc import: unsupported signing algorithm "none"`)
 	assertOIDCUnset(t, session)
@@ -150,10 +135,10 @@ func TestOIDCRejectsWrongAudienceExpiredTamperedNoneAndOpaque(t *testing.T) {
 
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
-		"--token", "not-a-jwt",
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience,
+		"--token", signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, audience, "alice@example.com", nil, future)),
+		"--provider", OIDCProviderLogin, "--jwks-url", server.URL,
 	})
-	equalErr(t, err, "identity oidc import: --provider requires --jwks-url or --discover")
+	equalErr(t, err, `identity oidc import: unknown option "--jwks-url"`)
 	assertOIDCUnset(t, session)
 }
 
@@ -166,10 +151,11 @@ func TestLoginAudienceDoesNotGrantPrivilegedRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(jwks)
 	}))
 	t.Cleanup(server.Close)
+	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-login", User: "before"}
 	sys.RegisterSession(session)
@@ -179,7 +165,7 @@ func TestLoginAudienceDoesNotGrantPrivilegedRoles(t *testing.T) {
 	_, err = runVBin(t, nil, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, audience, "alice@example.com", []string{"ops", "os-root", "gridops"}, time.Now().Add(time.Hour).Unix())),
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience, "--jwks-url", server.URL,
+		"--provider", OIDCProviderLogin,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -205,10 +191,11 @@ func TestAdminAudienceElevateGridOpsNotOSRootAndUIDUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(jwks)
 	}))
 	t.Cleanup(server.Close)
+	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-admin", User: "alice"}
 	sys.RegisterSession(session)
@@ -222,7 +209,7 @@ func TestAdminAudienceElevateGridOpsNotOSRootAndUIDUnchanged(t *testing.T) {
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, audience, "alice@example.com", []string{"gridops", "ops"}, time.Now().Add(time.Hour).Unix())),
-		"--provider", OIDCProviderAdmin, "--issuer", issuer, "--audience", audience, "--jwks-url", server.URL,
+		"--provider", OIDCProviderAdmin,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -275,10 +262,11 @@ func TestOIDCImportChainStoresFingerprintOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(jwks)
 	}))
 	t.Cleanup(server.Close)
+	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-chain", User: "alice"}
 	sys.RegisterSession(session)
@@ -299,7 +287,7 @@ func TestOIDCImportChainStoresFingerprintOnly(t *testing.T) {
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", token,
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience, "--jwks-url", server.URL,
+		"--provider", OIDCProviderLogin,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -327,10 +315,11 @@ func TestIdentityStatusJSONOmitsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(jwks)
 	}))
 	t.Cleanup(server.Close)
+	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "status-login", User: "before"}
 	sys.RegisterSession(session)
@@ -344,7 +333,7 @@ func TestIdentityStatusJSONOmitsToken(t *testing.T) {
 	_, err = runVBin(t, eng, session.ID, []string{
 		"identity", "oidc", "import",
 		"--token", signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, audience, "alice@example.com", []string{"ops"}, time.Now().Add(time.Hour).Unix())),
-		"--provider", OIDCProviderLogin, "--issuer", issuer, "--audience", audience, "--jwks-url", server.URL,
+		"--provider", OIDCProviderLogin,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -22,7 +22,7 @@ func TestDeviceLoginStoresBearerAndSetsUser(t *testing.T) {
 	const access = "opaque-access-token-value"
 	const deviceCode = "device-code-secret"
 	var base string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
 			t.Errorf("content-type %q", ct)
 			http.Error(w, "bad type", http.StatusBadRequest)
@@ -62,6 +62,7 @@ func TestDeviceLoginStoresBearerAndSetsUser(t *testing.T) {
 	}))
 	defer server.Close()
 	base = server.URL
+	pinControlPlane(t, server)
 
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "device.token")
@@ -78,7 +79,7 @@ func TestDeviceLoginStoresBearerAndSetsUser(t *testing.T) {
 	ctx := WithSessionID(context.WithValue(context.Background(), engineCtxKey, engine), sessionID)
 
 	result, err := DeviceLogin(ctx, DeviceLoginRequest{
-		URL:       server.URL + "/ignored?leak=1#frag",
+		URL:       server.URL,
 		Username:  "alice",
 		TokenFile: tokenPath,
 		Timeout:   time.Second,
@@ -139,13 +140,15 @@ func TestDeviceLoginRejectsUnsafeURLsWithoutDial(t *testing.T) {
 	ctx := WithSessionID(context.Background(), sessionID)
 	tokenPath := filepath.Join(t.TempDir(), "device.token")
 	for _, raw := range []string{
-		"http://example.com/oauth",
-		"http://localhost/oauth",
-		"http://169.254.169.254/latest",
-		"https://metadata.google.internal/computeMetadata/v1/",
+		"http://example.com",
+		"http://127.0.0.1",
+		"http://localhost",
+		"https://169.254.169.254",
+		"https://metadata.google.internal",
+		"https://10.0.0.5",
 	} {
+		t.Setenv("ADSSH_CONTROLPLANE_URL", raw)
 		_, err := DeviceLogin(ctx, DeviceLoginRequest{
-			URL:       raw,
 			Username:  "alice",
 			TokenFile: tokenPath,
 			Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -153,8 +156,11 @@ func TestDeviceLoginRejectsUnsafeURLsWithoutDial(t *testing.T) {
 				return nil, nil
 			})},
 		})
-		if err == nil || err.Error() != "url_rejected" {
+		if err == nil || !strings.HasPrefix(err.Error(), "url_rejected: ADSSH_CONTROLPLANE_URL") {
 			t.Fatalf("%s: %v", raw, err)
+		}
+		if raw == "https://10.0.0.5" && !strings.Contains(err.Error(), "set ADSSH_CALLBACK_ALLOW_PRIVATE=1 to allow it") {
+			t.Fatalf("%s: private host error does not name the override: %v", raw, err)
 		}
 	}
 }
@@ -226,7 +232,7 @@ func TestDeviceLoginMapsPollAndRedirectFailures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var base string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if err := r.ParseForm(); err != nil && r.URL.Path != "" {
 					t.Errorf("form: %v", err)
 				}
@@ -234,6 +240,7 @@ func TestDeviceLoginMapsPollAndRedirectFailures(t *testing.T) {
 			}))
 			defer server.Close()
 			base = server.URL
+			pinControlPlane(t, server)
 			sessionID := "device-login-" + tc.name
 			sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
 			t.Cleanup(func() { sys.UnregisterSession(sessionID) })
@@ -255,49 +262,62 @@ func TestDeviceLoginMapsPollAndRedirectFailures(t *testing.T) {
 	}
 }
 
-func TestDeviceLoginIntervalZeroDoesNotSleep(t *testing.T) {
+// TestDeviceLoginIntervalFloorAndSlowDown replaces a test that asserted
+// --interval 0 busy-polls. The floor is 1s and slow_down adds 5s (RFC 8628).
+func TestDeviceLoginIntervalFloorAndSlowDown(t *testing.T) {
 	var polls int
 	var base string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		if r.URL.Path == "/oauth/device" {
 			writeDeviceStart(w, base)
 			return
 		}
 		polls++
-		if polls == 1 {
+		switch polls {
+		case 1:
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "authorization_pending"})
+		case 2:
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": "slow_down"})
-			return
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "interval-secret",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+			})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "interval-secret",
-			"token_type":   "Bearer",
-			"expires_in":   3600,
-		})
 	}))
 	defer server.Close()
 	base = server.URL
+	pinControlPlane(t, server)
+	var slept []time.Duration
+	prev := deviceSleepFn
+	deviceSleepFn = func(_ context.Context, _ time.Time, interval time.Duration) error {
+		slept = append(slept, interval)
+		return nil
+	}
+	t.Cleanup(func() { deviceSleepFn = prev })
 	sessionID := "device-login-interval"
 	sys.RegisterSession(&sys.Session{ID: sessionID, User: "bob"})
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	ctx := WithSessionID(context.Background(), sessionID)
-	start := time.Now()
 	result, err := DeviceLogin(ctx, DeviceLoginRequest{
-		URL:         server.URL,
 		Username:    "alice",
 		TokenFile:   filepath.Join(t.TempDir(), "device.token"),
 		Interval:    0,
 		IntervalSet: true,
-		Timeout:     time.Second,
+		Timeout:     time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 500*time.Millisecond {
-		t.Fatalf("slept %s", time.Since(start))
+	if len(slept) != 2 || slept[0] != time.Second || slept[1] != 6*time.Second {
+		t.Fatalf("sleeps = %v, want [1s 6s]", slept)
 	}
 	if result.Fingerprint != fingerprintSecret("interval-secret") {
 		t.Fatal(result.Fingerprint)

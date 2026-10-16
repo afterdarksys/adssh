@@ -11,10 +11,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -37,8 +39,8 @@ func (identityBinary) Description() string {
 }
 func (identityBinary) Usage() string {
 	return `identity status [--json]
-identity device login --url URL --username USER [--token-file PATH] [--interval duration] [--timeout duration]
-identity oidc import (--token token|--token-file path|--env name) [--provider login|admin] [--issuer iss] [--audience aud] [--jwks-url url|--discover] [--user-claim claim] [--group-claim claim]
+identity device login --username USER [--url ADSSH_CONTROLPLANE_URL] [--token-file PATH] [--interval duration] [--timeout duration]
+identity oidc import (--token token|--token-file path|--env name) [--provider login|admin] [--user-claim claim] [--group-claim claim]
 identity ssh-ca init --out ca_key
 identity ssh-ca issue --ca ca_key --pub user.pub --principal name [--principal group] --for duration --out user-cert.pub`
 }
@@ -109,8 +111,8 @@ func identityDeviceLogin(ctx context.Context, args []string) error {
 			req.Timeout = timeout
 		}
 	}
-	if req.URL == "" || req.Username == "" {
-		return fmt.Errorf("identity device login: --url and --username are required")
+	if req.Username == "" {
+		return fmt.Errorf("identity device login: --username is required")
 	}
 	result, err := DeviceLogin(ctx, req)
 	if err != nil {
@@ -206,26 +208,6 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 				return fmt.Errorf("identity oidc import: --provider requires a value")
 			}
 			opts.Provider = args[i]
-		case "--issuer":
-			i++
-			if i >= len(args) {
-				return fmt.Errorf("identity oidc import: --issuer requires a value")
-			}
-			opts.Issuer = args[i]
-		case "--audience":
-			i++
-			if i >= len(args) {
-				return fmt.Errorf("identity oidc import: --audience requires a value")
-			}
-			opts.Audience = args[i]
-		case "--jwks-url":
-			i++
-			if i >= len(args) {
-				return fmt.Errorf("identity oidc import: --jwks-url requires a value")
-			}
-			opts.JWKSURL = args[i]
-		case "--discover":
-			opts.Discover = true
 		case "--user-claim":
 			i++
 			if i >= len(args) {
@@ -255,9 +237,19 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 	}
 	principals := FilterUnprivileged(groups)
 	var eligible []string
+	if opts.Provider == OIDCProviderAdmin {
+		eligible = PrivilegedEligible(groups)
+	}
+	// Log the fingerprint only. The raw JWT must not appear in the format
+	// string, or redaction would hide it and the chain check would be weaker.
+	// The audit line is written before the identity changes; a failed write
+	// leaves the session as it was.
+	if err := engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_OIDC_IMPORT: session=%s user=%s issuer=%s provider=%s fingerprint=%s groups=%s eligible=%s",
+		session.ID, user, stringClaim(claims, "iss"), opts.Provider, fingerprintSecret(opts.Token), strings.Join(principals, ","), strings.Join(eligible, ","))); err != nil {
+		return fmt.Errorf("identity oidc import: audit write failed")
+	}
 	switch opts.Provider {
 	case OIDCProviderAdmin:
-		eligible = PrivilegedEligible(groups)
 		session.SetIdentity(user, principals)
 		session.SetOIDC(OIDCProviderAdmin, eligible)
 	case OIDCProviderLogin:
@@ -267,10 +259,10 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 		session.SetIdentity(user, principals)
 		session.SetOIDC("", nil)
 	}
-	// Log the fingerprint only. The raw JWT must not appear in the format
-	// string, or redaction would hide it and the chain check would be weaker.
-	engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_OIDC_IMPORT: session=%s user=%s issuer=%s provider=%s fingerprint=%s groups=%s eligible=%s",
-		session.ID, user, stringClaim(claims, "iss"), opts.Provider, fingerprintSecret(opts.Token), strings.Join(principals, ","), strings.Join(eligible, ",")))
+	// parseOIDCIdentity verified the RS256 signature against the pinned JWKS,
+	// the pinned issuer and audience, and the token times. Only that path
+	// reaches here, so the new user may decide four-eyes requests.
+	session.SetIdentitySource(sys.IdentitySourceOIDCVerified)
 	fmt.Fprintf(hc.Stdout, "identity: user=%s principals=%s issuer=%s",
 		user, strings.Join(principals, ","), stringClaim(claims, "iss"))
 	if opts.Provider != "" {
@@ -286,70 +278,91 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 type oidcImportOptions struct {
 	Token      string
 	Provider   string
-	Issuer     string
-	Audience   string
 	UserClaim  string
 	GroupClaim string
-	JWKSURL    string
-	Discover   bool
 }
 
-// Threats: a --provider import must verify the JWT (allowlisted RS256, expiry,
-// audience) and must not treat a login-audience groups claim as os-root,
-// adssh-admin, or gridops. An empty provider keeps the legacy parse path so
-// an unsigned token is not suddenly rejected. The raw token is not logged.
-// Non-goals: this does not stop a stolen admin-audience JWT before it expires.
-func prepareOIDCImport(opts oidcImportOptions) error {
-	if opts.Provider == "" {
-		return nil
-	}
-	if opts.Audience == "" {
-		return fmt.Errorf("identity oidc import: --provider requires --audience")
-	}
-	if opts.JWKSURL == "" && !opts.Discover {
-		return fmt.Errorf("identity oidc import: --provider requires --jwks-url or --discover")
-	}
-	switch opts.Provider {
-	case OIDCProviderLogin, OIDCProviderAdmin:
-	default:
-		return fmt.Errorf("identity oidc import: --provider must be login or admin")
-	}
-	loginAud := os.Getenv("ADSSH_OIDC_LOGIN_AUDIENCE")
-	adminAud := os.Getenv("ADSSH_OIDC_ADMIN_AUDIENCE")
-	if loginAud != "" && adminAud != "" && loginAud == adminAud {
-		return fmt.Errorf("identity oidc import: login and admin audiences must differ")
-	}
-	switch opts.Provider {
-	case OIDCProviderLogin:
-		if loginAud != "" && opts.Audience != loginAud {
-			return fmt.Errorf("identity oidc import: audience mismatch")
-		}
-		if adminAud != "" && opts.Audience == adminAud {
-			return fmt.Errorf("identity oidc import: audience mismatch")
-		}
+// oidcProviderConfig is the operator-pinned trust anchor for one provider.
+type oidcProviderConfig struct {
+	Issuer   string
+	JWKSURL  string
+	Audience string
+	// OtherAudience is the other provider's audience. A token naming it is
+	// refused so one token cannot serve both providers.
+	OtherAudience string
+}
+
+// oidcMaxLifetime caps exp-now and exp-iat. A token valid for longer is
+// refused so a long-lived token cannot hold an identity indefinitely.
+const oidcMaxLifetime = 24 * time.Hour
+
+// oidcClockSkew is the leeway for nbf and iat in the future.
+const oidcClockSkew = time.Minute
+
+// oidcResponseLimit caps a JWKS response body.
+const oidcResponseLimit = 1 << 20
+
+// Threats: an import renames the session user and, for --provider admin,
+// makes privileged roles eligible, so every import must verify a JWT signed
+// by a key the operator trusts. The issuer and JWKS URL come only from
+// operator config (ADSSH_OIDC_ISSUER/ADSSH_OIDC_JWKS_URL for the default and
+// login providers, ADSSH_OIDC_ADMIN_ISSUER/ADSSH_OIDC_ADMIN_JWKS_URL for
+// admin); an unset value fails closed and the caller cannot name another key
+// source. The audience is pinned the same way (ADSSH_OIDC_LOGIN_AUDIENCE for
+// the default and login providers, ADSSH_OIDC_ADMIN_AUDIENCE for admin), both
+// must be set and must differ, and a token whose aud also names the other
+// provider's audience is refused, so a token the same IdP issued for another
+// relying party (or for the login audience) cannot be replayed to rename the
+// session user or to make privileged roles eligible. The JWKS is fetched over https with TLS 1.3, no redirects, a
+// timeout, a 1 MiB cap, and private/metadata hosts refused. RS256 is the only
+// algorithm. iss must equal the configured issuer; aud must contain the
+// configured audience; exp is
+// required, unexpired, and at most 24h out (and at most 24h after iat); nbf
+// and iat, when present, may not be in the future. A login-audience groups
+// claim never grants os-root, adssh-admin, or gridops. The raw token is not
+// logged; only its SHA-256 fingerprint is. Non-goals: this does not stop a
+// stolen, unexpired token from the configured issuer, and it does not detect
+// a compromised identity provider.
+func oidcProviderSettings(provider string) (oidcProviderConfig, error) {
+	var cfg oidcProviderConfig
+	loginAud := strings.TrimSpace(os.Getenv("ADSSH_OIDC_LOGIN_AUDIENCE"))
+	adminAud := strings.TrimSpace(os.Getenv("ADSSH_OIDC_ADMIN_AUDIENCE"))
+	switch provider {
+	case "", OIDCProviderLogin:
+		cfg = oidcProviderConfig{Issuer: os.Getenv("ADSSH_OIDC_ISSUER"), JWKSURL: os.Getenv("ADSSH_OIDC_JWKS_URL"),
+			Audience: loginAud, OtherAudience: adminAud}
 	case OIDCProviderAdmin:
-		if adminAud != "" && opts.Audience != adminAud {
-			return fmt.Errorf("identity oidc import: audience mismatch")
-		}
-		if loginAud != "" && opts.Audience == loginAud {
-			return fmt.Errorf("identity oidc import: audience mismatch")
-		}
+		cfg = oidcProviderConfig{Issuer: os.Getenv("ADSSH_OIDC_ADMIN_ISSUER"), JWKSURL: os.Getenv("ADSSH_OIDC_ADMIN_JWKS_URL"),
+			Audience: adminAud, OtherAudience: loginAud}
+	default:
+		return oidcProviderConfig{}, fmt.Errorf("identity oidc import: --provider must be login or admin")
 	}
-	return nil
+	cfg.Issuer = strings.TrimSpace(cfg.Issuer)
+	cfg.JWKSURL = strings.TrimSpace(cfg.JWKSURL)
+	if cfg.Issuer == "" || cfg.JWKSURL == "" || cfg.Audience == "" {
+		vars := "ADSSH_OIDC_ISSUER, ADSSH_OIDC_JWKS_URL and ADSSH_OIDC_LOGIN_AUDIENCE"
+		if provider == OIDCProviderAdmin {
+			vars = "ADSSH_OIDC_ADMIN_ISSUER, ADSSH_OIDC_ADMIN_JWKS_URL and ADSSH_OIDC_ADMIN_AUDIENCE"
+		}
+		return oidcProviderConfig{}, fmt.Errorf("identity oidc import: oidc provider not configured: set %s", vars)
+	}
+	if cfg.Audience == cfg.OtherAudience {
+		return oidcProviderConfig{}, fmt.Errorf("identity oidc import: login and admin audiences must differ")
+	}
+	return cfg, nil
 }
 
 func parseOIDCIdentity(ctx context.Context, opts oidcImportOptions) (map[string]any, string, []string, error) {
-	if err := prepareOIDCImport(opts); err != nil {
-		return nil, "", nil, err
-	}
 	parts := strings.Split(opts.Token, ".")
 	if len(parts) != 3 {
 		return nil, "", nil, fmt.Errorf("identity oidc import: token must be a JWT")
 	}
-	if opts.JWKSURL != "" || opts.Discover {
-		if err := verifyOIDCTokenSignature(ctx, opts); err != nil {
-			return nil, "", nil, err
-		}
+	provider, err := oidcProviderSettings(opts.Provider)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if err := verifyOIDCTokenSignature(ctx, opts.Token, provider.JWKSURL); err != nil {
+		return nil, "", nil, err
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -359,14 +372,15 @@ func parseOIDCIdentity(ctx context.Context, opts oidcImportOptions) (map[string]
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return nil, "", nil, fmt.Errorf("identity oidc import: parse token payload: %w", err)
 	}
-	if opts.Issuer != "" && stringClaim(claims, "iss") != opts.Issuer {
+	if iss := stringClaim(claims, "iss"); iss == "" || iss != provider.Issuer {
 		return nil, "", nil, fmt.Errorf("identity oidc import: issuer mismatch")
 	}
-	if opts.Audience != "" && !claimContains(claims["aud"], opts.Audience) {
+	if !claimContains(claims["aud"], provider.Audience) ||
+		(provider.OtherAudience != "" && claimContains(claims["aud"], provider.OtherAudience)) {
 		return nil, "", nil, fmt.Errorf("identity oidc import: audience mismatch")
 	}
-	if exp, ok := numericClaim(claims, "exp"); ok && time.Now().Unix() >= int64(exp) {
-		return nil, "", nil, fmt.Errorf("identity oidc import: token is expired")
+	if err := checkOIDCTimes(claims, time.Now()); err != nil {
+		return nil, "", nil, err
 	}
 	user := stringClaim(claims, opts.UserClaim)
 	if user == "" {
@@ -398,8 +412,42 @@ type oidcJWK struct {
 	E         string `json:"e"`
 }
 
-func verifyOIDCTokenSignature(ctx context.Context, opts oidcImportOptions) error {
-	parts := strings.Split(opts.Token, ".")
+// checkOIDCTimes requires exp and enforces the lifetime cap, nbf, and iat.
+func checkOIDCTimes(claims map[string]any, now time.Time) error {
+	exp, ok := numericClaim(claims, "exp")
+	if !ok {
+		return fmt.Errorf("identity oidc import: token has no exp")
+	}
+	expAt := time.Unix(int64(exp), 0)
+	if !now.Before(expAt) {
+		return fmt.Errorf("identity oidc import: token is expired")
+	}
+	if expAt.Sub(now) > oidcMaxLifetime {
+		return fmt.Errorf("identity oidc import: token lifetime exceeds 24h")
+	}
+	if nbf, ok := numericClaim(claims, "nbf"); ok {
+		if time.Unix(int64(nbf), 0).After(now.Add(oidcClockSkew)) {
+			return fmt.Errorf("identity oidc import: token is not yet valid")
+		}
+	} else if _, present := claims["nbf"]; present {
+		return fmt.Errorf("identity oidc import: token nbf is invalid")
+	}
+	if iat, ok := numericClaim(claims, "iat"); ok {
+		iatAt := time.Unix(int64(iat), 0)
+		if iatAt.After(now.Add(oidcClockSkew)) {
+			return fmt.Errorf("identity oidc import: token is not yet valid")
+		}
+		if expAt.Sub(iatAt) > oidcMaxLifetime {
+			return fmt.Errorf("identity oidc import: token lifetime exceeds 24h")
+		}
+	} else if _, present := claims["iat"]; present {
+		return fmt.Errorf("identity oidc import: token iat is invalid")
+	}
+	return nil
+}
+
+func verifyOIDCTokenSignature(ctx context.Context, token, jwksURL string) error {
+	parts := strings.Split(token, ".")
 	var header oidcJWTHeader
 	headerData, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
@@ -411,9 +459,9 @@ func verifyOIDCTokenSignature(ctx context.Context, opts oidcImportOptions) error
 	if header.Algorithm != "RS256" {
 		return fmt.Errorf("identity oidc import: unsupported signing algorithm %q", header.Algorithm)
 	}
-	jwks, err := fetchOIDCJWKS(ctx, opts)
-	if err != nil {
-		return err
+	var jwks oidcJWKSet
+	if err := fetchOIDCJSON(ctx, jwksURL, &jwks); err != nil {
+		return fmt.Errorf("identity oidc import: fetch jwks: %w", err)
 	}
 	publicKey, err := selectOIDCRSAKey(jwks, header.KeyID, header.Algorithm)
 	if err != nil {
@@ -431,51 +479,41 @@ func verifyOIDCTokenSignature(ctx context.Context, opts oidcImportOptions) error
 	return nil
 }
 
-func fetchOIDCJWKS(ctx context.Context, opts oidcImportOptions) (oidcJWKSet, error) {
-	jwksURL := opts.JWKSURL
-	if opts.Discover {
-		if opts.Issuer == "" {
-			return oidcJWKSet{}, fmt.Errorf("identity oidc import: --discover requires --issuer")
+// fetchOIDCJSON GETs an operator-configured https URL through the callback
+// client: validated host, TLS 1.3, no redirects, timeout, and a size cap.
+func fetchOIDCJSON(ctx context.Context, rawURL string, target any) error {
+	parsed, err := validateCallbackURL(rawURL)
+	if errors.Is(err, errPrivateHost) {
+		host := ""
+		if p, perr := url.Parse(rawURL); perr == nil {
+			host = p.Hostname()
 		}
-		discoveryURL := strings.TrimRight(opts.Issuer, "/") + "/.well-known/openid-configuration"
-		var discovery struct {
-			JWKSURI string `json:"jwks_uri"`
-		}
-		if err := fetchOIDCJSON(ctx, discoveryURL, &discovery); err != nil {
-			return oidcJWKSet{}, fmt.Errorf("identity oidc import: discover issuer metadata: %w", err)
-		}
-		if discovery.JWKSURI == "" {
-			return oidcJWKSet{}, fmt.Errorf("identity oidc import: issuer metadata did not include jwks_uri")
-		}
-		jwksURL = discovery.JWKSURI
+		return fmt.Errorf("url_rejected: host %s is a private address; set ADSSH_CALLBACK_ALLOW_PRIVATE=1 to allow it", host)
 	}
-	if jwksURL == "" {
-		return oidcJWKSet{}, fmt.Errorf("identity oidc import: --jwks-url or --discover is required for signature verification")
+	if err != nil || parsed.Scheme != "https" {
+		return fmt.Errorf("url_rejected")
 	}
-	var jwks oidcJWKSet
-	if err := fetchOIDCJSON(ctx, jwksURL, &jwks); err != nil {
-		return oidcJWKSet{}, fmt.Errorf("identity oidc import: fetch jwks: %w", err)
-	}
-	return jwks, nil
-}
-
-func fetchOIDCJSON(ctx context.Context, url string, target any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("url_rejected")
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := callbackHTTPClient(10 * time.Second).Do(req)
 	if err != nil {
-		return err
+		if errors.Is(err, errRedirectDenied) {
+			return errRedirectDenied
+		}
+		return fmt.Errorf("request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("http status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, oidcResponseLimit+1))
 	if err != nil {
-		return err
+		return fmt.Errorf("read failed")
+	}
+	if len(body) > oidcResponseLimit {
+		return fmt.Errorf("response too large")
 	}
 	return json.Unmarshal(body, target)
 }

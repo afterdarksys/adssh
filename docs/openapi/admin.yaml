@@ -4,20 +4,78 @@ info:
   version: "0.0.0"
   description: |
     Local admin HTTP API served by `adssh admin serve`. This is not a second
-    public API. The default listen address is 127.0.0.1:8787. `--listen` can
-    bind a wider address. Every path except /healthz requires the admin API
-    key. The key is compared by SHA-256 of both sides, then a constant-time
-    compare. Audit events record key_fp, the SHA-256 fingerprint, and do not
-    record the key or the request body.
+    public API. The default listen address is 127.0.0.1:8787. `--listen`
+    accepts a loopback address or `unix:/absolute/path` only; 0.0.0.0, ::,
+    an empty host, and non-loopback addresses are refused. A Unix socket is
+    mode 0600 in a 0700 directory owned by the user.
 
-    GET /v1/approvals returns the pending handler objects, including the
-    approval token, to a caller who already holds the admin API key. The MCP
-    tool admin_list_approvals does not. Anyone who can read the 0600 pending
-    file can also read the token.
+    Authentication: send a key as `Authorization: Bearer <key>` or
+    `X-ADSSH-API-Key: <key>`. Named keys come from the 0600 file named by
+    ADSSH_ADMIN_KEYS (or `--keys-file`), one `name=key` per line. The matching
+    key's name is the principal. Approve, deny, and unban require a named key
+    and act as that name. The legacy key ADSSH_ADMIN_API_KEY (or `--api-key`)
+    can only read and gets 403 on those routes. Every path except /healthz
+    requires a key. Keys are compared by SHA-256 of both sides, then a
+    constant-time compare, against every configured key. Audit events record
+    key_fp (the SHA-256 fingerprint) and principal, and do not record the key
+    or the request body.
+
+    GET /v1/approvals returns public request ids. The stored token is not
+    returned. A decision is written to the audit chain as FOUREYES_DECISION
+    before the marker; if that write fails the request stays pending.
+security:
+  - bearerAuth: []
+  - apiKeyHeader: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-ADSSH-API-Key
+  schemas:
+    Decision:
+      type: object
+      additionalProperties: false
+      description: |
+        Exactly one of request_id or token, both naming the public request id.
+        An approver field is rejected with 400; the approver is the named key.
+      properties:
+        request_id:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{1,128}$"
+        token:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{1,128}$"
+    ApprovalPublic:
+      type: object
+      properties:
+        request_id:
+          type: string
+        fingerprint:
+          type: string
+          description: SHA-256 of the stored token, only for a legacy file with no request id.
+        command:
+          type: string
+        requester:
+          type: string
+        hostname:
+          type: string
+        timestamp:
+          type: string
+        status:
+          type: string
+          enum: [pending, claimed]
+          description: claimed means a decision is in progress and the request is temporarily locked; a claim older than the rule TTL is swept and logged.
+        rule:
+          type: object
 paths:
   /healthz:
     get:
       summary: Unauthenticated liveness. Not written to the admin audit event.
+      security: []
       responses:
         "200":
           description: ok
@@ -39,32 +97,58 @@ paths:
           description: Missing or wrong API key.
   /v1/approvals:
     get:
-      summary: Pending four-eyes requests, including the stored token.
+      summary: Pending four-eyes requests by public request id. The stored token is not returned.
       responses:
         "200":
           description: Pending requests from this handler's engine.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApprovalPublic"
         "401":
-          description: Missing or wrong API key.
+          description: Missing or wrong key.
   /v1/approvals/approve:
     post:
-      summary: Approve one pending request as a distinct approver.
+      summary: Approve one pending request as the named key's principal. Requires a named key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Decision"
       responses:
         "200":
-          description: Approved.
+          description: Approved. Body is {"ok":true,"action":"approved","approver":"<key name>"}.
         "400":
-          description: Invalid token, empty approver, self-approval, or wrong approver.
+          description: Invalid id, an approver field, an unknown field, self-approval, wrong approver, or already decided.
         "401":
-          description: Missing or wrong API key.
+          description: Missing or wrong key.
+        "403":
+          description: Legacy key, or a process that forbids decisions.
+        "503":
+          description: audit_unavailable. The decision was not recorded and the request stays pending.
   /v1/approvals/deny:
     post:
-      summary: Deny one pending request as a distinct approver.
+      summary: Deny one pending request as the named key's principal. Requires a named key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Decision"
       responses:
         "200":
-          description: Denied.
+          description: Denied. Body is {"ok":true,"action":"denied","approver":"<key name>"}.
         "400":
-          description: Invalid token, empty approver, self-deny, or wrong approver.
+          description: Invalid id, an approver field, an unknown field, self-deny, wrong approver, or already decided.
         "401":
-          description: Missing or wrong API key.
+          description: Missing or wrong key.
+        "403":
+          description: Legacy key, or a process that forbids decisions.
+        "503":
+          description: audit_unavailable. The decision was not recorded and the request stays pending.
   /v1/explain:
     post:
       summary: Explain a command without executing it.
@@ -123,7 +207,7 @@ paths:
           description: Missing or wrong API key.
   /v1/guard/unban:
     post:
-      summary: Remove one ban. Body is {"addr":"<ip or host:port>"}.
+      summary: Remove one ban. Requires a named key. Body is {"addr":"<ip or host:port>"}.
       responses:
         "200":
           description: Ban removed. Body is {"ok":true,"addr":"<canonical ip>"}.
@@ -131,6 +215,8 @@ paths:
           description: Empty, invalid, or unknown-field body.
         "401":
           description: Missing or wrong API key.
+        "403":
+          description: Legacy key. Unban requires a named key.
         "404":
           description: Address is not banned.
         "500":

@@ -21,21 +21,21 @@ import (
 )
 
 func TestParseOIDCIdentity(t *testing.T) {
-	payload, err := json.Marshal(map[string]any{
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := jwksTLSServer(t, &private.PublicKey)
+	pinOIDCProviders(t, "https://issuer.example", server)
+	token := signedOIDCTestToken(t, private, "kid", map[string]any{
 		"iss":    "https://issuer.example",
-		"aud":    []string{"adssh"},
+		"aud":    []string{"login-audience"},
 		"email":  "alice@example.com",
 		"groups": []string{"ops", "prod-admin"},
 		"exp":    time.Now().Add(time.Hour).Unix(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := "header." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 	_, user, groups, err := parseOIDCIdentity(context.Background(), oidcImportOptions{
 		Token:      token,
-		Issuer:     "https://issuer.example",
-		Audience:   "adssh",
 		UserClaim:  "email",
 		GroupClaim: "groups",
 	})
@@ -47,6 +47,32 @@ func TestParseOIDCIdentity(t *testing.T) {
 	}
 	if len(groups) != 2 || groups[0] != "ops" || groups[1] != "prod-admin" {
 		t.Fatalf("groups = %#v", groups)
+	}
+}
+
+func TestParseOIDCIdentityRejectsUnsignedDefaultProvider(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := jwksTLSServer(t, &private.PublicKey)
+	pinOIDCProviders(t, "https://issuer.example", server)
+	payload, err := json.Marshal(map[string]any{
+		"iss":   "https://issuer.example",
+		"aud":   "login-audience",
+		"email": "bob@example.com",
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"kid"}`))
+	token := header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+	_, _, _, err = parseOIDCIdentity(context.Background(), oidcImportOptions{
+		Token: token, UserClaim: "email", GroupClaim: "groups",
+	})
+	if err == nil || err.Error() != "identity oidc import: signature verification failed" {
+		t.Fatalf("unsigned default-provider token: %v", err)
 	}
 }
 
@@ -78,45 +104,47 @@ func TestVerifyOIDCTokenSignatureFromJWKS(t *testing.T) {
 	}
 }
 
-func TestParseOIDCIdentityDiscoversJWKS(t *testing.T) {
+func TestParseOIDCIdentityUsesConfiguredJWKSOverTLS(t *testing.T) {
 	private, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var issuer string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/.well-known/openid-configuration":
-			_ = json.NewEncoder(w).Encode(map[string]any{"jwks_uri": issuer + "/jwks"})
-		case "/jwks":
-			_ = json.NewEncoder(w).Encode(oidcJWKSet{Keys: []oidcJWK{rsaJWK("kid-1", &private.PublicKey)}})
-		default:
+	var fetched int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jwks" {
 			http.NotFound(w, r)
+			return
 		}
+		fetched++
+		_ = json.NewEncoder(w).Encode(oidcJWKSet{Keys: []oidcJWK{rsaJWK("kid-1", &private.PublicKey)}})
 	}))
-	defer server.Close()
-	issuer = server.URL
+	t.Cleanup(server.Close)
+	trustCallbackTLSServer(t, server)
+	issuer := "https://issuer.example"
+	t.Setenv("ADSSH_OIDC_ISSUER", issuer)
+	t.Setenv("ADSSH_OIDC_JWKS_URL", server.URL+"/jwks")
+	t.Setenv("ADSSH_OIDC_LOGIN_AUDIENCE", "adssh")
+	t.Setenv("ADSSH_OIDC_ADMIN_AUDIENCE", "adssh-admin")
 	token := signedOIDCTestToken(t, private, "kid-1", map[string]any{
 		"iss":    issuer,
 		"aud":    []string{"adssh"},
 		"email":  "alice@example.com",
 		"groups": []string{"ops", "prod-admin"},
+		"iat":    time.Now().Unix(),
+		"nbf":    time.Now().Unix(),
 		"exp":    time.Now().Add(time.Hour).Unix(),
 	})
 
 	_, user, groups, err := parseOIDCIdentity(context.Background(), oidcImportOptions{
 		Token:      token,
-		Issuer:     issuer,
-		Audience:   "adssh",
 		UserClaim:  "email",
 		GroupClaim: "groups",
-		Discover:   true,
 	})
 	if err != nil {
-		t.Fatalf("parseOIDCIdentity with discovery returned error: %v", err)
+		t.Fatalf("parseOIDCIdentity over pinned TLS JWKS returned error: %v", err)
 	}
-	if user != "alice@example.com" || len(groups) != 2 {
-		t.Fatalf("user=%q groups=%#v", user, groups)
+	if user != "alice@example.com" || len(groups) != 2 || fetched != 1 {
+		t.Fatalf("user=%q groups=%#v fetched=%d", user, groups, fetched)
 	}
 }
 

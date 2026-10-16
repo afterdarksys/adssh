@@ -52,9 +52,12 @@ func (elevateBinary) Run(ctx context.Context, args []string) error {
 			}
 		}
 		expiresAt := time.Now().UTC().Add(ttl)
+		// Audit first. An elevation the chain does not record must not exist.
+		if err := engineFromContext(ctx).LogEvent(fmt.Sprintf("ELEVATE_REQUEST: session=%s user=%s role=%s ttl=%s reason=%q expires_at=%s",
+			sessionID, session.User, role, ttl, reason, expiresAt.Format(time.RFC3339))); err != nil {
+			return fmt.Errorf("elevate: audit failed; elevation not granted: %w", err)
+		}
 		session.ActivateElevation(role, reason, expiresAt)
-		engineFromContext(ctx).LogEvent(fmt.Sprintf("ELEVATE_REQUEST: session=%s user=%s role=%s ttl=%s reason=%q expires_at=%s",
-			sessionID, session.User, role, ttl, reason, expiresAt.Format(time.RFC3339)))
 		fmt.Fprintf(hc.Stdout, "elevate: role=%s expires_at=%s reason=%q\n", role, expiresAt.Format(time.RFC3339), reason)
 		return nil
 
@@ -78,8 +81,12 @@ func (elevateBinary) Run(ctx context.Context, args []string) error {
 			fmt.Fprintln(hc.Stdout, "elevate: no active elevation")
 			return nil
 		}
-		engineFromContext(ctx).LogEvent(fmt.Sprintf("ELEVATE_DROP: session=%s user=%s role=%s reason=%q",
-			sessionID, session.User, dropped.Role, dropped.Reason))
+		// The drop happens first: losing privilege must not wait on the audit
+		// sink. A failed audit is still reported.
+		if err := engineFromContext(ctx).LogEvent(fmt.Sprintf("ELEVATE_DROP: session=%s user=%s role=%s reason=%q",
+			sessionID, session.User, dropped.Role, dropped.Reason)); err != nil {
+			return fmt.Errorf("elevate: dropped role=%s but audit failed: %w", dropped.Role, err)
+		}
 		fmt.Fprintf(hc.Stdout, "elevate: dropped role=%s\n", dropped.Role)
 		return nil
 

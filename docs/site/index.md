@@ -26,7 +26,7 @@ The design sentence "computeapi provisions, the machine enrolls through systemap
 
 `identity device login` is a client of the systemapi control plane. It stores an opaque bearer. It does not import OIDC groups. The authorization server stays in systemapi.
 
-`admin serve` is the local admin HTTP API. It is not a second public API. The default listen address is `127.0.0.1:8787`. `--listen` can bind a wider address.
+`admin serve` is the local admin HTTP API. It is not a second public API. The default listen address is `127.0.0.1:8787`. `--listen` accepts only a loopback address or `unix:/path`. Approve, deny, and unban need a named key from `ADSSH_ADMIN_KEYS`. The legacy `ADSSH_ADMIN_API_KEY` can only read.
 
 The SSH listener jail is `docs/guard.md`.
 

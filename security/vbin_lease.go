@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -117,25 +118,31 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	}
 	eng := engineFromContext(ctx)
 	sessionID := SessionIDFromContext(ctx)
-	eng.LogEvent(fmt.Sprintf("LEASE_REQUEST id=%s session=%s source_type=%s source=%s as=%s delivery=%s ttl=%s command=%s",
-		leaseID, sessionID, sourceKind, sourceName, destination, via, ttl, strings.Join(commandArgs, " ")))
+	// Every lease event is written before the step it records. A failed audit
+	// write stops the lease before the secret is read or the child runs.
+	if err := eng.LogEvent(fmt.Sprintf("LEASE_REQUEST id=%s session=%s source_type=%s source=%s as=%s delivery=%s ttl=%s command=%s",
+		leaseID, sessionID, sourceKind, sourceName, destination, via, ttl, strings.Join(commandArgs, " "))); err != nil {
+		return fmt.Errorf("lease: audit failed; lease not started: %w", err)
+	}
+	revoke := func(reason string, cause error) error {
+		if err := eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=%s", leaseID, reason)); err != nil {
+			return errors.Join(cause, fmt.Errorf("lease: audit revoke: %w", err))
+		}
+		return cause
+	}
 	if err := eng.AuthorizeCommandWithExtra(commandArgs, sessionID, PolicyContextExtra{Lease: leaseClaim}); err != nil {
-		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=policy-denied", leaseID))
-		return err
+		return revoke("policy-denied", err)
 	}
 	secret, err := loadLeaseSecret(ctx, source)
 	if err != nil {
-		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=load-error", leaseID))
-		return err
+		return revoke("load-error", err)
 	}
 	defer zeroBytes(secret)
 	if len(secret) == 0 {
-		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=empty-secret", leaseID))
-		return fmt.Errorf("lease: secret source is empty")
+		return revoke("empty-secret", fmt.Errorf("lease: secret source is empty"))
 	}
 	if via == "env" && bytes.IndexByte(secret, 0) >= 0 {
-		eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=nul-secret", leaseID))
-		return fmt.Errorf("lease: secret contains a NUL byte and cannot be placed in an environment variable")
+		return revoke("nul-secret", fmt.Errorf("lease: secret contains a NUL byte and cannot be placed in an environment variable"))
 	}
 
 	leaseCtx, cancel := context.WithTimeout(ctx, ttl)
@@ -144,6 +151,7 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	env := map[string]string{}
 	var stdin io.Reader
 	var extra []*os.File
+	var startWriter func()
 	if sourceKind == "env" {
 		unsetEnv = []string{sourceName}
 	}
@@ -155,19 +163,27 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	case "fd":
 		readEnd, writeEnd, pipeErr := os.Pipe()
 		if pipeErr != nil {
-			eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=delivery-error", leaseID))
-			return fmt.Errorf("lease: open secret pipe: %w", pipeErr)
+			return revoke("delivery-error", fmt.Errorf("lease: open secret pipe: %w", pipeErr))
 		}
-		secretCopy := append([]byte(nil), secret...)
-		go func() {
-			defer zeroBytes(secretCopy)
-			_, _ = writeEnd.Write(secretCopy)
-			_ = writeEnd.Close()
-		}()
-		extra = []*os.File{readEnd}
+		// The writer starts only after LEASE_GRANT is recorded.
 		defer readEnd.Close()
+		defer writeEnd.Close()
+		extra = []*os.File{readEnd}
+		startWriter = func() {
+			secretCopy := append([]byte(nil), secret...)
+			go func() {
+				defer zeroBytes(secretCopy)
+				_, _ = writeEnd.Write(secretCopy)
+				_ = writeEnd.Close()
+			}()
+		}
 	}
-	eng.LogEvent(fmt.Sprintf("LEASE_GRANT id=%s", leaseID))
+	if err := eng.LogEvent(fmt.Sprintf("LEASE_GRANT id=%s", leaseID)); err != nil {
+		return revoke("audit-error", fmt.Errorf("lease: audit failed; secret not delivered: %w", err))
+	}
+	if startWriter != nil {
+		startWriter()
+	}
 	result, err := eng.runGovernedCommand(leaseCtx, sessionID, governedCommand{
 		Args:          commandArgs,
 		Dir:           hc.Dir,
@@ -184,7 +200,6 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	} else if err != nil || result.ExitCode != 0 {
 		revokeReason = "child-error"
 	}
-	defer eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=%s", leaseID, revokeReason))
 	result.Stdout = redactSecret(result.Stdout, secret)
 	result.Stderr = redactSecret(result.Stderr, secret)
 	result.Stdout = redactSensitiveBytes(result.Stdout)
@@ -195,13 +210,16 @@ func (leaseBinary) Run(ctx context.Context, args []string) error {
 	if len(result.Stderr) > 0 {
 		_, _ = hc.Stderr.Write(result.Stderr)
 	}
+	var childErr error
 	if err != nil {
-		return fmt.Errorf("lease: child command: %w", err)
+		childErr = fmt.Errorf("lease: child command: %w", err)
+	} else if result.ExitCode != 0 {
+		childErr = fmt.Errorf("lease: child command exited with status %d", result.ExitCode)
 	}
-	if result.ExitCode != 0 {
-		return fmt.Errorf("lease: child command exited with status %d", result.ExitCode)
+	if auditErr := eng.LogEvent(fmt.Sprintf("LEASE_REVOKE id=%s reason=%s", leaseID, revokeReason)); auditErr != nil {
+		return errors.Join(childErr, fmt.Errorf("lease: audit revoke: %w", auditErr))
 	}
-	return nil
+	return childErr
 }
 
 func newLeaseID() (string, error) {

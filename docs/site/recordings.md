@@ -18,7 +18,7 @@ List and evidence readers accept only regular files whose names end in `.jsonl`.
 
 ## Elevations
 
-`elevate` writes elevation request and drop lines to the HMAC chain. `GET /v1/elevations` and MCP `admin_list_elevations` parse those lines and add active in-memory grants from the current process. An active grant has a role, a reason, and an expiry. It does not store a separate TTL field.
+`elevate` writes elevation request and drop lines to the HMAC chain. `GET /v1/elevations` and MCP `admin_list_elevations` parse those lines and add active in-memory grants from the current process. Only event lines count. A typed command that looks like an elevation line is ignored. The request line is written before the grant, so a failed audit write grants nothing. An active grant has a role, a reason, and an expiry. It does not store a separate TTL field.
 
 An empty chain path returns `chain_unavailable` (HTTP 503). A configured path whose file does not exist returns an empty list and does not add active-only grants. A present, verified, empty file includes active in-memory grants. A failed chain verification is an error.
 
