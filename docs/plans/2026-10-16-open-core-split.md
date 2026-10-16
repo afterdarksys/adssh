@@ -19,9 +19,9 @@ Ryan approved: the core under Apache 2.0, the enterprise layer under BSL 1.1 in 
 2. Four-eyes, change management, evidence, elevate/grants, leases.
 3. Identity/device login, gateway, mirror_share, grid, sah, risk, bundles, docs, release.
 
-The refactor waits until Ryan confirms the classification table below, including the borderline rows.
+Ryan confirmed the classification table on 2026-10-16. The refactor may start.
 
-## Proposed classification (Ryan decides the borderline rows)
+## Classification (confirmed 2026-10-16)
 
 | Core: Apache 2.0 | Enterprise: `ee/`, BSL 1.1 |
 |---|---|
@@ -37,7 +37,7 @@ The refactor waits until Ryan confirms the classification table below, including
 | | `internal/grid` (fleet flights), `internal/sah` (SAH suite), `internal/risk` |
 | | `policy/bundles` (regulated-ops, AI-agent, and other postures) |
 
-Borderline, for Ryan: `cmd/adssh-mcp` (core here, as an adoption driver; it could be enterprise), `internal/agent`, `vbin_runbook.go`, `engine_access.go`, `internal/devops`, `internal/sysmgmt`.
+Borderline rows, decided by Ryan 2026-10-16: all core. `cmd/adssh-mcp` and `internal/agent` (agents drive adoption; their governance is already enterprise), `vbin_runbook.go`, `engine_access.go`, `internal/devops`, `internal/sysmgmt`.
 
 ## Before release
 
