@@ -119,8 +119,8 @@ func SetupExtensions(opts ExtensionOptions) {
 
 	// Sys
 	sysDict := starlark.NewDict(8)
-	_ = sysDict.SetKey(starlark.String("getenv"), starlark.NewBuiltin("getenv", builtinGetEnv))
-	_ = sysDict.SetKey(starlark.String("setenv"), starlark.NewBuiltin("setenv", builtinSetEnv))
+	_ = sysDict.SetKey(starlark.String("getenv"), getenvBuiltin(opts.SessionID))
+	_ = sysDict.SetKey(starlark.String("setenv"), setenvBuiltin(opts.SessionID))
 	_ = sysDict.SetKey(starlark.String("load_agent"), createLoadAgent(env))
 	if !restricted {
 		_ = sysDict.SetKey(starlark.String("load_plugin"), createLoadPlugin(env))

@@ -3,7 +3,6 @@ package security
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/syslog"
 	"os"
 	"sync"
@@ -70,18 +69,24 @@ type Engine struct {
 	policyMu      sync.RWMutex
 	preparedQuery *rego.PreparedEvalQuery
 
-	// audit log (set once at init, read thereafter — matches legacy globals)
-	auditLogger      *log.Logger
+	// audit log. auditMu guards auditFile. The file is opened once at init.
+	auditMu          sync.Mutex
+	auditFile        *os.File
 	remoteAuditURL   string
 	remoteAuditToken string
 	syslogWriter     *syslog.Writer
 
-	// hmac chain — chainMu also guards auditChangeID (as it did as a global)
-	chainMu       sync.Mutex
-	chainPath     string
-	chainKey      []byte
-	chainSession  string
-	auditChangeID string
+	// hmac chain — chainMu also guards auditChangeID and the tail cache.
+	// The cache is valid for one process and one ledger. Another process
+	// appending to the same file is outside the contract.
+	chainMu        sync.Mutex
+	chainPath      string
+	chainKey       []byte
+	chainSession   string
+	auditChangeID  string
+	chainTailKnown bool
+	chainPrevHash  string
+	chainNextSeq   int64
 
 	// active change-management tickets, keyed by authenticated session ID.
 	// The empty key is retained for legacy single-session package APIs.
@@ -201,10 +206,14 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	}
 
 	if cfg.AuditLogPath != "" {
-		e.InitAuditLog(cfg.AuditLogPath, cfg.AuditLogURL, cfg.AuditLogToken)
+		if err := e.InitAuditLog(cfg.AuditLogPath, cfg.AuditLogURL, cfg.AuditLogToken); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.ChainPath != "" {
-		e.InitChain(cfg.ChainPath, cfg.ChainKeyPath, cfg.SessionID)
+		if err := e.InitChain(cfg.ChainPath, cfg.ChainKeyPath, cfg.SessionID); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.EntitlementsPath != "" {
 		if err := e.LoadEntitlements(cfg.EntitlementsPath); err != nil {

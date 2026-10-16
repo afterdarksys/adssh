@@ -26,7 +26,9 @@ func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHan
 			return mcp.NewToolResultError("missing required parameter: command"), nil
 		}
 		if requestDryRun(req) {
-			security.LogCommand("MCP:run_shell:dry_run", cmd)
+			if err := security.LogCommand("MCP:run_shell:dry_run", cmd); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("audit log failed: %v", err)), nil
+			}
 			return mcp.NewToolResultText(fmt.Sprintf("dry_run: true\ncommand: %s", cmd)), nil
 		}
 
@@ -36,12 +38,17 @@ func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHan
 			return mcp.NewToolResultError(fmt.Sprintf("parse error: %v", err)), nil
 		}
 
+		sid := ""
+		if v, ok := globals["SESSION_ID"].(starlark.String); ok {
+			sid = string(v)
+		}
 		// Separate stdout and stderr buffers (MCP-03: returns exit_code, stdout, stderr)
 		var stdout, stderr bytes.Buffer
 		runner, err := interp.New(
+			interp.Env(security.NewSessionEnviron(sid)),
 			interp.StdIO(nil, &stdout, &stderr),
 			interp.CallHandler(security.CallInterceptor(restricted, globals)),
-			interp.ExecHandlers(security.BashInterceptor(restricted, globals)),
+			interp.ExecHandlers(security.BashInterceptor(restricted, globals), security.SessionExecHandler),
 			interp.OpenHandler(security.VirtualOpenHandler()),
 		)
 		if err != nil {
@@ -51,7 +58,9 @@ func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHan
 		// DeclClause keywords (export/readonly/declare/...) bypass the call and
 		// exec handlers; gate them via the AST pre-scan before running.
 		if err := security.GateProgram(restricted, parserFile); err != nil {
-			security.LogCommand("MCP:run_shell", cmd)
+			if logErr := security.LogCommand("MCP:run_shell", cmd); logErr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("exec error: %v (audit: %v)", err, logErr)), nil
+			}
 			return mcp.NewToolResultError(fmt.Sprintf("exec error: %v", err)), nil
 		}
 
@@ -60,12 +69,16 @@ func handleRunShell(globals starlark.StringDict, restricted bool) server.ToolHan
 			if status, ok := interp.IsExitStatus(err); ok {
 				exitCode = int(status)
 			} else {
-				security.LogCommand("MCP:run_shell", cmd)
+				if logErr := security.LogCommand("MCP:run_shell", cmd); logErr != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("exec error: %v (audit: %v)", err, logErr)), nil
+				}
 				return mcp.NewToolResultError(fmt.Sprintf("exec error: %v", err)), nil
 			}
 		}
 
-		security.LogCommand("MCP:run_shell", cmd)
+		if err := security.LogCommand("MCP:run_shell", cmd); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("audit log failed: %v", err)), nil
+		}
 
 		// Return structured output with exit_code, stdout, stderr
 		result := fmt.Sprintf("exit_code: %d\nstdout: %s\nstderr: %s",

@@ -44,8 +44,11 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 		return
 	}
 
-	// Inject standard library extensions
-	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted})
+	sessionID := ""
+	if v, ok := globals["SESSION_ID"].(starlark.String); ok {
+		sessionID = string(v)
+	}
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted, SessionID: sessionID})
 
 	// Instantiate persistent runner with this session's own directory stack.
 	dirs := &sys.DirStackState{}
@@ -55,7 +58,7 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
 		interp.CallHandler(security.CallInterceptorSession(sessState)),
-		interp.ExecHandlers(security.BashInterceptorSession(sessState)),
+		interp.ExecHandlers(security.BashInterceptorSession(sessState), security.SessionExecHandler),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 	if err != nil {

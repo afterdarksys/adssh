@@ -49,24 +49,29 @@ func (e *Engine) AuthorizeGateway(req GatewayPolicyRequest) error {
 	}
 	pctx.Gateway = claim
 	cmd := fmt.Sprintf("gateway %s %s", req.Action, claim.Target)
-	e.LogCommand("GATEWAY", cmd)
+	if err := e.LogCommand("GATEWAY", cmd); err != nil {
+		return fmt.Errorf("adssh: audit log failed: %w", err)
+	}
 	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 	if policyErr != nil {
 		e.rememberDeniedCommand(req.SessionID, []string{"gateway", req.Action, claim.Target})
 		return fmt.Errorf("adssh: gateway policy evaluation error: %v", policyErr)
 	}
 	if !allowed {
-		e.LogPolicyDecision(pctx.User, cmd, false, reason)
+		auditErr := e.LogPolicyDecision(pctx.User, cmd, false, reason)
 		e.rememberDeniedCommand(req.SessionID, []string{"gateway", req.Action, claim.Target})
+		msg := fmt.Sprintf("adssh: gateway access denied for %s", claim.Target)
 		if reason != "" {
-			return fmt.Errorf("adssh: gateway access denied: %s", reason)
+			msg = fmt.Sprintf("adssh: gateway access denied: %s", reason)
 		}
-		return fmt.Errorf("adssh: gateway access denied for %s", claim.Target)
+		return joinDeny(msg, auditErr)
 	}
-	e.LogPolicyDecision(pctx.User, cmd, true, "")
+	if err := e.LogPolicyDecision(pctx.User, cmd, true, ""); err != nil {
+		return fmt.Errorf("adssh: audit log failed: %w", err)
+	}
 	if e.hasEntitlements() && !e.IsAuthorized(pctx.User, pctx.Groups, "gateway") {
-		e.LogPolicyDecision(pctx.User, cmd, false, "not permitted by entitlements")
-		return fmt.Errorf("adssh: gateway access denied by entitlements")
+		auditErr := e.LogPolicyDecision(pctx.User, cmd, false, "not permitted by entitlements")
+		return joinDeny("adssh: gateway access denied by entitlements", auditErr)
 	}
 	return nil
 }

@@ -30,6 +30,12 @@ func (grantBinary) Run(ctx context.Context, args []string) error {
 	if session == nil {
 		return fmt.Errorf("grant: requires an active SSH session")
 	}
+	if session.ManagedAgent() != nil {
+		return fmt.Errorf("grant: agents cannot grant roles")
+	}
+	if IsPrivilegedRole(role) {
+		return fmt.Errorf("grant: role %q is not assumable; use elevate after an admin-audience import", role)
+	}
 
 	switch action {
 	case "request":

@@ -121,14 +121,45 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 	if len(args) == 0 {
 		return nil
 	}
+	// The SSH session process installs this. The listener leaves it nil.
+	if fn := currentRemoteGate(); fn != nil {
+		return fn(restricted, args, sessionID)
+	}
 
 	cmd := strings.Join(args, " ")
-	e.LogCommand("BASH", cmd)
+	if err := e.LogCommand("BASH", cmd); err != nil {
+		return fmt.Errorf("adssh: audit log failed: %w", err)
+	}
+
+	// A managed cloud agent is confined to the fixed command-name allowlist
+	// before policy and before virtual-binary or OS dispatch. An expired
+	// lease fails closed. The stored Allow slice is not consulted.
+	if sessionID != "" {
+		if session := sys.GetSession(sessionID); session != nil {
+			if agent := session.ManagedAgent(); agent != nil {
+				if !time.Now().Before(agent.ExpiresAt) {
+					e.rememberDeniedCommand(sessionID, args)
+					auditErr := e.LogPolicyDecision(session.User, cmd, false, "adssh: agent lease expired")
+					return joinDeny("adssh: agent lease expired", auditErr)
+				}
+				if !AgentCommandAllowed(args[0]) {
+					reason := fmt.Sprintf("adssh: agent cannot run %q", args[0])
+					e.rememberDeniedCommand(sessionID, args)
+					auditErr := e.LogPolicyDecision(session.User, cmd, false, reason)
+					return joinDeny(reason, auditErr)
+				}
+			}
+		}
+	}
 
 	// 0. Rego policy evaluation (primary authorization) — fail closed.
 	pctx := BuildPolicyContext(args[0], args[1:], sessionID)
 	pctx.Lease = extra.Lease
-	pctx.Agent = extra.Agent
+	// The session cloud-agent claim wins. extra.Agent fills in only when the
+	// session did not already bind one, so a caller cannot overwrite it.
+	if pctx.Agent == nil {
+		pctx.Agent = extra.Agent
+	}
 	// Classify the capability groups this command touches so policies can gate
 	// whole classes (cloud, fileops, proc, ...). Nil for shell-layer commands;
 	// populated for governed Starlark builtins (starlark.* paths).
@@ -155,22 +186,25 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 				})
 			}()
 		}
-		e.LogPolicyDecision(pctx.User, cmd, false, reason)
+		auditErr := e.LogPolicyDecision(pctx.User, cmd, false, reason)
 		e.rememberDeniedCommand(sessionID, args)
+		msg := fmt.Sprintf("adssh: access denied for '%s' by policy", args[0])
 		if reason != "" {
-			return fmt.Errorf("adssh: access denied: %s", reason)
+			msg = fmt.Sprintf("adssh: access denied: %s", reason)
 		}
-		return fmt.Errorf("adssh: access denied for '%s' by policy", args[0])
+		return joinDeny(msg, auditErr)
 	}
-	e.LogPolicyDecision(pctx.User, cmd, true, "")
+	if err := e.LogPolicyDecision(pctx.User, cmd, true, ""); err != nil {
+		return fmt.Errorf("adssh: audit log failed: %w", err)
+	}
 
 	// A configured entitlements file is an additional allow-list. Rego and
 	// entitlements must both authorize the command; when no file is configured,
 	// Rego remains the sole authorization source for backward compatibility.
 	if e.hasEntitlements() && !e.IsAuthorized(pctx.User, pctx.Groups, args[0]) {
-		e.LogPolicyDecision(pctx.User, cmd, false, "not permitted by entitlements")
+		auditErr := e.LogPolicyDecision(pctx.User, cmd, false, "not permitted by entitlements")
 		e.rememberDeniedCommand(sessionID, args)
-		return fmt.Errorf("adssh: access denied by entitlements for %q", args[0])
+		return joinDeny(fmt.Sprintf("adssh: access denied by entitlements for %q", args[0]), auditErr)
 	}
 
 	// 0a. Change management ticket check.
@@ -323,6 +357,49 @@ func (e *Engine) gateProgram(restricted bool, node syntax.Node, sessionID string
 	return gateErr
 }
 
+// Threats: a session-scoped assignment must not write the process
+// environment. An unregistered SESSION_ID fails closed and does not call
+// os.Setenv. The Starlark global is written only after this returns nil.
+// The error does not include the value.
+func assignProcessOrSessionEnv(globals starlark.StringDict, key, value string) error {
+	id := sessionIDFromGlobals(globals)
+	if id == "" {
+		return os.Setenv(key, value)
+	}
+	s := sys.GetSession(id)
+	if s == nil {
+		return fmt.Errorf("adssh: session %s is not registered", id)
+	}
+	return s.SetEnv(key, value)
+}
+
+// applySetAssignment handles `set VAR=VALUE` and `set VAR VALUE`. Flag forms
+// (`set -x`, `set +e`) return handled=false so the shopts switch still runs.
+// A usage error or an env write error returns handled=true.
+func applySetAssignment(globals starlark.StringDict, args []string) (bool, error) {
+	if len(args) < 2 || args[0] != "set" {
+		return false, nil
+	}
+	if strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[1], "+") {
+		return false, nil
+	}
+	var name, value string
+	if before, after, ok := strings.Cut(args[1], "="); ok {
+		name, value = before, after
+	} else if len(args) >= 3 {
+		name, value = args[1], args[2]
+	} else {
+		return true, fmt.Errorf("set: usage: set VARNAME VALUE or set VARNAME=VALUE")
+	}
+	if err := assignProcessOrSessionEnv(globals, name, value); err != nil {
+		return true, err
+	}
+	if globals != nil {
+		globals[name] = starlark.String(value)
+	}
+	return true, nil
+}
+
 func sessionIDFromGlobals(globals starlark.StringDict) string {
 	if globals == nil {
 		return ""
@@ -380,6 +457,12 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 		return func(ctx context.Context, args []string) error {
 			if len(args) == 0 {
 				return next(ctx, args)
+			}
+			// Assignment form of set returns before HandlerCtx. A direct call
+			// has no interpreter context, and a session assignment must not
+			// reach os.Setenv.
+			if handled, err := applySetAssignment(globals, args); handled {
+				return err
 			}
 
 			// xtrace: print command before executing
@@ -490,24 +573,11 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 					return nil
 				}
 
-				// set VARNAME VALUE  or  set VARNAME=VALUE
-				if len(args) >= 2 {
-					var varName, varValue string
-					if strings.Contains(args[1], "=") {
-						parts := strings.SplitN(args[1], "=", 2)
-						varName = parts[0]
-						varValue = parts[1]
-					} else if len(args) >= 3 {
-						varName = args[1]
-						varValue = args[2]
-					} else {
-						return fmt.Errorf("set: usage: set VARNAME VALUE or set VARNAME=VALUE")
-					}
-					if globals != nil {
-						globals[varName] = starlark.String(varValue)
-					}
-					os.Setenv(varName, varValue) //nolint:errcheck
-					return nil
+				// set VARNAME VALUE  or  set VARNAME=VALUE. The early return
+				// above already handles this; keep the same writer here so
+				// this branch cannot fall back to os.Setenv.
+				if handled, err := applySetAssignment(globals, args); handled {
+					return err
 				}
 				return nil
 
@@ -637,7 +707,9 @@ func (e *Engine) execHandler(restricted bool, globals starlark.StringDict, dirs 
 					return fmt.Errorf("read: %w", err)
 				}
 				value := strings.TrimRight(line, "\n")
-				os.Setenv(varName, value) //nolint:errcheck
+				if err := assignProcessOrSessionEnv(globals, varName, value); err != nil {
+					return err
+				}
 				if globals != nil {
 					globals[varName] = starlark.String(value)
 				}

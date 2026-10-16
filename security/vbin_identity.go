@@ -38,7 +38,7 @@ func (identityBinary) Description() string {
 func (identityBinary) Usage() string {
 	return `identity status [--json]
 identity device login --url URL --username USER [--token-file PATH] [--interval duration] [--timeout duration]
-identity oidc import (--token token|--token-file path|--env name) [--issuer iss] [--audience aud] [--jwks-url url|--discover] [--user-claim claim] [--group-claim claim]
+identity oidc import (--token token|--token-file path|--env name) [--provider login|admin] [--issuer iss] [--audience aud] [--jwks-url url|--discover] [--user-claim claim] [--group-claim claim]
 identity ssh-ca init --out ca_key
 identity ssh-ca issue --ca ca_key --pub user.pub --principal name [--principal group] --for duration --out user-cert.pub`
 }
@@ -136,12 +136,22 @@ func identityStatus(ctx context.Context, args []string) error {
 	}
 	info := session.Info()
 	if jsonOutput {
-		return json.NewEncoder(hc.Stdout).Encode(map[string]any{
+		payload := map[string]any{
 			"session_id": info.ID,
 			"user":       info.User,
 			"principals": info.Principals,
 			"elevation":  info.Elevation,
-		})
+		}
+		if info.OIDCProvider != "" {
+			payload["oidc_provider"] = info.OIDCProvider
+		}
+		if len(info.EligibleRoles) > 0 {
+			payload["eligible_roles"] = info.EligibleRoles
+		}
+		if info.AgentID != "" {
+			payload["agent_id"] = info.AgentID
+		}
+		return json.NewEncoder(hc.Stdout).Encode(payload)
 	}
 	fmt.Fprintf(hc.Stdout, "identity: user=%s", emptyDash(info.User))
 	if len(info.Principals) > 0 {
@@ -149,6 +159,15 @@ func identityStatus(ctx context.Context, args []string) error {
 	}
 	if info.Elevation != nil {
 		fmt.Fprintf(hc.Stdout, " elevation=%s", info.Elevation.Role)
+	}
+	if info.OIDCProvider != "" {
+		fmt.Fprintf(hc.Stdout, " oidc_provider=%s", info.OIDCProvider)
+	}
+	if len(info.EligibleRoles) > 0 {
+		fmt.Fprintf(hc.Stdout, " eligible_roles=%s", strings.Join(info.EligibleRoles, ","))
+	}
+	if info.AgentID != "" {
+		fmt.Fprintf(hc.Stdout, " agent_id=%s", info.AgentID)
 	}
 	fmt.Fprintln(hc.Stdout)
 	return nil
@@ -181,6 +200,12 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 				return fmt.Errorf("identity oidc import: --env requires a variable name")
 			}
 			opts.Token = os.Getenv(args[i])
+		case "--provider":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("identity oidc import: --provider requires a value")
+			}
+			opts.Provider = args[i]
 		case "--issuer":
 			i++
 			if i >= len(args) {
@@ -228,16 +253,39 @@ func identityOIDCImport(ctx context.Context, args []string) error {
 	if session == nil {
 		return fmt.Errorf("identity: requires an active registered session")
 	}
-	session.SetIdentity(user, groups)
-	engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_OIDC_IMPORT: session=%s user=%s issuer=%s groups=%s",
-		session.ID, user, stringClaim(claims, "iss"), strings.Join(groups, ",")))
-	fmt.Fprintf(hc.Stdout, "identity: user=%s principals=%s issuer=%s\n",
-		user, strings.Join(groups, ","), stringClaim(claims, "iss"))
+	principals := FilterUnprivileged(groups)
+	var eligible []string
+	switch opts.Provider {
+	case OIDCProviderAdmin:
+		eligible = PrivilegedEligible(groups)
+		session.SetIdentity(user, principals)
+		session.SetOIDC(OIDCProviderAdmin, eligible)
+	case OIDCProviderLogin:
+		session.SetIdentity(user, principals)
+		session.SetOIDC(OIDCProviderLogin, nil)
+	default:
+		session.SetIdentity(user, principals)
+		session.SetOIDC("", nil)
+	}
+	// Log the fingerprint only. The raw JWT must not appear in the format
+	// string, or redaction would hide it and the chain check would be weaker.
+	engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_OIDC_IMPORT: session=%s user=%s issuer=%s provider=%s fingerprint=%s groups=%s eligible=%s",
+		session.ID, user, stringClaim(claims, "iss"), opts.Provider, fingerprintSecret(opts.Token), strings.Join(principals, ","), strings.Join(eligible, ",")))
+	fmt.Fprintf(hc.Stdout, "identity: user=%s principals=%s issuer=%s",
+		user, strings.Join(principals, ","), stringClaim(claims, "iss"))
+	if opts.Provider != "" {
+		fmt.Fprintf(hc.Stdout, " provider=%s", opts.Provider)
+	}
+	if len(eligible) > 0 {
+		fmt.Fprintf(hc.Stdout, " eligible=%s", strings.Join(eligible, ","))
+	}
+	fmt.Fprintln(hc.Stdout)
 	return nil
 }
 
 type oidcImportOptions struct {
 	Token      string
+	Provider   string
 	Issuer     string
 	Audience   string
 	UserClaim  string
@@ -246,7 +294,54 @@ type oidcImportOptions struct {
 	Discover   bool
 }
 
+// Threats: a --provider import must verify the JWT (allowlisted RS256, expiry,
+// audience) and must not treat a login-audience groups claim as os-root,
+// adssh-admin, or gridops. An empty provider keeps the legacy parse path so
+// an unsigned token is not suddenly rejected. The raw token is not logged.
+// Non-goals: this does not stop a stolen admin-audience JWT before it expires.
+func prepareOIDCImport(opts oidcImportOptions) error {
+	if opts.Provider == "" {
+		return nil
+	}
+	if opts.Audience == "" {
+		return fmt.Errorf("identity oidc import: --provider requires --audience")
+	}
+	if opts.JWKSURL == "" && !opts.Discover {
+		return fmt.Errorf("identity oidc import: --provider requires --jwks-url or --discover")
+	}
+	switch opts.Provider {
+	case OIDCProviderLogin, OIDCProviderAdmin:
+	default:
+		return fmt.Errorf("identity oidc import: --provider must be login or admin")
+	}
+	loginAud := os.Getenv("ADSSH_OIDC_LOGIN_AUDIENCE")
+	adminAud := os.Getenv("ADSSH_OIDC_ADMIN_AUDIENCE")
+	if loginAud != "" && adminAud != "" && loginAud == adminAud {
+		return fmt.Errorf("identity oidc import: login and admin audiences must differ")
+	}
+	switch opts.Provider {
+	case OIDCProviderLogin:
+		if loginAud != "" && opts.Audience != loginAud {
+			return fmt.Errorf("identity oidc import: audience mismatch")
+		}
+		if adminAud != "" && opts.Audience == adminAud {
+			return fmt.Errorf("identity oidc import: audience mismatch")
+		}
+	case OIDCProviderAdmin:
+		if adminAud != "" && opts.Audience != adminAud {
+			return fmt.Errorf("identity oidc import: audience mismatch")
+		}
+		if loginAud != "" && opts.Audience == loginAud {
+			return fmt.Errorf("identity oidc import: audience mismatch")
+		}
+	}
+	return nil
+}
+
 func parseOIDCIdentity(ctx context.Context, opts oidcImportOptions) (map[string]any, string, []string, error) {
+	if err := prepareOIDCImport(opts); err != nil {
+		return nil, "", nil, err
+	}
 	parts := strings.Split(opts.Token, ".")
 	if len(parts) != 3 {
 		return nil, "", nil, fmt.Errorf("identity oidc import: token must be a JWT")

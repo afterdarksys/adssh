@@ -149,12 +149,9 @@ var (
 	sshMu       sync.Mutex
 )
 
-// SessionStarter starts an interactive session for one accepted SSH channel. It
-// receives the per-connection identity and PTY-backed I/O and is responsible for
-// building the session's OWN isolated Starlark globals (never a shared or
-// shallow-copied dict) and running the REPL or menu. Defined here (in sys) so
-// that sys/ssh.go never has to import starlarkext/engine and create an import
-// cycle; the concrete starter is supplied by the binary/engine layer.
+// SessionStarter starts one accepted SSH channel. The binary supplies it so
+// this package does not import the security engine. The SSH path execs a
+// session process; it does not build Starlark globals in the listener.
 type SessionStarter func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer)
 
 type GatewayAuthRequest struct {
@@ -170,8 +167,9 @@ type GatewayAuthRequest struct {
 type GatewayAuthorizer func(GatewayAuthRequest) error
 
 // EnableSSH starts the SSH daemon in the background. It returns an error if
-// already running or if not root. Each accepted channel is handed to start,
-// which builds that session's own isolated globals.
+// already running or if not root. Each accepted channel is handed to start.
+// The starter is supplied by the binary so this package does not import the
+// security engine.
 func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionStarter, authorizeGateway GatewayAuthorizer) error {
 	sshMu.Lock()
 	defer sshMu.Unlock()
@@ -185,6 +183,9 @@ func EnableSSH(address, hostKeyPath, authorizedKeysPath string, start SessionSta
 	}
 	if err := guard.Ready(); err != nil {
 		return fmt.Errorf("guard: %v", err)
+	}
+	if err := SessionCapReady(); err != nil {
+		return err
 	}
 
 	authorizedKeys, err := loadAuthorizedKeys(authorizedKeysPath)
@@ -315,6 +316,8 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 			continue
 		}
 
+		// ISIG stays on. The child is its own session leader, so Ctrl-C and
+		// Ctrl-Z reach that process and not the listener.
 		ptyMaster, ptySlave, err := pty.Open()
 		if err != nil {
 			log.Printf("Could not start pty: %v", err)
@@ -322,9 +325,39 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 			continue
 		}
 
-		if err := DisableISIG(ptyMaster.Fd()); err != nil {
-			log.Printf("Warning: failed to disable ISIG on pty: %v", err)
+		name := conn.User()
+		if err := RequireResolvableSSHUser(name); err != nil {
+			log.Printf("ssh: refusing session: %v", err)
+			channel.Close()
+			ptyMaster.Close()
+			ptySlave.Close()
+			continue
 		}
+
+		sessionID := GenerateSessionID()
+		outCast := NewOutputBroadcaster(channel)
+
+		var principals []string
+		if pExt, ok := conn.Permissions.Extensions["principals"]; ok && pExt != "" {
+			principals = strings.Split(pExt, ",")
+		}
+
+		session := &Session{
+			ID:         sessionID,
+			User:       name,
+			Principals: principals,
+			PTYMaster:  ptyMaster,
+			Out:        outCast,
+		}
+		session.SetDropPrivileges(true)
+		if err := RegisterSession(session); err != nil {
+			log.Printf("ssh: register session: %v", err)
+			channel.Close()
+			ptyMaster.Close()
+			ptySlave.Close()
+			continue
+		}
+		session.SetPromptWriter(outCast)
 
 		go func(in <-chan *ssh.Request) {
 			for req := range in {
@@ -344,23 +377,6 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 			}
 		}(requests)
 
-		sessionID := GenerateSessionID()
-		outCast := NewOutputBroadcaster(channel)
-
-		var principals []string
-		if pExt, ok := conn.Permissions.Extensions["principals"]; ok && pExt != "" {
-			principals = strings.Split(pExt, ",")
-		}
-
-		session := &Session{
-			ID:         sessionID,
-			User:       conn.User(),
-			Principals: principals,
-			PTYMaster:  ptyMaster,
-			Out:        outCast,
-		}
-		RegisterSession(session)
-
 		go func(user string, principals []string) {
 			defer channel.Close()
 			defer ptyMaster.Close()
@@ -369,11 +385,12 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, start Session
 
 			interceptedChannel := &CtrlCInterceptor{r: channel, session: session}
 
-			go func() { _, _ = io.Copy(outCast, ptyMaster) }()            // best-effort: stream ends on session close
-			go func() { _, _ = io.Copy(ptyMaster, interceptedChannel) }() // best-effort: stream ends on session close
-
-			// start builds this session's OWN fresh globals (no shared/shallow
-			// copy) and runs the REPL/menu on the PTY slave.
+			go func() { _, _ = io.Copy(outCast, ptyMaster) }() // best-effort: stream ends on session close
+			go func() {
+				_, _ = io.Copy(ptyMaster, interceptedChannel) // best-effort
+				_ = ptyMaster.Close()
+			}()
+			// The starter blocks until the session process exits.
 			start(sessionID, user, principals, ptySlave, ptySlave, ptySlave)
 		}(session.User, principals)
 	}

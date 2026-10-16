@@ -15,7 +15,9 @@ func IsCookedMode(fd uintptr) bool {
 	return false
 }
 
-// DisableISIG permanently disables the ISIG flag on a terminal.
+// DisableISIG clears ISIG. The SSH session path leaves ISIG on because that
+// process is its own session, so Ctrl-C reaches it. Darwin uses TIOCGETA
+// and TIOCSETA.
 func DisableISIG(fd uintptr) error {
 	t, err := unix.IoctlGetTermios(int(fd), unix.TIOCGETA)
 	if err != nil {

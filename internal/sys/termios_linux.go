@@ -15,7 +15,9 @@ func IsCookedMode(fd uintptr) bool {
 	return false
 }
 
-// DisableISIG permanently disables the ISIG flag on a terminal.
+// DisableISIG clears ISIG. The SSH session path leaves ISIG on because that
+// process is its own session, so Ctrl-C reaches it. Linux uses TCGETS and
+// TCSETS.
 func DisableISIG(fd uintptr) error {
 	t, err := unix.IoctlGetTermios(int(fd), unix.TCGETS)
 	if err != nil {

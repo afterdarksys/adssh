@@ -151,12 +151,14 @@ func NewSession(opts SessionOptions) (*Session, error) {
 		interceptor = security.BashInterceptorSession(state)
 		callGate = security.CallInterceptorSession(state)
 	}
-	handlers := make([]func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc, 0, 1+len(opts.ExecMiddleware))
+	handlers := make([]func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc, 0, 2+len(opts.ExecMiddleware))
 	handlers = append(handlers, interceptor)
 	handlers = append(handlers, opts.ExecMiddleware...)
+	handlers = append(handlers, security.SessionExecHandler)
 
 	runner, err := interp.New(
 		interp.Dir(dir),
+		interp.Env(security.NewSessionEnviron(opts.SessionID)),
 		interp.StdIO(in, out, errW),
 		interp.CallHandler(callGate),
 		interp.ExecHandlers(handlers...),

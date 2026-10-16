@@ -2,17 +2,19 @@ package repl
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 
+	"github.com/afterdarksys/adssh/internal/sys"
+	"github.com/afterdarksys/adssh/security"
+
 	"github.com/creack/pty"
 	"golang.org/x/term"
-	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -109,7 +111,13 @@ func runOnPTY(ctx context.Context, args []string, tty *os.File, out io.Writer, h
 	cmd := exec.Command(path, args...)
 	cmd.Args = args
 	cmd.Dir = hc.Dir
-	cmd.Env = ptyExecEnv(hc.Env)
+	cmd.Env = security.ChildEnviron(hc.Env)
+	if err := sys.PrepareChild(cmd, security.SessionFromEnv(hc.Env)); err != nil {
+		if hc.Stderr != nil {
+			fmt.Fprintf(hc.Stderr, "%v\n", err)
+		}
+		return true, err
+	}
 
 	// Put the real terminal in raw mode BEFORE starting the child so the very
 	// first keystrokes pass through untouched. Doing this first also means a
@@ -184,24 +192,4 @@ func exitStatusFromWait(waitErr error) error {
 		code = 1
 	}
 	return interp.NewExitStatus(uint8(code))
-}
-
-// ptyExecEnv builds the child's environment from the interpreter's environment,
-// matching mvdan's own execEnv: only exported string variables are passed.
-func ptyExecEnv(env expand.Environ) []string {
-	list := make([]string, 0, 64)
-	env.Each(func(name string, vr expand.Variable) bool {
-		if !vr.IsSet() {
-			for i, kv := range list {
-				if strings.HasPrefix(kv, name+"=") {
-					list[i] = ""
-				}
-			}
-		}
-		if vr.Exported && vr.Kind == expand.String {
-			list = append(list, name+"="+vr.String())
-		}
-		return true
-	})
-	return list
 }

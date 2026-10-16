@@ -22,7 +22,8 @@ import (
 // client refuses plaintext off-box URLs, redirects, metadata hosts, and query
 // keys that would place a code in a URL. It writes the token to a 0600 file
 // and logs only a SHA-256 fingerprint. It does not treat the bearer as an
-// OIDC JWT and does not attach groups. A stolen token file is a bearer until
+// OIDC JWT, clears any previous OIDC provider and eligible roles, and does
+// not attach groups. A stolen token file is a bearer until
 // it expires. The server, not this client, decides membership.
 
 const deviceGrantType = "urn:ietf:params:oauth:grant-type:device_code"
@@ -195,6 +196,7 @@ func DeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLoginResult
 		}
 		zeroBytes(secret)
 		session.SetIdentity(req.Username, nil)
+		session.SetOIDC("", nil)
 		engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_DEVICE_LOGIN user=%s fingerprint=%s", req.Username, fingerprint))
 		return DeviceLoginResult{TokenFile: tokenPath, Fingerprint: fingerprint}, nil
 	}

@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/afterdarksys/adssh/internal/sys"
 )
 
 type governedCommand struct {
@@ -48,17 +50,26 @@ func (e *Engine) runGovernedCommand(ctx context.Context, sessionID string, comma
 		return commandResult{}, e.DispatchVBin(ctx, vb, command.Args)
 	}
 	if executor == nil {
-		executor = executeExternalCommand
+		executor = func(ctx context.Context, command governedCommand) (commandResult, error) {
+			return executeExternalCommand(ctx, sessionID, command)
+		}
 	}
 	return executor(ctx, command)
 }
 
-func executeExternalCommand(ctx context.Context, command governedCommand) (commandResult, error) {
+func executeExternalCommand(ctx context.Context, sessionID string, command governedCommand) (commandResult, error) {
 	cmd := exec.CommandContext(ctx, command.Args[0], command.Args[1:]...)
 	cmd.Dir = command.Dir
 	cmd.Stdin = command.Stdin
 	cmd.ExtraFiles = command.ExtraFiles
-	cmd.Env = overlayEnvironment(os.Environ(), command.Env, command.UnsetEnv)
+	base := os.Environ()
+	if session := sys.GetSession(sessionID); session != nil {
+		base = session.Environ()
+	}
+	cmd.Env = overlayEnvironment(base, command.Env, command.UnsetEnv)
+	if err := sys.PrepareChild(cmd, sys.GetSession(sessionID)); err != nil {
+		return commandResult{}, err
+	}
 
 	limit := command.MaxOutput
 	if limit <= 0 {

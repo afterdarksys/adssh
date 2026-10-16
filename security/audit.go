@@ -1,10 +1,17 @@
 package security
 
+// Threats: a crash between a command and the next fsync drops that audit line,
+// and a shared host that ignores the write error runs the command anyway.
+// The flat log and the HMAC chain are the authoritative record. A failed write
+// or Sync refuses the command. Syslog and the remote POST run only after both
+// durable writes succeed, and a failed remote POST does not authorize anything.
+// An unconfigured audit file (nil) is not a failure. This does not cover a
+// disk that reports Sync success and then loses the sector.
+
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/syslog"
 	"net/http"
 	"os"
@@ -12,6 +19,10 @@ import (
 	"strings"
 	"time"
 )
+
+// syncFile is the durability hook for the flat log and the hash chain.
+// Tests replace it to force a Sync failure without depending on the OS.
+var syncFile = func(f *os.File) error { return f.Sync() }
 
 // parseSyslogFacility maps an ADSSH_SYSLOG env var value to a syslog priority facility.
 func parseSyslogFacility(s string) syslog.Priority {
@@ -41,9 +52,10 @@ func parseSyslogFacility(s string) syslog.Priority {
 	}
 }
 
-// InitAuditLog initializes the audit logger at the given path and sets up remote SIEM.
-func (e *Engine) InitAuditLog(path, url, token string) {
-	// Initialize syslog writer if ADSSH_SYSLOG is set.
+// InitAuditLog opens the flat audit log and records the optional remote sink.
+// A directory or file that cannot be created is an error. Syslog stays a
+// secondary sink: a failed open is noted on stderr and does not fail init.
+func (e *Engine) InitAuditLog(path, url, token string) error {
 	if syslogEnv := os.Getenv("ADSSH_SYSLOG"); syslogEnv != "" {
 		facility := parseSyslogFacility(syslogEnv)
 		w, err := syslog.New(facility|syslog.LOG_INFO, "adssh")
@@ -58,15 +70,16 @@ func (e *Engine) InitAuditLog(path, url, token string) {
 	e.remoteAuditToken = token
 
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create audit log directory: %v\n", err)
-		return
+		return fmt.Errorf("failed to create audit log directory: %w", err)
 	}
 	logFile, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize audit logger at %s: %v\n", path, err)
-		return
+		return fmt.Errorf("failed to initialize audit logger at %s: %w", path, err)
 	}
-	e.auditLogger = log.New(logFile, "AUDIT: ", log.Ldate|log.Ltime)
+	e.auditMu.Lock()
+	e.auditFile = logFile
+	e.auditMu.Unlock()
+	return nil
 }
 
 // SetAuditSession sets the chain session ID. Call this after InitChain if the session
@@ -101,6 +114,26 @@ func isSyslogWarning(event string) bool {
 		strings.Contains(lower, "restrict")
 }
 
+// writeAuditLine appends one flat-log line and Syncs it. A nil file means the
+// audit log is not configured. The layout matches the previous logger:
+// "AUDIT: 2006/01/02 15:04:05 " plus the message, local time, one trailing newline.
+func (e *Engine) writeAuditLine(message string) error {
+	e.auditMu.Lock()
+	defer e.auditMu.Unlock()
+	if e.auditFile == nil {
+		return nil
+	}
+	if !strings.HasSuffix(message, "\n") {
+		message += "\n"
+	}
+	stamp := time.Now().Format("2006/01/02 15:04:05")
+	line := "AUDIT: " + stamp + " " + message
+	if _, err := e.auditFile.WriteString(line); err != nil {
+		return err
+	}
+	return syncFile(e.auditFile)
+}
+
 func (e *Engine) dispatchAuditEvent(payload map[string]interface{}) {
 	if e.remoteAuditURL == "" {
 		return
@@ -108,6 +141,7 @@ func (e *Engine) dispatchAuditEvent(payload map[string]interface{}) {
 	payload["time"] = time.Now().UTC().Format(time.RFC3339)
 	data, err := json.Marshal(payload)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: audit webhook marshal failed: %v\n", err)
 		return
 	}
 
@@ -116,6 +150,7 @@ func (e *Engine) dispatchAuditEvent(payload map[string]interface{}) {
 	go func() {
 		req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: audit webhook request to %s failed: %v\n", url, err)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -132,66 +167,82 @@ func (e *Engine) dispatchAuditEvent(payload map[string]interface{}) {
 	}()
 }
 
-func (e *Engine) LogCommand(source string, cmd string) {
+func (e *Engine) LogCommand(source string, cmd string) error {
 	cmd = RedactSensitiveText(cmd)
-	if e.auditLogger != nil {
-		e.auditLogger.Printf("[%s] %s\n", source, cmd)
+	if err := e.writeAuditLine(fmt.Sprintf("[%s] %s\n", source, cmd)); err != nil {
+		return err
+	}
+	if err := e.AppendChain(ChainEntry{
+		Type:     "cmd",
+		Source:   source,
+		Command:  cmd,
+		ChangeID: e.GetAuditChangeID(),
+	}); err != nil {
+		return err
 	}
 	e.dispatchAuditEvent(map[string]interface{}{
 		"type":    "command",
 		"source":  source,
 		"command": cmd,
 	})
-	e.AppendChain(ChainEntry{
-		Type:     "cmd",
-		Source:   source,
-		Command:  cmd,
-		ChangeID: e.GetAuditChangeID(),
-	})
+	return nil
 }
 
 // LogCommand records a command in the audit log and hash chain.
 //
 // Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func LogCommand(source string, cmd string) {
-	defaultEngine.LogCommand(source, cmd)
+func LogCommand(source string, cmd string) error {
+	return defaultEngine.LogCommand(source, cmd)
 }
 
-func (e *Engine) LogEvent(event string) {
+func (e *Engine) LogEvent(event string) error {
 	event = RedactSensitiveText(event)
-	if e.auditLogger != nil {
-		e.auditLogger.Println(event)
+	if err := e.writeAuditLine(event); err != nil {
+		return err
+	}
+	if err := e.AppendChain(ChainEntry{
+		Type:     "event",
+		Command:  event,
+		ChangeID: e.GetAuditChangeID(),
+	}); err != nil {
+		return err
 	}
 	if e.syslogWriter != nil {
-		// Best-effort: syslog is a secondary sink. The flat audit logger and
-		// hash chain (below) are the authoritative record regardless of outcome.
+		// Best-effort: syslog is a secondary sink and runs only after both
+		// durable writes succeed.
 		if isSyslogWarning(event) {
 			_ = e.syslogWriter.Warning(event)
 		} else {
 			_ = e.syslogWriter.Info(event)
 		}
 	}
-	e.AppendChain(ChainEntry{
-		Type:     "event",
-		Command:  event,
-		ChangeID: e.GetAuditChangeID(),
-	})
+	return nil
 }
 
 // LogEvent records an event in the audit log and hash chain.
 //
 // Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func LogEvent(event string) {
-	defaultEngine.LogEvent(event)
+func LogEvent(event string) error {
+	return defaultEngine.LogEvent(event)
 }
 
 // LogPolicyDecision records a Rego policy evaluation result in the audit log.
-func (e *Engine) LogPolicyDecision(user, command string, allowed bool, denyReason string) {
+func (e *Engine) LogPolicyDecision(user, command string, allowed bool, denyReason string) error {
 	command = RedactSensitiveText(command)
 	denyReason = RedactSensitiveText(denyReason)
-	if e.auditLogger != nil {
-		e.auditLogger.Printf("[POLICY] user=%s command=%s allowed=%v reason=%q\n",
-			user, command, allowed, denyReason)
+	if err := e.writeAuditLine(fmt.Sprintf("[POLICY] user=%s command=%s allowed=%v reason=%q\n",
+		user, command, allowed, denyReason)); err != nil {
+		return err
+	}
+	if err := e.AppendChain(ChainEntry{
+		Type:     "policy",
+		User:     user,
+		Command:  command,
+		Allowed:  &allowed,
+		Reason:   denyReason,
+		ChangeID: e.GetAuditChangeID(),
+	}); err != nil {
+		return err
 	}
 	e.dispatchAuditEvent(map[string]interface{}{
 		"type":        "policy_decision",
@@ -200,24 +251,25 @@ func (e *Engine) LogPolicyDecision(user, command string, allowed bool, denyReaso
 		"allowed":     allowed,
 		"deny_reason": denyReason,
 	})
-	e.AppendChain(ChainEntry{
-		Type:     "policy",
-		User:     user,
-		Command:  command,
-		Allowed:  &allowed,
-		Reason:   denyReason,
-		ChangeID: e.GetAuditChangeID(),
-	})
+	return nil
 }
 
 // LogCMTicket records a change management ticket entry in the chain.
-func (e *Engine) LogCMTicket(ticketID string) {
-	if e.auditLogger != nil {
-		e.auditLogger.Printf("[CM] ticket=%s\n", ticketID)
+func (e *Engine) LogCMTicket(ticketID string) error {
+	if err := e.writeAuditLine(fmt.Sprintf("[CM] ticket=%s\n", ticketID)); err != nil {
+		return err
 	}
-	e.AppendChain(ChainEntry{
+	return e.AppendChain(ChainEntry{
 		Type:     "cm",
 		Reason:   ticketID,
 		ChangeID: ticketID,
 	})
+}
+
+// joinDeny keeps a denial even when the denial record itself fails.
+func joinDeny(deny string, auditErr error) error {
+	if auditErr == nil {
+		return fmt.Errorf("%s", deny)
+	}
+	return fmt.Errorf("%s (audit: %v)", deny, auditErr)
 }

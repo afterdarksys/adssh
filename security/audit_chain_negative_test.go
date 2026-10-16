@@ -34,7 +34,9 @@ func buildNegChain(t *testing.T, ledger, key string, n int) *Engine {
 		t.Fatalf("NewEngine: %v", err)
 	}
 	for i := 0; i < n; i++ {
-		eng.AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)})
+		if err := eng.AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)}); err != nil {
+			t.Fatalf("AppendChain: %v", err)
+		}
 	}
 	if ok, badSeq, err := eng.VerifyChain(ledger); err != nil || !ok {
 		t.Fatalf("freshly-built chain failed to verify: ok=%v badSeq=%d err=%v", ok, badSeq, err)

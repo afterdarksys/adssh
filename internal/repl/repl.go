@@ -30,28 +30,46 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// hybridEnv bridges os.Environ() and Starlark globals
+// hybridEnv bridges the session overlay, os.Environ(), and Starlark globals.
+// Get prefers the overlay (exported), then the process environment, then
+// Starlark. Process and Starlark values are not exported, so a child sees
+// them only through the session Environ base. Overlay Each emits the raw
+// value; vault:// is rewritten on Get only.
 type hybridEnv struct {
 	globals starlark.StringDict
 }
 
-func (h hybridEnv) Get(name string) expand.Variable {
-	// 1. Check OS
-	if val, ok := os.LookupEnv(name); ok {
-		if strings.HasPrefix(val, "vault://") {
-			val = "RESOLVED_SECRET_" + strings.TrimPrefix(val, "vault://")
-		}
-		return expand.Variable{Set: true, Kind: expand.String, Str: val}
+func rewriteVaultRef(val string) string {
+	if strings.HasPrefix(val, "vault://") {
+		return "RESOLVED_SECRET_" + strings.TrimPrefix(val, "vault://")
 	}
-	// 2. Check Starlark globals
+	return val
+}
+
+func (h hybridEnv) session() *sys.Session {
+	if h.globals == nil {
+		return nil
+	}
+	v, ok := h.globals["SESSION_ID"].(starlark.String)
+	if !ok || string(v) == "" {
+		return nil
+	}
+	return sys.GetSession(string(v))
+}
+
+func (h hybridEnv) Get(name string) expand.Variable {
+	if s := h.session(); s != nil {
+		if val, ok := s.OverlayGet(name); ok {
+			return expand.Variable{Set: true, Exported: true, Kind: expand.String, Str: rewriteVaultRef(val)}
+		}
+	}
+	if val, ok := os.LookupEnv(name); ok {
+		return expand.Variable{Set: true, Kind: expand.String, Str: rewriteVaultRef(val)}
+	}
 	if val, ok := h.globals[name]; ok {
 		switch v := val.(type) {
 		case starlark.String:
-			strVal := string(v)
-			if strings.HasPrefix(strVal, "vault://") {
-				strVal = "RESOLVED_SECRET_" + strings.TrimPrefix(strVal, "vault://")
-			}
-			return expand.Variable{Set: true, Kind: expand.String, Str: strVal}
+			return expand.Variable{Set: true, Kind: expand.String, Str: rewriteVaultRef(string(v))}
 		case starlark.Int:
 			return expand.Variable{Set: true, Kind: expand.String, Str: v.String()}
 		}
@@ -78,6 +96,21 @@ func (h hybridEnv) Each(fn func(name string, vr expand.Variable) bool) {
 			if !fn(k, expand.Variable{Set: true, Kind: expand.String, Str: stVal.String()}) {
 				return
 			}
+		}
+	}
+	s := h.session()
+	if s == nil {
+		return
+	}
+	overlay := s.EnvOverlay()
+	keys := make([]string, 0, len(overlay))
+	for k := range overlay {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !fn(k, expand.Variable{Set: true, Exported: true, Kind: expand.String, Str: overlay[k]}) {
+			return
 		}
 	}
 }
@@ -400,7 +433,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		globals["__aliases__"] = starlark.NewDict(16)
 	}
 
-	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted})
+	sessionID := ""
+	if v, ok := globals["SESSION_ID"].(starlark.String); ok {
+		sessionID = string(v)
+	}
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted, SessionID: sessionID})
 
 	// Per-invocation directory stack: each Start (one per SSH session, one per
 	// single-user REPL) gets its own stack so concurrent sessions never share
@@ -525,16 +562,16 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	runner, err := interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
-		// Job control handler runs first, then the session-aware security
-		// interceptor (which uses this session's own directory stack), then the
-		// PTY handler — installed LAST so it only runs after the interceptor has
-		// authorized the command and dispatched it to real OS exec. The gate/
-		// audit chokepoint is the CallHandler, which runs before any exec handler.
+		// Job control, then the session interceptor, then the PTY handler, then
+		// SessionExecHandler. The last handler does not fall through, so a
+		// credential or rlimit failure is not retried as the listener uid.
+		// The gate/audit chokepoint is the CallHandler.
 		interp.CallHandler(security.CallInterceptorSession(sessState)),
 		interp.ExecHandlers(
 			jobControlHandler(out),
 			security.BashInterceptorSession(sessState),
 			ptyExecHandler(ptyTTY, in, out),
+			security.SessionExecHandler,
 		),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)

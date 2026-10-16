@@ -28,6 +28,7 @@ package starlarkext
 //     buffer that fails closed (errors, does NOT silently truncate) once the cap
 //     is exceeded.
 //   - Swallowed initialization errors. interp.New's error is checked, not `_ =`.
+//   - The innermost handler is SessionExecHandler and fails closed (no fallback to root).
 // It does NOT sanitize the command text or decide which commands are allowed —
 // that is the Rego policy's job, enforced by the interceptors above.
 
@@ -154,11 +155,18 @@ func runGatedShell(ctx context.Context, p execParams, cmdStr string) (string, er
 		return "", fmt.Errorf("parse error: %v", err)
 	}
 
+	sid := ""
+	if p.session != nil {
+		if v, ok := p.session.Globals["SESSION_ID"].(starlark.String); ok {
+			sid = string(v)
+		}
+	}
 	out := &cappedBuffer{cap: p.outputCap}
 	runner, err := interp.New(
+		interp.Env(security.NewSessionEnviron(sid)),
 		interp.StdIO(nil, out, out),
 		interp.CallHandler(p.engine.CallInterceptorSession(p.session)),
-		interp.ExecHandlers(p.engine.BashInterceptorSession(p.session)),
+		interp.ExecHandlers(p.engine.BashInterceptorSession(p.session), security.SessionExecHandler),
 		interp.OpenHandler(security.VirtualOpenHandler()),
 	)
 	if err != nil {

@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,12 +93,36 @@ type Session struct {
 	terminated     bool
 	recorder       *sessionRecorder
 	elevation      *Elevation
+	oidcProvider   string
+	eligibleRoles  []string
+	agentBinding   *ManagedAgent
+	envOverlay     map[string]string
+	dropPrivileges bool
+	prompt         io.Writer
 }
+
+// Per-entry ceilings. A session must not pin an unbounded overlay, and a
+// value this large cannot be a credential we are willing to copy into a child.
+const (
+	maxEnvKeyLen         = 4 << 10
+	maxEnvValueLen       = 256 << 10
+	maxEnvOverlayEntries = 1024
+)
 
 type Elevation struct {
 	Role      string    `json:"role"`
 	Reason    string    `json:"reason"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// ManagedAgent binds a session to one supervised cloud agent. The process
+// uid does not change. ExpiresAt is the lease deadline.
+type ManagedAgent struct {
+	ID        string
+	FlightID  string
+	Worktree  string
+	Allow     []string
+	ExpiresAt time.Time
 }
 
 type SessionInfo struct {
@@ -109,6 +135,9 @@ type SessionInfo struct {
 	Terminated     bool
 	Recording      string
 	Elevation      *Elevation
+	OIDCProvider   string
+	EligibleRoles  []string
+	AgentID        string
 }
 
 func (s *Session) CancelCommand() {
@@ -151,6 +180,61 @@ func (s *Session) SetIdentity(user string, principals []string) {
 	s.touchLocked()
 }
 
+// SetOIDC records which OIDC audience established the session and which
+// privileged roles that audience may elevate into. Eligible roles are not
+// principals and do not elevate the session by themselves.
+func (s *Session) SetOIDC(provider string, eligible []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.oidcProvider = provider
+	s.eligibleRoles = append([]string(nil), eligible...)
+	s.touchLocked()
+}
+
+// OIDC returns the provider name and a copy of the eligible privileged roles.
+func (s *Session) OIDC() (string, []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.oidcProvider, append([]string(nil), s.eligibleRoles...)
+}
+
+// BindManagedAgent attaches a supervised cloud-agent lease to the session.
+// A nil agent clears the binding.
+func (s *Session) BindManagedAgent(agent *ManagedAgent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if agent == nil {
+		s.agentBinding = nil
+		s.touchLocked()
+		return
+	}
+	copy := *agent
+	copy.Allow = append([]string(nil), agent.Allow...)
+	s.agentBinding = &copy
+	s.touchLocked()
+}
+
+// ManagedAgent returns a copy of the cloud-agent binding, or nil.
+func (s *Session) ManagedAgent() *ManagedAgent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.agentBinding == nil {
+		return nil
+	}
+	copy := *s.agentBinding
+	copy.Allow = append([]string(nil), s.agentBinding.Allow...)
+	return &copy
+}
+
+// ClearManagedAgent removes the cloud-agent binding. The worktree is left
+// in place for an explicit destroy.
+func (s *Session) ClearManagedAgent() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentBinding = nil
+	s.touchLocked()
+}
+
 func (s *Session) Touch() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -181,6 +265,10 @@ func (s *Session) Info() SessionInfo {
 		copy := *active
 		elevation = &copy
 	}
+	agentID := ""
+	if s.agentBinding != nil {
+		agentID = s.agentBinding.ID
+	}
 	return SessionInfo{
 		ID:             s.ID,
 		User:           s.User,
@@ -191,6 +279,9 @@ func (s *Session) Info() SessionInfo {
 		Terminated:     s.terminated,
 		Recording:      s.Recording,
 		Elevation:      elevation,
+		OIDCProvider:   s.oidcProvider,
+		EligibleRoles:  append([]string(nil), s.eligibleRoles...),
+		AgentID:        agentID,
 	}
 }
 
@@ -235,6 +326,152 @@ func (s *Session) touchLocked() {
 	s.lastActive = time.Now().UTC()
 }
 
+// Threats: session environment mutations must not call os.Setenv. An empty
+// key, a key containing '=' or NUL, a value containing NUL, or an oversized
+// key, value, or overlay is rejected and the previous overlay is left as it
+// was. Lookup prefers the overlay, then the process environment.
+func (s *Session) SetDropPrivileges(drop bool) {
+	s.mu.Lock()
+	s.dropPrivileges = drop
+	s.mu.Unlock()
+}
+
+func (s *Session) DropPrivileges() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dropPrivileges
+}
+
+// SetPromptWriter is where four-eyes prompts for this session are written.
+// The SSH listener sets it to that login's channel. A nil writer keeps the
+// prompt on stderr.
+func (s *Session) SetPromptWriter(w io.Writer) {
+	s.mu.Lock()
+	s.prompt = w
+	s.mu.Unlock()
+}
+
+// PromptWriter returns the session prompt sink. The caller must not hold
+// sessionsMu; this lock is only s.mu.
+func (s *Session) PromptWriter() io.Writer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.prompt
+}
+
+func (s *Session) SetEnv(key, value string) error {
+	if key == "" || strings.ContainsAny(key, "=\x00") {
+		return fmt.Errorf("adssh: invalid environment key")
+	}
+	if strings.ContainsRune(value, 0) {
+		return fmt.Errorf("adssh: invalid environment value")
+	}
+	if len(key) > maxEnvKeyLen || len(value) > maxEnvValueLen {
+		return fmt.Errorf("adssh: environment assignment exceeds size limit")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.envOverlay == nil {
+		s.envOverlay = make(map[string]string)
+	}
+	if _, exists := s.envOverlay[key]; !exists && len(s.envOverlay) >= maxEnvOverlayEntries {
+		return fmt.Errorf("adssh: environment overlay is full")
+	}
+	s.envOverlay[key] = value
+	return nil
+}
+
+func (s *Session) LookupEnv(key string) (string, bool) {
+	s.mu.RLock()
+	if s.envOverlay != nil {
+		if value, ok := s.envOverlay[key]; ok {
+			s.mu.RUnlock()
+			return value, true
+		}
+	}
+	s.mu.RUnlock()
+	return os.LookupEnv(key)
+}
+
+func (s *Session) OverlayGet(key string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.envOverlay == nil {
+		return "", false
+	}
+	value, ok := s.envOverlay[key]
+	return value, ok
+}
+
+func (s *Session) EnvOverlay() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return copyOverlay(s.envOverlay)
+}
+
+func (s *Session) Environ() []string {
+	s.mu.RLock()
+	overlay := copyOverlay(s.envOverlay)
+	s.mu.RUnlock()
+	return mergeEnviron(os.Environ(), overlay)
+}
+
+func copyOverlay(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func mergeEnviron(base []string, overlay map[string]string) []string {
+	out := make([]string, 0, len(base)+len(overlay))
+	for _, kv := range base {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || name == "" {
+			continue
+		}
+		if _, replaced := overlay[name]; replaced {
+			continue
+		}
+		out = append(out, kv)
+	}
+	keys := make([]string, 0, len(overlay))
+	for key := range overlay {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		out = append(out, key+"="+overlay[key])
+	}
+	return out
+}
+
+// LastEnvWins collapses a merged environment so the last occurrence of a
+// name is the only one. Empty entries left by an unset are dropped.
+// Darwin and Linux getenv return the first occurrence, so a duplicate left
+// in place would hide a later overlay or shell export.
+func LastEnvWins(list []string) []string {
+	index := make(map[string]int, len(list))
+	out := make([]string, 0, len(list))
+	for _, kv := range list {
+		if kv == "" {
+			continue
+		}
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || name == "" {
+			continue
+		}
+		if i, exists := index[name]; exists {
+			out[i] = kv
+			continue
+		}
+		index[name] = len(out)
+		out = append(out, kv)
+	}
+	return out
+}
+
 var (
 	globalSessions = make(map[string]*Session)
 	sessionsMu     sync.RWMutex
@@ -247,9 +484,17 @@ func GenerateSessionID() string {
 	return hex.EncodeToString(b)
 }
 
-func RegisterSession(s *Session) {
+func RegisterSession(s *Session) error {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
+	if _, exists := globalSessions[s.ID]; !exists {
+		if sessionCapRefuse {
+			return fmt.Errorf("adssh: session cap is invalid; refusing new sessions")
+		}
+		if sessionCap > 0 && uint64(len(globalSessions)) >= sessionCap {
+			return fmt.Errorf("adssh: session cap of %d reached", sessionCap)
+		}
+	}
 	now := time.Now().UTC()
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = now
@@ -267,6 +512,7 @@ func RegisterSession(s *Session) {
 		}
 	}
 	globalSessions[s.ID] = s
+	return nil
 }
 
 func UnregisterSession(id string) {

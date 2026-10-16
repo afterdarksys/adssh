@@ -49,27 +49,30 @@ type chainEntryForHash struct {
 	PrevHash  string `json:"prev_hash"`
 }
 
-// InitChain sets the ledger path, loads or creates the HMAC key, and sets the session ID.
-func (e *Engine) InitChain(ledgerPath, keyPath, sessionID string) {
-	e.chainMu.Lock()
-	defer e.chainMu.Unlock()
-
-	e.chainPath = ledgerPath
-	e.chainSession = sessionID
-
+// InitChain loads or creates the HMAC key, then records the ledger path.
+// The path stays unset when the key cannot be loaded, so a failed init does
+// not leave a half-configured chain that would later fail open.
+func (e *Engine) InitChain(ledgerPath, keyPath, sessionID string) error {
 	key, err := loadOrCreateChainKey(keyPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "audit chain: failed to load/create key: %v\n", err)
-		return
+		return fmt.Errorf("audit chain: failed to load/create key: %w", err)
 	}
+	e.chainMu.Lock()
+	defer e.chainMu.Unlock()
+	e.chainPath = ledgerPath
+	e.chainSession = sessionID
 	e.chainKey = key
+	e.chainTailKnown = false
+	e.chainPrevHash = ""
+	e.chainNextSeq = 0
+	return nil
 }
 
 // InitChain sets the ledger path, loads or creates the HMAC key, and sets the session ID.
 //
 // Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func InitChain(ledgerPath, keyPath, sessionID string) {
-	defaultEngine.InitChain(ledgerPath, keyPath, sessionID)
+func InitChain(ledgerPath, keyPath, sessionID string) error {
+	return defaultEngine.InitChain(ledgerPath, keyPath, sessionID)
 }
 
 // loadOrCreateChainKey reads the HMAC key from path, or generates and writes a new one.
@@ -94,8 +97,18 @@ func loadOrCreateChainKey(path string) ([]byte, error) {
 	return key, nil
 }
 
+// chainScanMax is the largest ledger line the scanner will accept. A longer
+// line is an error, not a missing ledger.
+const chainScanMax = 1 << 20
+
+func newChainScanner(r interface{ Read([]byte) (int, error) }) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), chainScanMax)
+	return scanner
+}
+
 // computeHash computes the HMAC-SHA256 of prev + "\n" + JSON(entry without Hash).
-func computeHash(key []byte, prev string, entry ChainEntry) string {
+func computeHash(key []byte, prev string, entry ChainEntry) (string, error) {
 	withoutHash := chainEntryForHash{
 		Seq:       entry.Seq,
 		Timestamp: entry.Timestamp,
@@ -110,13 +123,16 @@ func computeHash(key []byte, prev string, entry ChainEntry) string {
 		ChangeID:  entry.ChangeID,
 		PrevHash:  entry.PrevHash,
 	}
-	entryJSON, _ := json.Marshal(withoutHash)
+	entryJSON, err := json.Marshal(withoutHash)
+	if err != nil {
+		return "", err
+	}
 
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(prev))
 	mac.Write([]byte("\n"))
 	mac.Write(entryJSON)
-	return hex.EncodeToString(mac.Sum(nil))
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // currentUser returns the current user from env vars.
@@ -139,47 +155,67 @@ func currentHostname() string {
 	return h
 }
 
-// readLastChainLine reads only the last non-empty line from the ledger file.
-// Returns prevHash and nextSeq.
-func readLastChainLine(path string) (prevHash string, nextSeq int64) {
+// readLastChainLine reads the last non-empty line of the ledger.
+// A missing or empty file starts at seq 0. A file that exists but cannot be
+// read, or a last line that does not parse, is an error. Callers must not
+// treat that error as a new genesis entry.
+func readLastChainLine(path string) (prevHash string, nextSeq int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0
+		if os.IsNotExist(err) {
+			return "", 0, nil
+		}
+		return "", 0, err
 	}
 	defer f.Close()
 
 	var lastLine string
-	scanner := bufio.NewScanner(f)
+	scanner := newChainScanner(f)
 	for scanner.Scan() {
 		if line := scanner.Text(); strings.TrimSpace(line) != "" {
 			lastLine = line
 		}
 	}
-
+	if err := scanner.Err(); err != nil {
+		return "", 0, err
+	}
 	if lastLine == "" {
-		return "", 0
+		return "", 0, nil
 	}
 
 	var entry ChainEntry
 	if err := json.Unmarshal([]byte(lastLine), &entry); err != nil {
-		return "", 0
+		return "", 0, fmt.Errorf("audit chain: corrupt tail: %w", err)
 	}
-	return entry.Hash, entry.Seq + 1
+	if entry.Hash == "" {
+		return "", 0, fmt.Errorf("audit chain: corrupt tail: empty hash")
+	}
+	return entry.Hash, entry.Seq + 1, nil
 }
 
-// AppendChain appends a new entry to the HMAC chain ledger.
-// It is a no-op if InitChain has not been called.
-func (e *Engine) AppendChain(entry ChainEntry) {
+// AppendChain appends a new entry to the HMAC chain ledger and Syncs it.
+// It is a no-op if InitChain has not been called. The tail cache advances
+// only after Sync succeeds. A write or Sync failure forgets the cache so the
+// next append rescans and fails closed on a partial line.
+func (e *Engine) AppendChain(entry ChainEntry) error {
 	e.chainMu.Lock()
 	defer e.chainMu.Unlock()
 
 	if e.chainPath == "" || e.chainKey == nil {
-		return
+		return nil
 	}
 
-	prevHash, nextSeq := readLastChainLine(e.chainPath)
+	if !e.chainTailKnown {
+		prevHash, nextSeq, err := readLastChainLine(e.chainPath)
+		if err != nil {
+			return err
+		}
+		e.chainPrevHash = prevHash
+		e.chainNextSeq = nextSeq
+		e.chainTailKnown = true
+	}
 
-	entry.Seq = nextSeq
+	entry.Seq = e.chainNextSeq
 	entry.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
 	if entry.SessionID == "" {
 		entry.SessionID = e.chainSession
@@ -190,36 +226,51 @@ func (e *Engine) AppendChain(entry ChainEntry) {
 	if entry.Hostname == "" {
 		entry.Hostname = currentHostname()
 	}
-	entry.PrevHash = prevHash
-	entry.Hash = computeHash(e.chainKey, prevHash, entry)
+	entry.PrevHash = e.chainPrevHash
+	hash, err := computeHash(e.chainKey, e.chainPrevHash, entry)
+	if err != nil {
+		return err
+	}
+	entry.Hash = hash
 
 	data, err := json.Marshal(entry)
 	if err != nil {
-		return
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(e.chainPath), 0700); err != nil {
-		return
+		e.chainTailKnown = false
+		return err
 	}
 
 	f, err := os.OpenFile(e.chainPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
-		return
+		e.chainTailKnown = false
+		return err
 	}
 	defer f.Close()
 	if _, err := f.Write(data); err != nil {
-		return
+		e.chainTailKnown = false
+		return err
 	}
 	if _, err := f.Write([]byte("\n")); err != nil {
-		return
+		e.chainTailKnown = false
+		return err
 	}
+	if err := syncFile(f); err != nil {
+		e.chainTailKnown = false
+		return err
+	}
+	e.chainPrevHash = entry.Hash
+	e.chainNextSeq = entry.Seq + 1
+	return nil
 }
 
 // AppendChain appends a new entry to the HMAC chain ledger.
 //
 // Deprecated: use Engine methods; retained for the binary until the engine facade lands.
-func AppendChain(entry ChainEntry) {
-	defaultEngine.AppendChain(entry)
+func AppendChain(entry ChainEntry) error {
+	return defaultEngine.AppendChain(entry)
 }
 
 // VerifyChain reads every line of the ledger and recomputes each hash.
@@ -243,7 +294,7 @@ func (e *Engine) VerifyChain(path string) (ok bool, badSeq int64, err error) {
 	var prev string
 	var lineNum int64
 
-	scanner := bufio.NewScanner(f)
+	scanner := newChainScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
@@ -256,7 +307,10 @@ func (e *Engine) VerifyChain(path string) (ok bool, badSeq int64, err error) {
 		}
 
 		storedHash := entry.Hash
-		expected := computeHash(key, prev, entry)
+		expected, hashErr := computeHash(key, prev, entry)
+		if hashErr != nil {
+			return false, entry.Seq, hashErr
+		}
 		if storedHash != expected {
 			return false, entry.Seq, nil
 		}
@@ -303,7 +357,7 @@ func (e *Engine) ExportChain(path, format, since, until string) ([]byte, error) 
 	}
 
 	var entries []ChainEntry
-	scanner := bufio.NewScanner(f)
+	scanner := newChainScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {

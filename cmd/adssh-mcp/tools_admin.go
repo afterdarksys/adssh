@@ -239,11 +239,18 @@ func handleIdentityStatus() server.ToolHandlerFunc {
 		if principals == nil {
 			principals = []string{}
 		}
-		return mcpJSONResult(map[string]any{
+		payload := map[string]any{
 			"session_id": info.ID,
 			"user":       info.User,
 			"principals": principals,
-		})
+		}
+		if info.OIDCProvider != "" {
+			payload["oidc_provider"] = info.OIDCProvider
+		}
+		if len(info.EligibleRoles) > 0 {
+			payload["eligible_roles"] = info.EligibleRoles
+		}
+		return mcpJSONResult(payload)
 	}
 }
 

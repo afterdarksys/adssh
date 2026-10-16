@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,15 @@ func init() {
 }
 
 func main() {
+	sys.MaybeRunSessionChild()
+	if err := sys.ConfigureHostFromEnv(); err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+		os.Exit(1)
+	}
+	if isSSHSessionArgv(os.Args) {
+		os.Exit(runSSHSession(os.Args))
+	}
+
 	// 0. Set SHELL env var for POSIX compliance — child processes need this
 	if binaryPath, err := os.Executable(); err == nil {
 		os.Setenv("SHELL", binaryPath)
@@ -132,13 +142,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO(engine-facade): the SSH server (sshStarter/repl.Start), the Starlark
-	// exec builtins (starlarkext/exec.go, job.go) and the REPL completer still
-	// resolve the process-global default engine. Point the default at the engine
-	// we just built so those paths authorize through the same policy, audit log
-	// and hash chain as the sessions opened below — until repl/ and starlarkext/
-	// accept an *engine.Engine directly.
+	// TODO(engine-facade): the Starlark exec builtins (starlarkext/exec.go,
+	// job.go) and the REPL completer still resolve the process-global default
+	// engine. Point the default at the engine we just built so those paths
+	// authorize through the same policy, audit log and hash chain as the
+	// sessions opened below — until repl/ and starlarkext/ accept an
+	// *engine.Engine directly.
 	security.SetDefaultEngine(eng.Security())
+	// sessionID here is the SSH login the listener bound. It is not the local REPL id.
+	sys.SetSSHMonitorServer(func(conn net.Conn, sessionID string) {
+		security.ServeSSHMonitor(conn, sessionID, func(args []string) error {
+			if sys.GetSession(sessionID) == nil {
+				return errors.New("adssh: ssh monitor: session is gone")
+			}
+			return eng.Security().AuthorizeCommand(args, sessionID)
+		})
+	})
 	guard.SetRecorder(func(ev guard.Event) {
 		eng.Security().LogEvent(fmt.Sprintf("GUARD action=%s addr=%s reason=%s", ev.Action, ev.Addr, ev.Reason))
 	})
@@ -176,7 +195,10 @@ func main() {
 		User: os.Getenv("USER"),
 		Out:  outCast,
 	}
-	sys.RegisterSession(localSession)
+	if err := sys.RegisterSession(localSession); err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+		os.Exit(1)
+	}
 	defer sys.UnregisterSession(sessionID)
 
 	// 5. Open the single-user session for the interactive / -c / script paths.
@@ -201,32 +223,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading profiles: %v\n", perr)
 	}
 
-	// sshStarter builds each SSH session's OWN isolated globals (fresh
-	// SetupExtensions, its own aliases/custom-commands/shopts/plugins dicts and
-	// directory stack) rather than sharing/shallow-copying the base env. The RC
-	// profile is re-loaded per session so ~/.adsshrc customisations still apply.
-	// TODO(session): SSH sessions intentionally do not receive the
-	// enable_ssh/disable_ssh builtins injected into the single-user env below.
+	// sshStarter execs one session process per SSH login. The listener keeps
+	// the socket, host key, session table, and audit files. The child is the
+	// REPL. SSH sessions do not receive enable_ssh or disable_ssh.
 	sshStarter := func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) {
-		sessGlobals := starlark.StringDict{}
-		starlarkext.SetupExtensions(starlarkext.ExtensionOptions{
-			Env:        sessGlobals,
-			Restricted: cfg.Restricted,
-			SessionID:  sessionID,
-			In:         in,
-			Out:        out,
-			Err:        errOut,
-		})
-		starlarkext.GovernStarlarkGlobalsInPlace(eng.Security(), sessGlobals)
-		sessThread := &starlark.Thread{Name: "ssh-" + sessionID}
-		if _, perr := config.LoadProfiles(sessThread, sessGlobals, false, cfg.ProfilePath, cfg.RCPath); perr != nil {
-			fmt.Fprintf(errOut, "Error loading profiles: %v\n", perr)
-		}
-		if menuPath := eng.Security().GetMenuForUser(user, principals); menuPath != "" {
-			repl.StartMenu(menuPath, sessGlobals, cfg.Restricted, in, out, errOut)
+		slave, ok := in.(*os.File)
+		if !ok {
+			fmt.Fprintf(errOut, "adssh: ssh session: pty is not a file\n")
 			return
 		}
-		repl.Start(sessGlobals, cfg.Restricted, cfg.HistoryFile, in, out, errOut)
+		err := sys.SpawnSSHSession(sys.SSHSessionSpec{
+			SessionID:   sessionID,
+			User:        user,
+			Principals:  principals,
+			Restricted:  cfg.Restricted,
+			MenuPath:    eng.Security().GetMenuForUser(user, principals),
+			HistoryFile: cfg.HistoryFile,
+			ProfilePath: cfg.ProfilePath,
+			RCPath:      cfg.RCPath,
+			PTY:         slave,
+		})
+		if err != nil {
+			fmt.Fprintf(errOut, "adssh: %v\n", err)
+		}
 	}
 	gatewayAuthorizer := func(req sys.GatewayAuthRequest) error {
 		return eng.Security().AuthorizeGateway(security.GatewayPolicyRequest{
@@ -501,6 +520,10 @@ VIRTUAL BINARIES (type 'vbins' for full list)
   lease       Command secret lease       lease --from vault:path?field=token --as TOKEN -- cmd
   guard       SSH listener jail          guard status
   elevate     Break-glass elevation      elevate request prod-admin --for 10m --reason INC
+  grid        sah-grid membership        grid status
+  flight      Witnessed change           flight place --id F --agent A --worktree W --for 10m
+  agent       Supervised cloud agent     agent status
+  worktree    Pinned checkout            worktree checkout --id W --from PATH --rev SHA
   ??          Last denial explainer      ??
   cmdgen      Cloud CLI generator        cmdgen aws ec2 create instance_type=t3.micro
   package     Package manager            package install ripgrep

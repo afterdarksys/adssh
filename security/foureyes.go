@@ -3,6 +3,7 @@ package security
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -240,7 +241,8 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 		return err
 	}
 	requestID := pending.RequestID
-	fmt.Fprint(os.Stderr, formatApprovalPrompt(pendingFile, requestID, rule.Approver))
+	sink := approvalSink(sessionID)
+	fmt.Fprint(sink, formatApprovalPrompt(pendingFile, requestID, rule.Approver))
 
 	required := rule.Approver
 	if required == "" {
@@ -278,21 +280,21 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 		remaining := int(time.Until(deadline).Seconds())
 
 		if _, err := os.Stat(approvedPath); err == nil {
-			fmt.Fprintf(os.Stderr, "\r\033[K\u2705 Request %s approved.\n", requestID)
+			fmt.Fprintf(sink, "\r\033[K\u2705 Request %s approved.\n", requestID)
 			return nil
 		}
 		if _, err := os.Stat(deniedPath); err == nil {
-			fmt.Fprintf(os.Stderr, "\r\033[K\u274C Request %s denied.\n", requestID)
+			fmt.Fprintf(sink, "\r\033[K\u274C Request %s denied.\n", requestID)
 			return fmt.Errorf("foureyes: request %s denied (required approver: %s)", requestID, required)
 		}
 
-		fmt.Fprintf(os.Stderr, "\r%s waiting for approval (request: %s) [%ds remaining]",
+		fmt.Fprintf(sink, "\r%s waiting for approval (request: %s) [%ds remaining]",
 			spinChars[spinIdx%len(spinChars)], requestID, remaining)
 		spinIdx++
 		time.Sleep(2 * time.Second)
 	}
 
-	fmt.Fprintf(os.Stderr, "\r\033[K\u23F0 Request %s timed out.\n", requestID)
+	fmt.Fprintf(sink, "\r\033[K\u23F0 Request %s timed out.\n", requestID)
 	os.Remove(pendingFile) //nolint:errcheck
 	return fmt.Errorf("foureyes: request %s timed out after %ds (required approver: %s)", requestID, ttl, required)
 }
@@ -302,6 +304,19 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 // Deprecated: use Engine methods; retained for the binary until the engine facade lands.
 func RequestApproval(cmd string, rule FourEyesRule) error {
 	return defaultEngine.RequestApproval(cmd, rule)
+}
+
+// approvalSink is the session channel when the listener has one, and stderr
+// for a local approval. The writer is captured once per request.
+func approvalSink(sessionID string) io.Writer {
+	if sessionID != "" {
+		if session := sys.GetSession(sessionID); session != nil {
+			if w := session.PromptWriter(); w != nil {
+				return w
+			}
+		}
+	}
+	return os.Stderr
 }
 
 func approvalActor(sessionID string) string {

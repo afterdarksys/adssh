@@ -71,7 +71,9 @@ func TestDeviceLoginStoresBearerAndSetsUser(t *testing.T) {
 		t.Fatalf("engine: %v", err)
 	}
 	sessionID := "device-login-happy"
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: "bob", Principals: []string{"ops"}})
+	session := &sys.Session{ID: sessionID, User: "bob", Principals: []string{"ops"}}
+	session.SetOIDC(OIDCProviderAdmin, []string{RoleOSRoot, RoleGridOps})
+	sys.RegisterSession(session)
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	ctx := WithSessionID(context.WithValue(context.Background(), engineCtxKey, engine), sessionID)
 
@@ -109,10 +111,13 @@ func TestDeviceLoginStoresBearerAndSetsUser(t *testing.T) {
 	if string(stored) != access {
 		t.Fatal("token file mismatch")
 	}
-	session := sys.GetSession(sessionID)
+	session = sys.GetSession(sessionID)
 	got := session.Info()
 	if got.User != "alice" || len(got.Principals) != 0 {
 		t.Fatalf("identity user=%q principals=%v", got.User, got.Principals)
+	}
+	if provider, eligible := session.OIDC(); provider != "" || len(eligible) != 0 {
+		t.Fatalf("device login left oidc provider=%q eligible=%v", provider, eligible)
 	}
 	audit, err := os.ReadFile(auditPath)
 	if err != nil {

@@ -262,13 +262,21 @@ func BuildPolicyContext(command string, args []string, sessionID string) PolicyC
 	if sessionID != "" {
 		if session := sys.GetSession(sessionID); session != nil {
 			pctx.User = session.User
-			pctx.Groups = session.Principals
+			pctx.Groups = append([]string(nil), session.Principals...)
 			if elevation := session.ActiveElevation(); elevation != nil {
 				pctx.Groups = append(pctx.Groups, elevation.Role)
 				pctx.Elevation = &ElevationClaim{
 					Role:      elevation.Role,
 					Reason:    elevation.Reason,
 					ExpiresAt: elevation.ExpiresAt.UTC().Format(time.RFC3339),
+				}
+			}
+			if agent := session.ManagedAgent(); agent != nil && time.Now().Before(agent.ExpiresAt) {
+				pctx.Agent = &AgentClaim{
+					ID:        agent.ID,
+					Kind:      agentKindCloud,
+					Risk:      "worktree",
+					SessionID: session.ID,
 				}
 			}
 			return pctx

@@ -19,7 +19,10 @@ func (elevateBinary) Description() string {
 func (elevateBinary) Usage() string {
 	return `elevate request <role> --for duration --reason text
 elevate status
-elevate drop`
+elevate drop
+
+The process uid does not change. os-root, adssh-admin, and gridops are
+session elevation claims. They require an admin-audience import first.`
 }
 
 func (elevateBinary) Run(ctx context.Context, args []string) error {
@@ -32,12 +35,21 @@ func (elevateBinary) Run(ctx context.Context, args []string) error {
 	if session == nil {
 		return fmt.Errorf("elevate: requires an active registered session")
 	}
+	if session.ManagedAgent() != nil {
+		return fmt.Errorf("elevate: agents cannot elevate")
+	}
 
 	switch args[1] {
 	case "request":
 		role, ttl, reason, err := parseElevationRequest(args[2:])
 		if err != nil {
 			return err
+		}
+		if IsPrivilegedRole(role) {
+			provider, eligible := session.OIDC()
+			if provider != OIDCProviderAdmin || !containsRole(eligible, role) {
+				return fmt.Errorf("elevate: role %q requires an admin-audience capability", role)
+			}
 		}
 		expiresAt := time.Now().UTC().Add(ttl)
 		session.ActivateElevation(role, reason, expiresAt)

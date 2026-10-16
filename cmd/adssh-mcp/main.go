@@ -32,6 +32,7 @@ type preparedMCP struct {
 }
 
 func main() {
+	sys.MaybeRunSessionChild()
 	prepared, exitCode, err := prepareMCPProcess(os.Args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "adssh-mcp: %v\n", err)
@@ -59,7 +60,12 @@ func main() {
 	}
 
 	globals := starlark.StringDict{}
-	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: prepared.cfg.Restricted, Engine: prepared.eng.Security()})
+	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{
+		Env:        globals,
+		Restricted: prepared.cfg.Restricted,
+		SessionID:  prepared.sessionID,
+		Engine:     prepared.eng.Security(),
+	})
 
 	prepared.eng.Security().LogEvent("adssh-mcp server starting")
 	if err := serveMCP(prepared.cfg, prepared.eng, globals, prepared.agent); err != nil {
@@ -74,6 +80,9 @@ func main() {
 // missing file exits 2. A malformed policy still exits 1. The session is
 // registered only after the engine is created.
 func prepareMCPProcess(args []string) (preparedMCP, int, error) {
+	if err := sys.ConfigureHostFromEnv(); err != nil {
+		return preparedMCP{}, 1, err
+	}
 	cfg := config.LoadFromEnv()
 	agentID := os.Getenv("ADSSH_AGENT_ID")
 	requireDryRun := strings.EqualFold(os.Getenv("ADSSH_AGENT_REQUIRE_DRY_RUN"), "true")
@@ -121,7 +130,9 @@ func prepareMCPProcess(args []string) (preparedMCP, int, error) {
 	if err != nil {
 		return preparedMCP{}, 1, err
 	}
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: agentID})
+	if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: agentID}); err != nil {
+		return preparedMCP{}, 1, err
+	}
 	return preparedMCP{
 		cfg:       cfg,
 		eng:       eng,
