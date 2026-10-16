@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chzyer/readline"
@@ -57,7 +59,10 @@ func (a *app) repl(ctx context.Context) error {
 		if words[0] == "exit" || words[0] == "quit" {
 			return nil
 		}
-		if err := a.dispatch(ctx, words); err != nil {
+		cmdCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		err = a.dispatch(cmdCtx, words)
+		stop()
+		if err != nil {
 			fmt.Fprintln(a.out, "adsshadm:", err)
 		}
 	}

@@ -11,7 +11,7 @@ adsshadm --yes approve 7f3a               # no confirmation
 
 ## Connecting
 
-- `--url` or `ADSSH_ADMIN_URL`: `unix:/path` (preferred), or a loopback `http://` address with a port. `http://127.0.0.1:8787` is the `admin serve` default. Any other host is refused, because the admin API only listens on loopback or a socket and the key would otherwise cross the network in clear text. A socket must be owned by you or root. A loopback port cannot be checked that way, so another local user who binds it while adssh is down could collect the key. Use a socket where that matters. For a remote adssh, run `adsshadm` on that host or forward its socket over SSH.
+- `--url` or `ADSSH_ADMIN_URL`: `unix:/path` (preferred), or a loopback `http://` address with a port. `http://127.0.0.1:8787` is the `admin serve` default. Any other host is refused, because the admin API only listens on loopback or a socket and the key would otherwise cross the network in clear text. A socket must be owned by you or root, and should sit in a directory only its owner can write, since the check and the connect are separate steps. A loopback port cannot be checked that way, so another local user who binds it while adssh is down could collect the key. Use a socket where that matters. For a remote adssh, run `adsshadm` on that host or forward its socket over SSH.
 - `--key-file` or `ADSSH_ADMIN_KEY_FILE`: a file holding one key. It must be a regular file owned by you with mode 0600, not a symlink. The key is never taken from argv or an environment value.
 
 The read-only key (`ADSSH_ADMIN_API_KEY`) can list, explain, and export evidence. `approve`, `deny`, `guard unban`, and `snoop` need a named key from `ADSSH_ADMIN_KEYS`. The key name is what the server records as the actor.

@@ -79,20 +79,21 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if interactive {
 		a.confirm = lineConfirm(stdin, stderr)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	if fs.NArg() == 0 {
 		if !interactive {
 			fmt.Fprintln(stderr, "adsshadm: no command given and stdin is not a terminal")
 			return 2
 		}
-		if err := a.repl(ctx); err != nil {
+		// The prompt makes a fresh signal context per command, so one Ctrl-C
+		// ends that command and not the rest of the session.
+		if err := a.repl(context.Background()); err != nil {
 			fmt.Fprintln(stderr, "adsshadm:", err)
 			return 1
 		}
 		return 0
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if err := a.dispatch(ctx, fs.Args()); err != nil {
 		fmt.Fprintln(stderr, "adsshadm:", err)
 		return 1

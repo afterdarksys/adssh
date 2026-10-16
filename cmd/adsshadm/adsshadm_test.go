@@ -278,6 +278,9 @@ func TestClean(t *testing.T) {
 		"bidi\u202eevil": `bidi\u202eevil`,
 		"isolate\u2066x": `isolate\u2066x`,
 		"bom\ufeff":      `bom\ufeff`,
+		"zw\u200bsp":     `zw\u200bsp`,
+		"wj\u2060x":      `wj\u2060x`,
+		"bad\xffutf8":    `bad\ufffdutf8`,
 		"naïve café":     "naïve café",
 	} {
 		if got := clean(in); got != want {
