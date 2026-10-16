@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,12 +39,14 @@ func writeKeyFile(t *testing.T, key string, mode os.FileMode) string {
 }
 
 func TestParseEndpoint(t *testing.T) {
-	for _, ok := range []string{"", "http://127.0.0.1:8787", "http://localhost:8787", "http://[::1]:9", "unix:/run/adssh/admin.sock"} {
+	for _, ok := range []string{"", "http://[::ffff:127.0.0.1]:8787", "http://127.0.0.1:8787", "http://localhost:8787", "http://[::1]:9", "unix:/run/adssh/admin.sock"} {
 		if _, err := parseEndpoint(ok); err != nil {
 			t.Errorf("%q refused: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{
+		"http://127.0.0.1", "http://127.0.0.1:0", "http://127.0.0.1:99999",
+		"http://127.0.0.1.evil.com:8787", "http://2130706433:8787", "http://0177.0.0.1:8787",
 		"http://10.0.0.5:8787", "http://example.com:8787", "https://127.0.0.1:8787",
 		"http://user:pw@127.0.0.1:8787", "http://127.0.0.1:8787/v1", "http://127.0.0.1:8787?x=1",
 		"unix:relative.sock", "ftp://127.0.0.1", "127.0.0.1:8787",
@@ -130,37 +133,177 @@ func TestWrongKeyIsUnauthorized(t *testing.T) {
 func TestLegacyKeyCannotApproveOrUnban(t *testing.T) {
 	srv := realServer(t)
 	a, _ := testApp(t, srv.URL, legacyKey)
-	for _, cmd := range [][]string{{"approve", "abc"}, {"deny", "abc"}, {"guard", "unban", "203.0.113.9"}} {
-		err := a.dispatch(context.Background(), cmd)
+	// Straight at the server: the read-only key is refused for decisions.
+	for _, path := range []string{"/v1/approvals/approve", "/v1/approvals/deny"} {
+		err := a.c.do(context.Background(), "POST", path, map[string]string{"request_id": "abc"}, nil)
 		var ae *apiError
 		if !errors.As(err, &ae) || ae.Status != http.StatusForbidden {
-			t.Errorf("%v with the read-only key: want 403, got %v", cmd, err)
+			t.Errorf("%s with the read-only key: want 403, got %v", path, err)
+		}
+	}
+	err := a.dispatch(context.Background(), []string{"guard", "unban", "203.0.113.9"})
+	var ae *apiError
+	if !errors.As(err, &ae) || ae.Status != http.StatusForbidden {
+		t.Errorf("unban with the read-only key: want 403, got %v", err)
+	}
+}
+
+// pendingServer answers GET /v1/approvals with one hostile pending request
+// and counts every other request, which would be a state change.
+func pendingServer(t *testing.T, writes *atomic.Int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/approvals" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"request_id":"abc","requester":"mallory","hostname":"db1",`+
+				`"timestamp":"t","command":"rm -rf /data\r\u001b[2Kls -la \u202e"}]`)
+			return
+		}
+		writes.Add(1)
+		_, _ = io.WriteString(w, `{"ok":true,"action":"approved","approver":"ryan"}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// stateChangingSamples gives valid arguments for every command that has a
+// prompt. A new state-changing command without a sample fails the test below.
+var stateChangingSamples = map[string][]string{
+	"approve": {"abc"},
+	"deny":    {"abc"},
+	"guard":   {"unban", "203.0.113.9"},
+	"snoop":   {"s1", "alice", "--purpose", "support", "--reason", "ticket 42"},
+}
+
+func TestEveryStateChangingCommandConfirms(t *testing.T) {
+	var writes atomic.Int32
+	srv := pendingServer(t, &writes)
+	a, _ := testApp(t, srv.URL, namedKey)
+	a.yes = false
+	a.snoop = func(context.Context, *app, snoopRequest) error { writes.Add(1); return nil }
+	for _, cmd := range commands() {
+		if cmd.prompt == nil {
+			continue
+		}
+		args, ok := stateChangingSamples[cmd.name]
+		if !ok {
+			t.Errorf("state-changing command %q has no sample in stateChangingSamples", cmd.name)
+			continue
+		}
+		var asked string
+		a.confirm = func(q string) bool { asked = q; return false }
+		if err := a.dispatch(context.Background(), append([]string{cmd.name}, args...)); err == nil || err.Error() != "canceled" {
+			t.Errorf("%s: want canceled, got %v", cmd.name, err)
+		}
+		if asked == "" {
+			t.Errorf("%s: operator was never asked", cmd.name)
+		}
+		a.confirm = nil // no terminal, no --yes
+		if err := a.dispatch(context.Background(), append([]string{cmd.name}, args...)); err == nil {
+			t.Errorf("%s: ran without a terminal or --yes", cmd.name)
+		}
+	}
+	if n := writes.Load(); n != 0 {
+		t.Fatalf("%d state changes sent after the operator declined", n)
+	}
+	for name := range stateChangingSamples {
+		if c, ok := findCommand(name); !ok || c.prompt == nil {
+			t.Errorf("%s changes state but has no prompt", name)
 		}
 	}
 }
 
-func TestWriteCommandsAskFirst(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
-	defer srv.Close()
+func TestApprovePromptShowsCleanedCommand(t *testing.T) {
+	var writes atomic.Int32
+	srv := pendingServer(t, &writes)
 	a, _ := testApp(t, srv.URL, namedKey)
 	a.yes = false
-	a.confirm = func(string) bool { return false }
-	a.snoop = func(context.Context, *app, snoopRequest) error { hits.Add(1); return nil }
-	for _, cmd := range [][]string{
-		{"approve", "abc"}, {"deny", "abc"}, {"guard", "unban", "203.0.113.9"},
-		{"snoop", "s1", "alice", "--purpose", "support", "--reason", "ticket 42"},
-	} {
-		if err := a.dispatch(context.Background(), cmd); err == nil || err.Error() != "canceled" {
-			t.Errorf("%v: want canceled, got %v", cmd, err)
+	var asked string
+	a.confirm = func(q string) bool { asked = q; return true }
+	if err := a.dispatch(context.Background(), []string{"approve", "abc"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(asked, "\r\x1b\u202e") {
+		t.Fatalf("prompt carries raw control characters: %q", asked)
+	}
+	for _, want := range []string{"mallory", "db1", `rm -rf /data\x0d\x1b[2Kls -la \u202e`} {
+		if !strings.Contains(asked, want) {
+			t.Errorf("prompt %q lacks %q", asked, want)
 		}
 	}
-	a.confirm = nil // non-interactive, no --yes
-	if err := a.dispatch(context.Background(), []string{"approve", "abc"}); err == nil {
-		t.Error("non-interactive approve without --yes went through")
+	if writes.Load() != 1 {
+		t.Fatalf("approve sent %d requests, want 1", writes.Load())
 	}
-	if hits.Load() != 0 {
-		t.Fatalf("%d requests sent after the operator declined", hits.Load())
+}
+
+func TestApproveRefusesUnknownID(t *testing.T) {
+	var writes atomic.Int32
+	srv := pendingServer(t, &writes)
+	a, _ := testApp(t, srv.URL, namedKey)
+	if err := a.dispatch(context.Background(), []string{"approve", "nope"}); err == nil {
+		t.Fatal("approved an id that is not pending")
+	}
+	if writes.Load() != 0 {
+		t.Fatal("a decision was sent for an unknown id")
+	}
+}
+
+func TestTablesEscapeHostileStrings(t *testing.T) {
+	var writes atomic.Int32
+	srv := pendingServer(t, &writes)
+	a, out := testApp(t, srv.URL, namedKey)
+	if err := a.dispatch(context.Background(), []string{"approvals"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(out.String(), "\r\x1b\u202e") {
+		t.Fatalf("table printed raw control characters: %q", out.String())
+	}
+	out.Reset()
+	a.jsonOut = true
+	if err := a.dispatch(context.Background(), []string{"approvals"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(out.String(), "\x1b\u202e") {
+		t.Fatalf("--json printed raw control characters: %q", out.String())
+	}
+}
+
+func TestClean(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain text":     "plain text",
+		"a\x1b[2Jb":      `a\x1b[2Jb`,
+		"cr\rhide":       `cr\x0dhide`,
+		"del\x7f":        `del\x7f`,
+		"c1\u009b":       `c1\x9b`,
+		"bidi\u202eevil": `bidi\u202eevil`,
+		"isolate\u2066x": `isolate\u2066x`,
+		"bom\ufeff":      `bom\ufeff`,
+		"naïve café":     "naïve café",
+	} {
+		if got := clean(in); got != want {
+			t.Errorf("clean(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCheckSocketRefusesNonSocket(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "fake.sock")
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSocket(endpoint{socket: p}); err == nil {
+		t.Fatal("regular file accepted as the admin socket")
+	}
+	if err := checkSocket(endpoint{socket: filepath.Join(t.TempDir(), "missing")}); err == nil {
+		t.Fatal("missing socket accepted")
+	}
+	l, err := net.Listen("unix", filepath.Join(t.TempDir(), "ok.sock"))
+	if err != nil {
+		t.Skipf("unix socket: %v", err)
+	}
+	defer l.Close()
+	if err := checkSocket(endpoint{socket: l.Addr().String()}); err != nil {
+		t.Fatalf("own socket refused: %v", err)
 	}
 }
 
@@ -363,6 +506,27 @@ func TestSplitWords(t *testing.T) {
 		if _, err := splitWords(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+func TestCompleterSkipsQuotedAndHostileValues(t *testing.T) {
+	var writes atomic.Int32
+	srv := pendingServer(t, &writes)
+	a, _ := testApp(t, srv.URL, namedKey)
+	c := &completer{a: a, ctx: context.Background()}
+	if got, _ := c.Do([]rune(`snoop "s`), 8); len(got) != 0 {
+		t.Errorf("completed inside a quote: %q", got)
+	}
+	if got, _ := c.Do([]rune(`snoop "unterminated `), 20); len(got) != 0 {
+		t.Errorf("completed after an unterminated quote: %q", got)
+	}
+	got, _ := c.Do([]rune("approve "), 8)
+	if len(got) != 1 || string(got[0]) != "abc " {
+		t.Errorf("approve completion %q", got)
+	}
+	got, _ = c.Do([]rune("approve\t"), 8)
+	if len(got) != 1 {
+		t.Errorf("tab as separator: %q", got)
 	}
 }
 

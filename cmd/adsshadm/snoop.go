@@ -31,8 +31,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -115,24 +115,27 @@ func parseSnoop(args []string) (snoopRequest, error) {
 	if len(r.Reason) > maxReason {
 		return r, fmt.Errorf("--reason is longer than %d bytes", maxReason)
 	}
-	for _, c := range r.Reason {
-		if unicode.IsControl(c) {
-			return r, errors.New("--reason must not contain control characters")
-		}
+	if strings.IndexFunc(r.Reason, unsafeRune) >= 0 {
+		return r, errors.New("--reason must not contain control or bidi characters")
 	}
 	return r, nil
 }
 
-func runSnoop(ctx context.Context, a *app, args []string) error {
+func snoopPrompt(_ context.Context, _ *app, args []string) (string, error) {
 	req, err := parseSnoop(args)
 	if err != nil {
-		return err
+		return "", err
 	}
 	mode := "view-only"
 	if req.RW {
 		mode = "READ-WRITE"
 	}
-	if err := a.confirmWrite(fmt.Sprintf("attach %s to %s (%s) for %s?", mode, req.SessionID, req.User, req.Purpose)); err != nil {
+	return fmt.Sprintf("attach %s to %s (%s) for %s?", mode, req.SessionID, req.User, req.Purpose), nil
+}
+
+func runSnoop(ctx context.Context, a *app, args []string) error {
+	req, err := parseSnoop(args)
+	if err != nil {
 		return err
 	}
 	return a.snoop(ctx, a, req)
@@ -324,7 +327,7 @@ func pump(conn io.Writer, frames io.Reader, in io.Reader, stopIn func(), out io.
 				Reason string `json:"reason"`
 			}
 			_ = json.Unmarshal(payload, &c)
-			return dash(c.Reason), nil
+			return dash(clean(c.Reason)), nil
 		default:
 			_ = send(frameClose, []byte(`{"reason":"protocol"}`))
 			return "", fmt.Errorf("attach: unexpected frame type 0x%02x", typ)
@@ -344,11 +347,23 @@ func indexByte(b []byte, c byte) int {
 // snoopTerminal is the real attach: raw local terminal, resize forwarding
 // in rw mode, and a status line on exit.
 func snoopTerminal(ctx context.Context, a *app, req snoopRequest) error {
-	conn, br, err := a.c.openAttach(ctx, req)
+	raw, br, err := a.c.openAttach(ctx, req)
 	if err != nil {
 		return err
 	}
+	conn := &lockedConn{Conn: raw}
 	defer conn.Close()
+	done := make(chan struct{})
+	defer close(done)
+	// SIGINT/SIGTERM cancel ctx; closing the stream unblocks pump so every
+	// deferred restore below runs and the terminal is left usable.
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
 	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {
 		old, err := term.MakeRaw(fd)
@@ -370,8 +385,13 @@ func snoopTerminal(ctx context.Context, a *app, req snoopRequest) error {
 		signal.Notify(winch, syscall.SIGWINCH)
 		defer signal.Stop(winch)
 		go func() {
-			for range winch {
-				sendSize()
+			for {
+				select {
+				case <-winch:
+					sendSize()
+				case <-done:
+					return
+				}
 			}
 		}()
 	}
@@ -381,29 +401,49 @@ func snoopTerminal(ctx context.Context, a *app, req snoopRequest) error {
 	}
 	defer restoreIn()
 	reason, err := pump(conn, br, in, stopIn, os.Stdout, req.RW)
+	if ctx.Err() != nil {
+		reason, err = "interrupted", nil
+	}
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "\r\n[adsshadm] detached from %s: %s\r\n", req.SessionID, reason)
+	fmt.Fprintf(os.Stderr, "\r\n[adsshadm] detached from %s: %s\r\n", req.SessionID, clean(reason))
 	return nil
+}
+
+// lockedConn serializes whole-frame writes from pump and the resize watcher.
+type lockedConn struct {
+	net.Conn
+	mu sync.Mutex
+}
+
+func (c *lockedConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Conn.Write(p)
 }
 
 // cancellableStdin returns a pollable duplicate of stdin whose pending Read
 // can be interrupted, so the prompt gets the next keystroke after detach.
 // The descriptor is shared with stdin, so restore puts blocking mode back.
 func cancellableStdin(fd int) (io.Reader, func(), func(), error) {
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	wasNonblock := flags&unix.O_NONBLOCK != 0
 	nfd, err := syscall.Dup(fd)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	if err := syscall.SetNonblock(nfd, true); err != nil {
-		syscall.Close(nfd)
+		_ = syscall.Close(nfd)
 		return nil, nil, nil, err
 	}
 	f := os.NewFile(uintptr(nfd), "stdin")
 	stop := func() { _ = f.SetReadDeadline(time.Now()) }
 	restore := func() {
-		_ = syscall.SetNonblock(fd, false)
+		_ = syscall.SetNonblock(fd, wasNonblock)
 		_ = f.Close()
 	}
 	return f, stop, restore, nil

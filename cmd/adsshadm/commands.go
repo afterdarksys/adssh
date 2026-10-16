@@ -16,10 +16,13 @@ import (
 // command is one adsshadm verb. The same table drives one-shot mode, the
 // prompt, help, and completion, so the three cannot drift apart.
 type command struct {
-	name    string
-	args    string // usage after the name
-	help    string
-	write   bool // changes server state; confirm unless --yes
+	name string
+	args string // usage after the name
+	help string
+	// prompt, when set, marks a state-changing command. dispatch calls it
+	// and asks the operator (or requires --yes) before run. It returns ""
+	// when these particular arguments change nothing (guard with no args).
+	prompt  func(ctx context.Context, a *app, args []string) (string, error)
 	run     func(ctx context.Context, a *app, args []string) error
 	suggest func(ctx context.Context, a *app, argIndex int) []string // live values for completion
 }
@@ -39,10 +42,10 @@ func commands() []command {
 		{name: "sessions", help: "list live sessions", run: runSessions},
 		{name: "gateways", help: "list running gateways", run: listJSON("/v1/gateways")},
 		{name: "approvals", help: "list pending four-eyes requests", run: runApprovals},
-		{name: "approve", args: "<request-id>", help: "approve a pending request (named key)", write: true,
-			run: decide(true), suggest: suggestRequestIDs},
-		{name: "deny", args: "<request-id>", help: "deny a pending request (named key)", write: true,
-			run: decide(false), suggest: suggestRequestIDs},
+		{name: "approve", args: "<request-id>", help: "approve a pending request (named key)",
+			prompt: decidePrompt("approve"), run: decide(true), suggest: suggestRequestIDs},
+		{name: "deny", args: "<request-id>", help: "deny a pending request (named key)",
+			prompt: decidePrompt("deny"), run: decide(false), suggest: suggestRequestIDs},
 		{name: "explain", args: "<session-id> <command...>", help: "show how policy would decide a command",
 			run: runExplain, suggest: suggestFirst(suggestSessionIDs)},
 		{name: "evidence", args: "[session-id] [--since T] [--until T] [--change ID]", help: "export a verified evidence bundle",
@@ -51,9 +54,9 @@ func commands() []command {
 		{name: "elevations", help: "list elevations", run: listJSON("/v1/elevations")},
 		{name: "leases", help: "list leases", run: listJSON("/v1/leases")},
 		{name: "guard", args: "[unban <addr>]", help: "show the SSH jail, or unban an address (named key)",
-			run: runGuard, suggest: suggestGuard},
+			prompt: guardPrompt, run: runGuard, suggest: suggestGuard},
 		{name: "snoop", args: "<session-id> <user> [--rw] --purpose support|investigation --reason TEXT",
-			help: "attach to a live session, view-only unless --rw", write: true, run: runSnoop, suggest: suggestSnoop},
+			help: "attach to a live session, view-only unless --rw", prompt: snoopPrompt, run: runSnoop, suggest: suggestSnoop},
 	}
 }
 
@@ -79,7 +82,19 @@ func (a *app) dispatch(ctx context.Context, words []string) error {
 	if !ok {
 		return fmt.Errorf("unknown command %q (try help)", words[0])
 	}
-	return cmd.run(ctx, a, words[1:])
+	args := words[1:]
+	if cmd.prompt != nil {
+		question, err := cmd.prompt(ctx, a, args)
+		if err != nil {
+			return err
+		}
+		if question != "" {
+			if err := a.confirmWrite(question); err != nil {
+				return err
+			}
+		}
+	}
+	return cmd.run(ctx, a, args)
 }
 
 func (a *app) printHelp() {
@@ -92,17 +107,24 @@ func (a *app) printHelp() {
 }
 
 func (a *app) printJSON(v any) error {
-	enc := json.NewEncoder(a.out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(a.out, "%s\n", cleanJSON(b))
+	return err
 }
 
-// confirmWrite asks before a state change unless --yes was given.
+// confirmWrite asks before a state change unless --yes was given. With no
+// terminal to ask on and no --yes, it refuses.
 func (a *app) confirmWrite(prompt string) error {
 	if a.yes {
 		return nil
 	}
-	if a.confirm == nil || !a.confirm(prompt) {
+	if a.confirm == nil {
+		return errors.New("refusing a state change without a terminal to confirm on; pass --yes")
+	}
+	if !a.confirm(prompt) {
 		return errors.New("canceled")
 	}
 	return nil
@@ -159,8 +181,8 @@ func runSessions(ctx context.Context, a *app, args []string) error {
 		if x.Terminated {
 			continue
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", x.ID, dash(x.User), since(now, x.CreatedAt),
-			since(now, x.LastActive), dash(filepath.Base(x.Recording)), dash(x.CurrentCommand))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", clean(x.ID), dash(clean(x.User)), since(now, x.CreatedAt),
+			since(now, x.LastActive), dash(clean(filepath.Base(x.Recording))), dash(clean(x.CurrentCommand)))
 	}
 	return tw.Flush()
 }
@@ -191,7 +213,7 @@ func runApprovals(ctx context.Context, a *app, args []string) error {
 	tw := tabwriter.NewWriter(a.out, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "REQUEST\tREQUESTER\tHOST\tWHEN\tCOMMAND")
 	for _, x := range p {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", x.RequestID, x.Requester, x.Hostname, x.Timestamp, x.Command)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", clean(x.RequestID), clean(x.Requester), clean(x.Hostname), clean(x.Timestamp), clean(x.Command))
 	}
 	return tw.Flush()
 }
@@ -205,15 +227,33 @@ func decide(approve bool) func(context.Context, *app, []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("usage: %s <request-id>", verb)
 		}
-		if err := a.confirmWrite(fmt.Sprintf("%s request %s?", verb, args[0])); err != nil {
-			return err
-		}
 		var res map[string]any
 		if err := a.c.do(ctx, "POST", path, map[string]string{"request_id": args[0]}, &res); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.out, "%s %s as %v\n", res["action"], args[0], res["approver"])
+		fmt.Fprintf(a.out, "%s %s as %s\n", clean(fmt.Sprint(res["action"])), clean(args[0]), clean(fmt.Sprint(res["approver"])))
 		return nil
+	}
+}
+
+// decidePrompt looks the request up so the operator confirms the command
+// itself, not an opaque id, and refuses an id that is not pending.
+func decidePrompt(verb string) func(context.Context, *app, []string) (string, error) {
+	return func(ctx context.Context, a *app, args []string) (string, error) {
+		if len(args) != 1 {
+			return "", fmt.Errorf("usage: %s <request-id>", verb)
+		}
+		var pending []approval
+		if err := a.c.do(ctx, "GET", "/v1/approvals", nil, &pending); err != nil {
+			return "", err
+		}
+		for _, p := range pending {
+			if p.RequestID == args[0] {
+				return fmt.Sprintf("%s %s's request on %s to run:\n    %s\n%s?", verb, clean(p.Requester),
+					clean(p.Hostname), clean(p.Command), verb), nil
+			}
+		}
+		return "", fmt.Errorf("no pending request %s (see approvals)", clean(args[0]))
 	}
 }
 
@@ -276,10 +316,10 @@ func runGuard(ctx context.Context, a *app, args []string) error {
 		}
 		fmt.Fprintf(a.out, "enabled=%t", g.Enabled)
 		if g.Tripped != "" {
-			fmt.Fprintf(a.out, " tripped=%s", g.Tripped)
+			fmt.Fprintf(a.out, " tripped=%s", clean(g.Tripped))
 		}
 		if g.Note != "" {
-			fmt.Fprintf(a.out, " (%s)", g.Note)
+			fmt.Fprintf(a.out, " (%s)", clean(g.Note))
 		}
 		fmt.Fprintln(a.out)
 		if len(g.Bans) == 0 {
@@ -289,20 +329,25 @@ func runGuard(ctx context.Context, a *app, args []string) error {
 		tw := tabwriter.NewWriter(a.out, 0, 2, 2, ' ', 0)
 		fmt.Fprintln(tw, "ADDR\tUNTIL\tREASON")
 		for _, b := range g.Bans {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", b.Addr, b.Until.Format(time.RFC3339), b.Reason)
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", clean(b.Addr), b.Until.Format(time.RFC3339), clean(b.Reason))
 		}
 		return tw.Flush()
 	case len(args) == 2 && args[0] == "unban":
-		if err := a.confirmWrite(fmt.Sprintf("unban %s?", args[1])); err != nil {
-			return err
-		}
 		if err := a.c.do(ctx, "POST", "/v1/guard/unban", map[string]string{"addr": args[1]}, nil); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.out, "unbanned %s\n", args[1])
+		fmt.Fprintf(a.out, "unbanned %s\n", clean(args[1]))
 		return nil
 	}
 	return errors.New("usage: guard [unban <addr>]")
+}
+
+// guardPrompt confirms only the unban form.
+func guardPrompt(_ context.Context, _ *app, args []string) (string, error) {
+	if len(args) == 2 && args[0] == "unban" {
+		return fmt.Sprintf("unban %s?", clean(args[1])), nil
+	}
+	return "", nil
 }
 
 // Completion sources. Each is best-effort: an API error yields no suggestions.

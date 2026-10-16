@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -64,7 +65,31 @@ func parseEndpoint(raw string) (endpoint, error) {
 	if ip == nil || !ip.IsLoopback() {
 		return endpoint{}, fmt.Errorf("admin URL must be a loopback address; the admin API never listens elsewhere: %q", raw)
 	}
+	if port, err := strconv.Atoi(u.Port()); err != nil || port < 1 || port > 65535 {
+		return endpoint{}, fmt.Errorf("admin URL needs a port: %q", raw)
+	}
 	return endpoint{base: "http://" + net.JoinHostPort(host, u.Port())}, nil
+}
+
+// checkSocket refuses a socket path that is not a socket or that belongs to
+// someone other than this user or root, so another local user cannot stand
+// up a fake admin API to collect the key while adssh is down. A loopback TCP
+// port cannot be checked this way; prefer unix: where that matters.
+func checkSocket(ep endpoint) error {
+	if ep.socket == "" {
+		return nil
+	}
+	info, err := os.Lstat(ep.socket)
+	if err != nil {
+		return fmt.Errorf("admin socket: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("admin socket %s is not a socket", ep.socket)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() && st.Uid != 0 {
+		return fmt.Errorf("admin socket %s belongs to uid %d, not you or root", ep.socket, st.Uid)
+	}
+	return nil
 }
 
 // loadKey reads one key from path. The file must be a regular file owned by
@@ -137,12 +162,12 @@ func (e *apiError) Error() string {
 		return "unauthorized: the admin API did not accept this key"
 	case http.StatusForbidden:
 		if e.Message != "" {
-			return "forbidden: " + e.Message
+			return "forbidden: " + clean(e.Message)
 		}
 		return "forbidden"
 	}
 	if e.Message != "" {
-		return fmt.Sprintf("admin API %d: %s", e.Status, e.Message)
+		return fmt.Sprintf("admin API %d: %s", e.Status, clean(e.Message))
 	}
 	return fmt.Sprintf("admin API %d", e.Status)
 }

@@ -85,11 +85,15 @@ type completer struct {
 
 func (c *completer) Do(line []rune, pos int) ([][]rune, int) {
 	head := string(line[:pos])
-	words, _ := splitWords(head)
-	partial := ""
-	if !strings.HasSuffix(head, " ") && len(words) > 0 {
-		partial = words[len(words)-1]
-		words = words[:len(words)-1]
+	cut := strings.LastIndexAny(head, " \t")
+	partial := head[cut+1:]
+	// Completing inside quotes or escapes would replace the wrong span.
+	if strings.ContainsAny(partial, `"'\`) {
+		return nil, 0
+	}
+	words, err := splitWords(head[:cut+1])
+	if err != nil {
+		return nil, 0
 	}
 	var candidates []string
 	if len(words) == 0 {
@@ -104,6 +108,11 @@ func (c *completer) Do(line []rune, pos int) ([][]rune, int) {
 	}
 	var out [][]rune
 	for _, cand := range candidates {
+		// Server values are user-typed; never insert one that could carry
+		// a control sequence or split into several words.
+		if strings.IndexFunc(cand, unsafeRune) >= 0 || strings.ContainsAny(cand, " \t\"'\\") {
+			continue
+		}
 		if strings.HasPrefix(cand, partial) {
 			out = append(out, []rune(cand[len(partial):]+" "))
 		}

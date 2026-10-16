@@ -25,7 +25,7 @@ const usageText = `usage: adsshadm [--url URL] [--key-file PATH] [--json] [--yes
 
 With no command, adsshadm opens an interactive adsshadm> prompt.
 
-  --url URL        admin API: http://127.0.0.1:port or unix:/path
+  --url URL        admin API: unix:/path (preferred) or http://127.0.0.1:port
                    (default $ADSSH_ADMIN_URL, else http://127.0.0.1:8787)
   --key-file PATH  0600 file holding one admin key (default $ADSSH_ADMIN_KEY_FILE)
   --json           print raw JSON instead of tables
@@ -62,6 +62,10 @@ func run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	ep, err := parseEndpoint(*urlFlag)
 	if err != nil {
+		fmt.Fprintln(stderr, "adsshadm:", err)
+		return 2
+	}
+	if err := checkSocket(ep); err != nil {
 		fmt.Fprintln(stderr, "adsshadm:", err)
 		return 2
 	}
