@@ -84,7 +84,7 @@ func newBlockingStarter() *blockingStarter {
 	return &blockingStarter{notify: make(chan string, 64)}
 }
 
-func (b *blockingStarter) start(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) {
+func (b *blockingStarter) start(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) error {
 	term := ""
 	if s := GetSession(sessionID); s != nil {
 		term, _ = s.OverlayGet("TERM")
@@ -95,6 +95,7 @@ func (b *blockingStarter) start(sessionID, user string, principals []string, in 
 	b.mu.Unlock()
 	b.notify <- sessionID
 	_, _ = io.Copy(io.Discard, in)
+	return nil
 }
 
 func (b *blockingStarter) count() int {

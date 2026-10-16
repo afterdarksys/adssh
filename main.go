@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/agent"
 	"github.com/afterdarksys/adssh/internal/config"
+
 	// grid registers the grid, flight, agent, worktree, and repo vbins.
 	_ "github.com/afterdarksys/adssh/internal/grid"
 	"github.com/afterdarksys/adssh/internal/guard"
@@ -57,6 +59,13 @@ func main() {
 
 	// 1. Load configuration from ADSSH_* environment variables (provides defaults)
 	cfg := config.LoadFromEnv()
+	logSettings, err := config.ParseLogSettings(os.Getenv("ADSSH_LOG_LEVEL"), os.Getenv("ADSSH_LOG_FORMAT"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+		os.Exit(2)
+	}
+	// The standard log package routes through this logger too.
+	slog.SetDefault(config.NewLogger(os.Stderr, logSettings))
 
 	// 2. Parse CLI flags — flags override env vars
 	cfg.IsLoginShell = strings.HasPrefix(os.Args[0], "-")
@@ -249,17 +258,17 @@ func main() {
 	// sshStarter execs one session process per SSH login. The listener keeps
 	// the socket, host key, session table, and audit files. The child is the
 	// REPL. SSH sessions do not receive enable_ssh or disable_ssh.
-	sshStarter := func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) {
+	sshStarter := func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) error {
 		slave, ok := in.(*os.File)
 		if !ok {
 			fmt.Fprintf(errOut, "adssh: ssh session: pty is not a file\n")
-			return
+			return errors.New("ssh session: pty is not a file")
 		}
 		// The certificate principals are the session's groups for its
 		// life; grant cannot add to them. Elevation still merges in.
 		if err := eng.Security().BindSessionIdentity(sessionID, user, principals); err != nil {
 			fmt.Fprintf(errOut, "adssh: %v\n", err)
-			return
+			return err
 		}
 		defer eng.Security().UnbindSessionIdentity(sessionID)
 		// History, profile, and rc paths come from the target user's home,
@@ -274,8 +283,12 @@ func main() {
 			PTY:        slave,
 		})
 		if err != nil {
-			fmt.Fprintf(errOut, "adssh: %v\n", err)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				fmt.Fprintf(errOut, "adssh: %v\n", err)
+			}
 		}
+		return err
 	}
 	gatewayAuthorizer := func(req sys.GatewayAuthRequest) error {
 		return eng.Security().AuthorizeGateway(directTCPIPPolicyRequest(req))
@@ -289,7 +302,7 @@ func main() {
 				return nil, err
 			}
 			if err := enableSSHWithHangup(func() error {
-				return sys.EnableSSHWithOptions(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot}, sshStarter, gatewayAuthorizer)
+				return sys.EnableSSHWithOptions(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer)
 			}); err != nil {
 				return nil, err
 			}
@@ -325,7 +338,7 @@ func main() {
 	}
 
 	if cfg.ServeAddr != "" {
-		if err := sys.EnableSSHWithOptions(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot}, sshStarter, gatewayAuthorizer); err != nil {
+		if err := sys.EnableSSHWithOptions(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start SSH server: %v\n", err)
 			os.Exit(1)
 		}
@@ -652,6 +665,8 @@ ENVIRONMENT VARIABLES
   ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
   ADSSH_RC                RC script (default: ~/.adsshrc)
   ADSSH_ADMIN_KEYS        admin serve named-key file, enterprise build (0600 name=key; approve/deny/unban)
+  ADSSH_LOG_LEVEL         Listener log level: error|warn|info|debug (default info; stderr)
+  ADSSH_LOG_FORMAT        Listener log format: text|json (default text)
   ADSSH_SNOOP_NOTIFY      Snoop attach notice default for support (on|off; default on)
   ADSSH_SNOOP_NOTIFY_LOCK Force the snoop notice over policy (on; default off)
 

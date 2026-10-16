@@ -36,7 +36,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -63,7 +64,7 @@ func loadOrGenerateHostKey(keyPath string) (ssh.Signer, error) {
 		if signer, err := ssh.ParsePrivateKey(data); err == nil {
 			return signer, nil
 		}
-		log.Printf("Warning: could not parse existing host key at %s, regenerating", keyPath)
+		slog.Warn("ssh host key unreadable, regenerating", "path", keyPath)
 	}
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 4096)
@@ -79,7 +80,7 @@ func loadOrGenerateHostKey(keyPath string) (ssh.Signer, error) {
 	if err := os.WriteFile(keyPath, privateKeyPEM, 0600); err != nil {
 		return nil, fmt.Errorf("failed to save host key to %s: %v", keyPath, err)
 	}
-	log.Printf("Generated new SSH host key: %s", keyPath)
+	slog.Info("ssh host key generated", "path", keyPath)
 
 	return ssh.ParsePrivateKey(privateKeyPEM)
 }
@@ -99,6 +100,10 @@ type SSHServerOptions struct {
 	// PermitRoot allows a login as "root" or as any name that resolves to
 	// uid 0. The key or certificate must still be bound to that name.
 	PermitRoot bool
+	// Audit records SSH_LOGIN_OK, SSH_LOGIN_FAIL, SSH_SESSION_START, and
+	// SSH_SESSION_END in the audit chain (see ssh_audit.go). A failed write
+	// refuses the login or session. Nil records nothing.
+	Audit SSHAudit
 }
 
 const userOptionPrefix = "user="
@@ -215,7 +220,8 @@ func publicKeyCallback(keys authorizedKeySet, opts SSHServerOptions) func(ssh.Co
 			fp := ssh.FingerprintSHA256(key)
 			names, ok := keys.userKeys[string(key.Marshal())]
 			if !ok || !slices.Contains(names, conn.User()) {
-				log.Printf("ssh: key %s from %s is not authorized for the requested login", fp, conn.RemoteAddr())
+				noteAuthKey(conn.RemoteAddr().String(), fp)
+				slog.Debug("ssh key not authorized for login", "addr", conn.RemoteAddr().String(), "user", conn.User(), "key_fp", fp)
 				return nil, fmt.Errorf("ssh: key %s is not authorized for this login", fp)
 			}
 			return &ssh.Permissions{}, nil
@@ -223,7 +229,11 @@ func publicKeyCallback(keys authorizedKeySet, opts SSHServerOptions) func(ssh.Co
 	}
 
 	return func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+		// Fingerprint the key exactly as presented, before anything below
+		// can touch it.
+		presentedFP := ssh.FingerprintSHA256(key)
 		if cert, ok := key.(*ssh.Certificate); ok {
+			noteAuthKey(conn.RemoteAddr().String(), presentedFP)
 			if cert.Key == nil || cert.SignatureKey == nil || cert.Signature == nil {
 				return nil, fmt.Errorf("ssh: malformed user certificate")
 			}
@@ -238,22 +248,40 @@ func publicKeyCallback(keys authorizedKeySet, opts SSHServerOptions) func(ssh.Co
 				}
 			}
 		}
-		permissions, err := checker.Authenticate(conn, key)
+		authed, err := checker.Authenticate(conn, key)
 		if err != nil {
+			noteAuthKey(conn.RemoteAddr().String(), presentedFP)
 			return nil, err
+		}
+		// For a certificate, Authenticate returns the certificate's own
+		// Permissions. Copy them, so nothing below edits the certificate.
+		permissions := &ssh.Permissions{
+			CriticalOptions: maps.Clone(authed.CriticalOptions),
+			Extensions:      maps.Clone(authed.Extensions),
 		}
 		if !opts.PermitRoot {
 			isRoot, err := loginIsRoot(conn.User())
 			if err != nil || isRoot {
-				log.Printf("ssh: key %s from %s refused: root login is not permitted or the login does not resolve", ssh.FingerprintSHA256(key), conn.RemoteAddr())
+				noteAuthKey(conn.RemoteAddr().String(), presentedFP)
+				slog.Warn("ssh login refused: root login is not permitted or the login does not resolve",
+					"addr", conn.RemoteAddr().String(), "user", conn.User(), "key_fp", presentedFP)
 				return nil, fmt.Errorf("ssh: login refused")
 			}
 		}
 		if permissions.Extensions == nil {
 			permissions.Extensions = make(map[string]string)
 		}
-		permissions.Extensions["pubkey-fp"] = ssh.FingerprintSHA256(key)
+		for _, k := range []string{extPubkeyFP, extAuthMethod, extCertKeyFP, extCertCAFP, extCertSerial, extCertKeyID, principalsExtension} {
+			delete(permissions.Extensions, k)
+		}
+		permissions.Extensions[extPubkeyFP] = presentedFP
+		permissions.Extensions[extAuthMethod] = "publickey"
 		if cert, ok := key.(*ssh.Certificate); ok {
+			permissions.Extensions[extAuthMethod] = "cert"
+			permissions.Extensions[extCertKeyFP] = ssh.FingerprintSHA256(cert.Key)
+			permissions.Extensions[extCertCAFP] = ssh.FingerprintSHA256(cert.SignatureKey)
+			permissions.Extensions[extCertSerial] = strconv.FormatUint(cert.Serial, 10)
+			permissions.Extensions[extCertKeyID] = cert.KeyId
 			encoded, err := json.Marshal(cert.ValidPrincipals)
 			if err != nil {
 				return nil, fmt.Errorf("ssh: certificate principals: %v", err)
@@ -310,7 +338,7 @@ var (
 // SessionStarter starts one accepted SSH channel. The binary supplies it so
 // this package does not import the security engine. The SSH path execs a
 // session process; it does not build Starlark globals in the listener.
-type SessionStarter func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer)
+type SessionStarter func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) error
 
 // GatewayAuthRequest is one direct-tcpip check. TargetHost is the requested
 // name and TargetIP the address it resolved to, which the listener dials.
@@ -369,7 +397,7 @@ func EnableSSHWithOptions(address, hostKeyPath, authorizedKeysPath string, opts 
 		)
 	}
 
-	config := &ssh.ServerConfig{PublicKeyCallback: publicKeyCallback(authorizedKeys, opts)}
+	config := &ssh.ServerConfig{PublicKeyCallback: publicKeyCallback(authorizedKeys, opts), AuthLogCallback: authLogCallback}
 
 	signer, err := loadOrGenerateHostKey(hostKeyPath)
 	if err != nil {
@@ -382,8 +410,11 @@ func EnableSSHWithOptions(address, hostKeyPath, authorizedKeysPath string, opts 
 		return fmt.Errorf("failed to listen on %s: %v", address, err)
 	}
 	sshListener = listener
+	setSSHAudit(opts.Audit)
 
 	fmt.Printf("adssh SSH daemon listening on %s\n", address)
+	slog.Info("ssh server listening", "addr", listener.Addr().String(), "permit_root", opts.PermitRoot,
+		"audit", opts.Audit != nil, "authorized_keys", authorizedKeysPath)
 
 	go serveSSH(listener, config, start, authorizeGateway)
 
@@ -463,7 +494,7 @@ func serveSSH(listener net.Listener, config *ssh.ServerConfig, start SessionStar
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			log.Printf("Failed to accept incoming connection: %v", err)
+			slog.Error("ssh accept failed", "error", err)
 			continue
 		}
 		go handleSSHConnection(nConn, config, slots, timeout, start, authorizeGateway)
@@ -530,7 +561,7 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, slots chan st
 	peer := nConn.RemoteAddr().String()
 	decision := guard.Admit(peer)
 	if !decision.Allow {
-		log.Printf("guard: refused addr=%s reason=%s", peer, decision.Reason)
+		slog.Warn("ssh connection refused by guard", "addr", peer, "reason", decision.Reason)
 		_ = nConn.Close()
 		return
 	}
@@ -538,25 +569,35 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, slots chan st
 	case slots <- struct{}{}:
 	default:
 		// Not the peer's fault: no guard strike.
-		log.Printf("ssh: refused addr=%s reason=pre-auth slots full", peer)
+		slog.Warn("ssh connection refused: pre-auth slots full", "addr", peer)
 		_ = nConn.Close()
 		return
 	}
+	slog.Debug("ssh connection accepted", "addr", peer)
+	rec := beginAuthRecord(peer)
 	conn, chans, reqs, err := handshake(nConn, config, slots, timeout)
+	endAuthRecord(peer)
 	if err != nil {
 		guard.NoteHandshake(peer, false)
-		log.Printf("Failed to handshake: %v", err)
+		recordLoginFailure(peer, rec, err)
 		return
 	}
 	guard.NoteHandshake(peer, true)
-	fp := conn.Permissions.Extensions["pubkey-fp"]
-	log.Printf("New SSH connection from %s (%s) key=%s", conn.RemoteAddr(), conn.ClientVersion(), fp)
+	ext := conn.Permissions.Extensions
+	slog.Info("ssh login", "addr", peer, "user", conn.User(), "client", string(conn.ClientVersion()),
+		"method", ext[extAuthMethod], "key_fp", ext[extPubkeyFP], "cert_serial", ext[extCertSerial], "cert_key_id", ext[extCertKeyID])
+	// Fail closed: a login that cannot be recorded does not proceed.
+	if err := auditSSH(loginOKEvent(conn)); err != nil {
+		slog.Error("ssh login refused: audit write failed", "addr", peer, "user", conn.User(), "error", err)
+		_ = conn.Close()
+		return
+	}
 
 	go ssh.DiscardRequests(reqs)
 
 	principals, err := principalsFromPermissions(conn.Permissions)
 	if err != nil {
-		log.Printf("ssh: refusing connection from %s: %v", conn.RemoteAddr(), err)
+		slog.Warn("ssh connection refused: bad principals", "addr", peer, "user", conn.User(), "error", err)
 		_ = conn.Close()
 		return
 	}
@@ -569,6 +610,7 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, slots chan st
 		switch newChannel.ChannelType() {
 		case "direct-tcpip":
 			if !trySlot(tcpSlots) {
+				slog.Warn("ssh channel refused", "addr", peer, "user", name, "reason", "too many forwarded channels on this connection")
 				_ = newChannel.Reject(ssh.ResourceShortage, "too many forwarded channels on this connection") // best-effort
 				continue
 			}
@@ -578,11 +620,13 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, slots chan st
 			}(newChannel)
 		case "session":
 			if !trySlot(sessionSlots) {
+				slog.Warn("ssh channel refused", "addr", peer, "user", name, "reason", "too many sessions on this connection")
 				_ = newChannel.Reject(ssh.ResourceShortage, "too many sessions on this connection") // best-effort
 				continue
 			}
 			if !acquireUserSession(name, userLimit) {
 				<-sessionSlots
+				slog.Warn("ssh channel refused", "addr", peer, "user", name, "reason", "too many sessions for this user")
 				_ = newChannel.Reject(ssh.ResourceShortage, "too many sessions for this user") // best-effort
 				continue
 			}
@@ -593,8 +637,9 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, slots chan st
 					<-sessionSlots
 				})
 			}
-			serveSessionChannel(newChannel, name, principals, start, release)
+			serveSessionChannel(newChannel, peer, name, principals, start, release)
 		default:
+			slog.Info("ssh channel refused: unknown type", "addr", peer, "user", name, "type", newChannel.ChannelType())
 			_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type") // best-effort
 		}
 	}
@@ -603,16 +648,16 @@ func handleSSHConnection(nConn net.Conn, config *ssh.ServerConfig, slots chan st
 // serveSessionChannel accepts one session channel and starts the session
 // process when the client sends "shell". release runs exactly once, when the
 // channel is refused or the session ends.
-func serveSessionChannel(newChannel ssh.NewChannel, name string, principals []string, start SessionStarter, release func()) {
+func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principals []string, start SessionStarter, release func()) {
 	if err := RequireResolvableSSHUser(name); err != nil {
-		log.Printf("ssh: refusing session: %v", err)
+		slog.Warn("ssh session refused: login does not resolve", "addr", peer, "user", name, "error", err)
 		_ = newChannel.Reject(ssh.Prohibited, "login does not resolve") // best-effort
 		release()
 		return
 	}
 	channel, requests, err := newChannel.Accept()
 	if err != nil {
-		log.Printf("Could not accept channel: %v", err)
+		slog.Error("ssh session channel accept failed", "addr", peer, "user", name, "error", err)
 		release()
 		return
 	}
@@ -626,7 +671,7 @@ func serveSessionChannel(newChannel ssh.NewChannel, name string, principals []st
 		}
 	}
 	if err != nil {
-		log.Printf("Could not start pty: %v", err)
+		slog.Error("ssh session pty failed", "addr", peer, "user", name, "error", err)
 		channel.Close()
 		release()
 		return
@@ -642,7 +687,7 @@ func serveSessionChannel(newChannel ssh.NewChannel, name string, principals []st
 	}
 	session.SetDropPrivileges(true)
 	if err := RegisterSession(session); err != nil {
-		log.Printf("ssh: register session: %v", err)
+		slog.Error("ssh session register failed", "addr", peer, "user", name, "error", err)
 		channel.Close()
 		ptyMaster.Close()
 		ptySlave.Close()
@@ -681,6 +726,15 @@ func serveSessionChannel(newChannel ssh.NewChannel, name string, principals []st
 				ok = applyWindowChange(setSize, req.Payload)
 			}
 			// exec, env, subsystem, and anything unknown are refused.
+			if req.Type == "window-change" {
+				slog.Debug("ssh channel request", "session", sessionID, "type", req.Type, "ok", ok)
+			} else {
+				attrs := []any{"session", sessionID, "addr", peer, "user", name, "type", req.Type, "ok", ok}
+				if req.Type == "subsystem" || req.Type == "exec" || req.Type == "env" {
+					attrs = append(attrs, "detail", requestDetail(req.Type, req.Payload))
+				}
+				slog.Debug("ssh channel request", attrs...)
+			}
 			_ = req.Reply(ok, nil) // best-effort
 		}
 	}()
@@ -711,8 +765,28 @@ func serveSessionChannel(newChannel ssh.NewChannel, name string, principals []st
 			<-requestsDone
 			_ = ptyMaster.Close()
 		}()
+		// Fail closed: a session that cannot be recorded does not start.
+		if err := auditSSH(fmt.Sprintf("SSH_SESSION_START session=%s user=%s addr=%s", sessionID, q(name), peer)); err != nil {
+			slog.Error("ssh session refused: audit write failed", "session", sessionID, "addr", peer, "user", name, "error", err)
+			return
+		}
+		began := time.Now()
+		slog.Info("ssh session start", "session", sessionID, "addr", peer, "user", name)
 		// The starter blocks until the session process exits.
-		start(sessionID, name, principals, ptySlave, ptySlave, ptySlave)
+		startErr := start(sessionID, name, principals, ptySlave, ptySlave, ptySlave)
+		code, reason := sessionEndReason(startErr)
+		duration := time.Since(began).Round(time.Millisecond)
+		attrs := []any{"session", sessionID, "addr", peer, "user", name, "exit", code, "reason", reason, "duration", duration.String()}
+		if startErr != nil && reason == "error" {
+			attrs = append(attrs, "error", startErr)
+			slog.Warn("ssh session end", attrs...)
+		} else {
+			slog.Info("ssh session end", attrs...)
+		}
+		if err := auditSSH(fmt.Sprintf("SSH_SESSION_END session=%s user=%s addr=%s exit=%d reason=%s duration=%s",
+			sessionID, q(name), peer, code, reason, duration)); err != nil {
+			slog.Error("ssh audit write failed", "event", "SSH_SESSION_END", "session", sessionID, "error", err)
+		}
 	}()
 }
 
@@ -811,17 +885,21 @@ func resolveGatewayTarget(host string) (net.IP, error) {
 // returns when the copy ends, so the caller's slot is held for the life of
 // the channel.
 func handleDirectTCPIP(conn *ssh.ServerConn, newChannel ssh.NewChannel, principals []string, authorize GatewayAuthorizer) {
+	peer := conn.RemoteAddr().String()
 	payload, err := parseDirectTCPIPPayload(newChannel.ExtraData())
 	if err != nil {
+		slog.Info("ssh forward refused: bad request", "addr", peer, "user", conn.User(), "error", err)
 		_ = newChannel.Reject(ssh.ConnectionFailed, err.Error())
 		return
 	}
 	if authorize == nil {
+		slog.Info("ssh forward refused: forwarding disabled", "addr", peer, "user", conn.User(), "target", net.JoinHostPort(payload.TargetHost, strconv.FormatUint(uint64(payload.TargetPort), 10)))
 		_ = newChannel.Reject(ssh.Prohibited, "gateway forwarding is disabled")
 		return
 	}
 	ip, err := resolveGatewayTarget(payload.TargetHost)
 	if err != nil {
+		slog.Info("ssh forward refused: target does not resolve", "addr", peer, "user", conn.User(), "target_host", payload.TargetHost, "error", err)
 		_ = newChannel.Reject(ssh.ConnectionFailed, err.Error())
 		return
 	}
@@ -836,13 +914,15 @@ func handleDirectTCPIP(conn *ssh.ServerConn, newChannel ssh.NewChannel, principa
 		OriginatorHost: payload.OriginatorHost,
 		OriginatorPort: payload.OriginatorPort,
 	}
+	target := net.JoinHostPort(address, strconv.FormatUint(uint64(payload.TargetPort), 10))
 	if err := authorize(req); err != nil {
+		slog.Info("ssh forward refused by policy", "addr", peer, "user", conn.User(), "target_host", payload.TargetHost, "target", target, "error", err)
 		_ = newChannel.Reject(ssh.Prohibited, err.Error())
 		return
 	}
-	target := net.JoinHostPort(address, strconv.FormatUint(uint64(payload.TargetPort), 10))
 	targetConn, err := gatewayDial("tcp", target, gatewayDialTimeout)
 	if err != nil {
+		slog.Info("ssh forward failed: target unreachable", "addr", peer, "user", conn.User(), "target", target, "error", err)
 		_ = newChannel.Reject(ssh.ConnectionFailed, "gateway target is unreachable")
 		return
 	}
@@ -852,6 +932,8 @@ func handleDirectTCPIP(conn *ssh.ServerConn, newChannel ssh.NewChannel, principa
 		return
 	}
 	go ssh.DiscardRequests(requests)
+	slog.Info("ssh forward open", "addr", peer, "user", conn.User(), "target_host", payload.TargetHost, "target", target)
+	defer slog.Debug("ssh forward closed", "addr", peer, "user", conn.User(), "target", target)
 	defer channel.Close()
 	defer targetConn.Close()
 	var wg sync.WaitGroup
@@ -905,4 +987,18 @@ func parseSSHString(data []byte) (string, []byte, bool) {
 	}
 	value := string(data[4 : 4+length])
 	return value, data[4+length:], true
+}
+
+// requestDetail describes a request payload for the debug log: the subsystem
+// name or the env variable name, quoted and capped. An exec command can carry
+// a secret, so only its length is logged; an env value is never included.
+func requestDetail(reqType string, payload []byte) string {
+	v, _, ok := parseSSHString(payload)
+	if !ok {
+		return ""
+	}
+	if reqType == "exec" {
+		return fmt.Sprintf("command of %d bytes", len(v))
+	}
+	return q(v)
 }

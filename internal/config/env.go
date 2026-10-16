@@ -17,6 +17,8 @@ import (
 //	ADSSH_ENTITLEMENTS=/path   Path to RBAC entitlements YAML
 //	ADSSH_AUDIT_LOG=/path      Path to audit log file       (default: ~/.adssh/audit.log)
 //	ADSSH_HISTORY=/path        Path to readline history     (default: ~/.adssh/history)
+//	ADSSH_LOG_LEVEL=info       Listener log level: error|warn|info|debug (stderr; garbage refuses startup)
+//	ADSSH_LOG_FORMAT=text      Listener log format: text|json
 //	ADSSH_HOST_KEY=/path       Path to SSH host key         (default: ~/.adssh/host_key)
 //	ADSSH_AUTHORIZED_KEYS=/p   Path to SSH authorized_keys  (default: ~/.adssh/authorized_keys)
 //	ADSSH_PROFILE=/path        Path to login profile script (default: ~/.adsshprofile)
