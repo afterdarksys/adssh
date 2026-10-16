@@ -16,21 +16,29 @@ import (
 // SSH session processes are separate. Local REPL, MCP, and grid still share
 // the listener heap. In-process Starlark and virtual binaries in the listener
 // are not covered by the session rlimit. Darwin RLIMIT_AS is the cgroup
-// stand-in. Darwin RLIMIT_NPROC is per unix user, so sessions of one user
-// share it. There is no cgroup. The FSIZE and AS defaults can break a large
-// build until the operator raises them.
+// stand-in. RLIMIT_NPROC is per unix user (on Linux it counts every thread
+// the user owns, host-wide), so sessions of one user share it with everything
+// else that user runs. There is no cgroup.
+//
+// NPROC and AS are off by default. A fixed NPROC breaks any login on a host
+// where the user already runs that many threads: the Go runtime, adssh
+// included, cannot start a thread and aborts. AS caps reserved address space,
+// not memory used, and Go, JVM, and Node reserve far more than they touch.
+// Fork-bomb and memory containment need a per-session cgroup (pids.max,
+// memory.max); an operator who knows the host may still set either rlimit.
+// The FSIZE default can break a large build until the operator raises it.
 //
 //	ADSSH_MAX_SESSIONS          empty = 128, 0 = unlimited, garbage = refuse
 //	ADSSH_SESSION_NOFILE        empty = 256, 0 = do not set
-//	ADSSH_SESSION_NPROC         empty = 64,  0 = do not set
-//	ADSSH_SESSION_AS            empty = 1 GiB, 0 = do not set
+//	ADSSH_SESSION_NPROC         empty = 0 (do not set), N = hard limit
+//	ADSSH_SESSION_AS            empty = 0 (do not set), N = hard limit in bytes
 //	ADSSH_SESSION_FSIZE         empty = 1 GiB, 0 = do not set
 //	ADSSH_SESSION_CPU_SECONDS   empty = 14400, 0 = do not set
 const (
 	defaultSessionCap    = 128
 	defaultSessionNOFILE = 256
-	defaultSessionNPROC  = 64
-	defaultSessionAS     = 1 << 30
+	defaultSessionNPROC  = 0 // off: see the Threats note
+	defaultSessionAS     = 0 // off: see the Threats note
 	defaultSessionFSIZE  = 1 << 30
 	defaultSessionCPU    = 14400
 )

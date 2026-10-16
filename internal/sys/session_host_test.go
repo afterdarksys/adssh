@@ -211,3 +211,14 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// NPROC and AS stay off unless the operator sets them: either one, at any
+// fixed default, aborts Go programs (adssh itself) on a busy Linux host.
+func TestNPROCAndASAreOffByDefault(t *testing.T) {
+	if defaultSessionNPROC != 0 || defaultSessionAS != 0 {
+		t.Fatalf("defaultSessionNPROC=%d defaultSessionAS=%d, want both 0 (off)", defaultSessionNPROC, defaultSessionAS)
+	}
+	if defaultSessionNOFILE == 0 || defaultSessionFSIZE == 0 || defaultSessionCPU == 0 {
+		t.Fatal("NOFILE, FSIZE, and CPU defaults must stay on")
+	}
+}

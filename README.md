@@ -407,7 +407,8 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_CALLBACK_ALLOW_PRIVATE` | off | Allow RFC1918, 100.64/10 and fc00::/7 hosts for the audit, approval-notice and OIDC callbacks |
 | `ADSSH_SAH` | off | `1`/`true`/`yes` enables the `sah/1` stdio frame (`adssh sah`) |
 | `ADSSH_MAX_SESSIONS` | 128 | Global cap on registered sessions (SSH logins are also capped at 4 per connection and 8 per user) |
-| `ADSSH_SESSION_NPROC`, `ADSSH_SESSION_NOFILE`, `ADSSH_SESSION_AS`, `ADSSH_SESSION_FSIZE`, `ADSSH_SESSION_CPU_SECONDS` | unset | Hard rlimits applied to each SSH login process; `0`/unset leaves a limit alone |
+| `ADSSH_SESSION_NOFILE`, `ADSSH_SESSION_FSIZE`, `ADSSH_SESSION_CPU_SECONDS` | 256, 1 GiB, 14400 | Hard rlimits applied to each SSH login process; `0` leaves a limit alone |
+| `ADSSH_SESSION_NPROC`, `ADSSH_SESSION_AS` | unset (off) | Optional hard rlimits. Off by default: Linux counts NPROC across every thread the user owns, and AS caps reserved address space, so either can abort Go, JVM, or Node programs (adssh included) |
 | `ADSSH_GIT_PROMPT` | off | Show the git branch for `\g` in the prompt (`1`/`true`/`yes`/`on`; ignored in restricted mode and SSH sessions) |
 | `ADSSH_HIGHLIGHT` | off | Pre-enter danger highlighting (`1`/`true`/`yes`/`on`; needs a terminal and passes the policy gate as `set highlight on`) |
 

@@ -165,7 +165,7 @@ func TestSpawnSSHSessionWrapsAndHooks(t *testing.T) {
 	}
 	want := []string{
 		"/fake/adssh", "--session-child",
-		"nofile=256", "nproc=64", "as=1073741824", "fsize=1073741824", "cpu=14400",
+		"nofile=256", "nproc=0", "as=0", "fsize=1073741824", "cpu=14400",
 		"--", "/fake/adssh",
 		"/fake/adssh", "--ssh-session",
 		"--session-id", id,
@@ -220,7 +220,7 @@ func TestSpawnSSHSessionOmitsOptionalFlags(t *testing.T) {
 	}
 	want := []string{
 		"/fake/adssh", "--session-child",
-		"nofile=256", "nproc=64", "as=1073741824", "fsize=1073741824", "cpu=14400",
+		"nofile=256", "nproc=0", "as=0", "fsize=1073741824", "cpu=14400",
 		"--", "/fake/adssh",
 		"/fake/adssh", "--ssh-session",
 		"--session-id", id,
