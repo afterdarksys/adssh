@@ -4,7 +4,7 @@ adssh is open core.
 
 **The core is open source under the Apache License 2.0** (`LICENSE`). The core is the shell, the SSH server and client, the policy engine, the audit log and hash chain, the virtual binaries, the Starlark standard library, the MCP server, and the attach protocol. Anyone may use, modify, ship, and sell it, including Linux distributions and appliance vendors. The goal is for adssh to be available everywhere SSH is.
 
-**The enterprise layer is source-available under the Business Source License 1.1** (`ee/LICENSE`). This is the code under `ee/`: the governance features an organization needs to run adssh at scale.
+**The enterprise layer is source-available under the Business Source License 1.1** (`ee/LICENSE`). This is everything under `ee/` and every file whose name ends in `_ee.go` or `_ee_test.go`: the governance features an organization needs to run adssh at scale. Those files compile only into the enterprise build (`go build -tags ee`). A plain `go build` produces the Apache-licensed core, and CI fails if the core build ever includes an enterprise file.
 
 | You are | Core | Enterprise layer |
 |---|---|---|
@@ -23,4 +23,4 @@ Commercial licenses: https://billing.afterdarksys.com
 
 ## Contributions
 
-Contributions to the core are accepted under Apache 2.0. Contributions to `ee/` require a contributor agreement, because After Dark Systems sells commercial licenses for that code.
+Contributions to the core are accepted under Apache 2.0. Contributions to `ee/` or to any `_ee.go` file require a contributor agreement, because After Dark Systems sells commercial licenses for that code.

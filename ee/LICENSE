@@ -4,10 +4,12 @@ License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
 Parameters
 
 Licensor:             After Dark Systems
-Licensed Work:        The adssh enterprise components: everything under the ee/
-                      directory of the adssh repository, and any binary built
-                      from it, version 0.10.0 or later. The Licensed Work is
-                      (c) 2026 After Dark Systems.
+Licensed Work:        The adssh enterprise components, version 0.10.0 or later:
+                      everything under the ee/ directory of the adssh
+                      repository, every file in that repository whose name
+                      ends in _ee.go or _ee_test.go, and any binary built with
+                      them (the "ee" build tag). The Licensed Work is (c) 2026
+                      After Dark Systems.
 Additional Use Grant: You may make production use of the Licensed Work if You,
                       together with all of Your affiliates under common control,
                       had total gross revenue of less than US$1,000,000 in Your
