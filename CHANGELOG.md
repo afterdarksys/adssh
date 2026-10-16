@@ -24,7 +24,7 @@
 - Added release provenance files: `provenance.json` and `slsa-provenance.intoto.json`.
 - Added structured lease Rego input under `input.lease`, lease IDs, and explicit `LEASE_REQUEST` / `LEASE_GRANT` / `LEASE_REVOKE` audit events.
 - Added structured MCP agent Rego input under `input.agent`, configurable MCP agent identity, destructive-action risk classification, and `run_shell` dry-run mode.
-- Added JWKS-backed OIDC JWT signature verification with issuer metadata discovery for `identity oidc import`.
+- Added JWKS-backed OIDC JWT signature verification for `identity oidc import`. The issuer, JWKS URL and audience are pinned in `ADSSH_OIDC_*` configuration; the import never takes them from the command line.
 - Added `admin serve` for a token-capable local HTTP API over sessions, gateways, approvals, policy explanations, and evidence bundles.
 - Added `policy/bundles/admin-api.rego` for role-separated admin API access.
 

@@ -250,19 +250,25 @@ The runtime does not construct `/bin/sh -c` strings. Output capture is bounded;
 
 ### Identity and admin API contract
 
-`identity oidc import` can validate RS256 JWT signatures against an explicit
-`--jwks-url` or via `--discover`, which reads the issuer's OpenID Provider
-metadata and then fetches `jwks_uri`. Issuer, audience, expiry, user claim, and
-group claim checks run after signature verification when verification is
-configured. Without `--jwks-url` or `--discover`, import remains available for
-externally verified tokens and tests.
+`identity oidc import` verifies an RS256 JWT against the JWKS the operator
+pinned in configuration: `ADSSH_OIDC_ISSUER`, `ADSSH_OIDC_JWKS_URL` and
+`ADSSH_OIDC_LOGIN_AUDIENCE` for the default provider, and the
+`ADSSH_OIDC_ADMIN_*` set for `--provider admin`. There are no `--issuer`,
+`--jwks-url`, `--audience` or `--discover` flags, and there is no unverified
+import path. The JWKS is fetched over https only, with no redirects and TLS 1.3
+minimum. `iss`, `aud` and `exp` are required; `exp` may be at most 24h out;
+`nbf`/`iat` may not be in the future. An unset provider fails closed.
 
 `admin serve` starts a local HTTP API for the same operational surfaces exposed
 by the `admin` VBIN: sessions, gateways, approvals, explanations, and evidence.
 The command itself is governed by the normal shell policy gate. When
 `ADSSH_ADMIN_API_KEY`, `--api-key`, or `--api-key-env` supplies a token, HTTP
 requests must present it as `Authorization: Bearer <token>` or
-`X-ADSSH-API-Key`.
+`X-ADSSH-API-Key`. That single key is read-only. Decisions (approve, deny,
+`guard unban`) require a NAMED key from the `ADSSH_ADMIN_KEYS` file (0600,
+`name=key` lines); the key name is the recorded approver and the request body
+may not carry an `approver` field. The listener binds loopback or a
+`unix:/path` socket only. MCP has no approve or deny tool.
 
 ### Structured pipeline contract
 

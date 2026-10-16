@@ -55,7 +55,7 @@ SSH sessions mapped to a menu by `security.GetMenuForUser`.
 
 **Every shell command is intercepted.** All shell execution — REPL, `-c`, scripts, SSH sessions —
 goes through `mvdan.cc/sh/v3/interp` configured with `security.BashInterceptor` as its exec handler
-and `security.VirtualOpenHandler` as its open handler. `BashInterceptor` is the real authorization
+and `(*security.Engine).OpenHandlerSession` as its open handler (it gates `/dev/tcp`/`/dev/udp`). `BashInterceptor` is the real authorization
 chokepoint and runs, in order: (1) Rego policy evaluation via `security.EvaluatePolicy`
 (fail-closed on error), (2) change-management ticket check (`security.CMSessionCheck`), (3) four-eyes
 dual-approval gate (`security.CheckFourEyes`), (4) custom commands registered from Starlark via
@@ -112,8 +112,11 @@ XDG-aware path defaults (`xdg.go`), and `profile.go` loads the Starlark login pr
 
 Behavior is driven by `ADSSH_*` environment variables (see `internal/config/env.go` for the full list and
 defaults), including `ADSSH_RESTRICTED`, `ADSSH_SERVE`, `ADSSH_POLICY`, `ADSSH_ENTITLEMENTS`,
-`ADSSH_AUDIT_LOG`, `ADSSH_HISTORY`, `ADSSH_HOST_KEY`, `ADSSH_AUTHORIZED_KEYS`, `ADSSH_PROFILE`, and
-`ADSSH_RC`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
+`ADSSH_AUDIT_LOG`, `ADSSH_HISTORY`, `ADSSH_HOST_KEY`, `ADSSH_AUTHORIZED_KEYS`, `ADSSH_SSH_PERMIT_ROOT`
+(root SSH login, default off), `ADSSH_GUARD*` (SSH listener jail), `ADSSH_ADMIN_KEYS` (named keys
+for `admin serve`), `ADSSH_CONTROLPLANE_URL` (device-login origin), `ADSSH_OIDC_*` (pinned issuer,
+JWKS URL and audience per provider), `ADSSH_CALLBACK_ALLOW_PRIVATE`, `ADSSH_GIT_PROMPT`,
+`ADSSH_PROFILE`, and `ADSSH_RC`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
 `.adsshrc` files.
 
 ## SAH suite

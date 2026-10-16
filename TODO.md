@@ -33,8 +33,8 @@ control, with a programmable and AI-native operations shell.
 - Token-capable local `admin serve` HTTP API for sessions, gateways, approvals,
   explanations, and evidence.
 - Role-separated `admin-api.rego` starter policy bundle.
-- Admin HTTP refuses an empty API key. Comparison hashes both sides with SHA-256, then compares the digests. `POST /v1/approvals/approve` and `POST /v1/approvals/deny` exist. `GET /v1/approvals` lists the handler's engine.
-- Four-eyes denial and timeout name the required approver. `DenyRequestAs` rejects a bad token, an empty approver, self-deny, and a caller who is not the configured approver. The pending file stays until a matching deny.
+- Admin HTTP: `ADSSH_ADMIN_API_KEY` is a read-only key. Approve, deny and `guard unban` need a named key from the `ADSSH_ADMIN_KEYS` file; the key name is the recorded approver, a body `approver` field is a 400, and MCP has no approve/deny tool. The listener binds loopback or a `unix:` socket only. `GET /v1/approvals` returns the public view without the token. (2026-10-16)
+- Four-eyes: every decision writes `FOUREYES_DECISION` to the audit chain before the marker and fails closed if that write fails; the pending file is claimed atomically so approve and deny cannot both win; a session renamed by device login or any runtime rename can neither request nor approve; a pinned-JWKS OIDC identity can. (2026-10-16)
 - Starlark `http_get`, `tcp_send`, and `dial_tls` refuse `skip_verify` before any dial and set TLS 1.3 as the minimum. `ADSSH_ALLOW_INSECURE_TLS` is not read.
 - `Session.RunShell` runs `GateProgram` before `Runner.Run`. `RunStarlark` executes on the session thread.
 - Policy examples `policy/examples/cert_principal.rego`, `lease_bounds.rego`, and `agent-destructive.rego`.
@@ -58,3 +58,12 @@ The items above are in the tree. Publishing is a morning step. Do not treat this
 - The Homebrew tap repository is not created. Render the formula only from a real `SHA256SUMS`.
 - `docs/site/` is source. It is not a hosted site.
 - The provision → enroll → execute handoff is not wired. Do not mark it implemented.
+
+## Deferred from the 2026-10-16 remediation
+
+- Move `security/grid.go` and `security/vbin_grid.go` to `internal/grid` with the engine injected. The grid is a loopback TLS server, a go-git client and scratch-tree management; only its policy call is enforcement. `loadFlightCA` should use `internal/safefile`.
+- `sys.parallel` workers share `__aliases__` and `__shopts__`. REPL Ctrl-C does not call `thread.Cancel`, so an interactive interrupt does not reach a running batch.
+- Release note for the next tag: `authorized_keys` lines need `user="name"`; `identity oidc import` takes issuer, JWKS URL and audience from `ADSSH_OIDC_*` only; `identity device login` needs `ADSSH_CONTROLPLANE_URL`; `ADSSH_AUDIT_URL` must be https; approvals need a named key from `ADSSH_ADMIN_KEYS`.
+- `sudo make test-e2e` has not been run since the SSH changes; the SSH e2e test now binds the key to the test user.
+- `internal/sys/job.go` (`jobs`/`fg`/`bg`/`wait`) has no production caller since the ungated `/bin/sh` background launcher was removed; mvdan runs `&` itself. Either wire mvdan background jobs into the table (and reap finished entries) or delete the table and the builtins.
+- `sys.parallel` `isolated()` copies the caller's globals map without a lock while a mvdan background job on the same session could write to it; low likelihood, no fix yet.

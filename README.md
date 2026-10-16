@@ -120,11 +120,11 @@ adssh> greet("world")
 "hello world"
 ```
 
-A bracketed paste that contains a newline is held. The editor inserts `[paste held: N lines]` and does not run it. `safepaste show` prints the paste, `safepaste run` executes it through the same policy gate as a typed command, and `safepaste drop` discards it. A paste with a control byte other than tab or newline, or a paste over 1 MiB, is discarded. A terminal that does not bracket pastes looks the same as typing.
+A bracketed paste that contains a newline is held. The editor inserts `[paste held: N lines]` and does not run it. `safepaste show` prints the paste, `safepaste run` executes it chunk by chunk, each chunk in its own mode (shell, Starlark or a flow block) through the same policy gate as a typed command, and `safepaste drop` discards it. A paste is rejected, not held, when it carries bytes after its own end marker, when it stays open with no new bytes for two seconds, when it contains a control byte other than tab or newline, or when it is over 1 MiB. A held or rejected paste at a continuation prompt is dropped from the block being typed. A terminal that does not bracket pastes looks the same as typing.
 
 Shell `if`/`then`/`else`/`fi` runs as a shell program. A one-line form is `if true; then echo yes; else echo no; fi`. Brace blocks run on exit status: `if true { echo yes } else { echo no }` and `try { false } catch { echo recovered }`. Catch runs only after a non-zero exit status. A policy denial stays a denial. Starlark `if expr:` stays Starlark.
 
-`\g` in `PROMPT` or `RPROMPT` shows the current git branch. It stays empty until `ADSSH_GIT_PROMPT=1` or `set gitprompt on`. `set gitprompt off` turns it off again. A dirty work tree adds `*`. A directory that is not a repository, a status that takes longer than 200ms, or any git error leaves the segment empty.
+`\g` in `PROMPT` or `RPROMPT` shows the current git branch, or a 7-character hash for a detached HEAD. It stays empty until `ADSSH_GIT_PROMPT=1` or `set gitprompt on`. `set gitprompt off` turns it off again. The segment reads `.git/HEAD` and never runs git, so a cloned repository's `core.fsmonitor` or filter commands cannot run on a prompt draw. It has no dirty marker, because that needs `git status`. Restricted mode and SSH sessions refuse `set gitprompt on` and ignore `ADSSH_GIT_PROMPT`. A directory that is not a repository, or a HEAD it cannot read, leaves the segment empty.
 
 ## Starlark namespaces
 
@@ -195,12 +195,14 @@ why -- kubectl delete namespace production
 ??   # after a denied command, explain what blocked it
 
 # Import signed OIDC claims into this session, then inspect admin state
-identity oidc import --env ADSSH_OIDC_TOKEN --issuer https://idp.example --audience adssh --discover
+# issuer, JWKS URL and audience come from ADSSH_OIDC_{ISSUER,JWKS_URL,LOGIN_AUDIENCE}, never from flags
+identity oidc import --env ADSSH_OIDC_TOKEN
 identity status
 admin sessions --json
 admin gateways
 admin approvals
 admin explain -- gateway start --target bastion.internal:22
+# read-only key; approve/deny need a named key from ADSSH_ADMIN_KEYS (name=key file, 0600)
 ADSSH_ADMIN_API_KEY="$(openssl rand -hex 16)" admin serve --listen 127.0.0.1:8787
 
 # Create a local SSH CA and issue a short-lived user certificate
@@ -240,8 +242,12 @@ lease --from aws-sm:prod/deploy-token?region=us-east-1 --as TOKEN -- deploy --to
 - **Audit log** — every command logged to `~/.adssh/audit.log` (configurable).
 - **Restricted mode** — `adssh -r` disables path traversal, cd, export.
 - **SSH pubkey and certificate auth** — direct keys and `cert-authority` entries
-  in `~/.adssh/authorized_keys`; short-lived user certs can be issued with
-  `identity ssh-ca issue`.
+  in `~/.adssh/authorized_keys`. A direct key line names the accounts it may
+  log in as: `user="alice" ssh-ed25519 AAAA...` or `user="alice,bob" ...`; a
+  bare key line is refused at startup. A certificate logs in only as one of
+  its principals, and a certificate with no principals is refused. Logins as
+  root (or any uid 0 account) are refused unless `ADSSH_SSH_PERMIT_ROOT=1`.
+  Short-lived user certs can be issued with `identity ssh-ca issue`.
 - **Local admin API** — `admin sessions/gateways/approvals/explain/evidence`
   exposes the current operational state through governed VBINs, and
   `admin serve` exposes the same surfaces over a token-capable local HTTP API.
@@ -352,14 +358,26 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |
 | `ADSSH_RECORD_DIR` | `~/.adssh/recordings` | JSONL session recording directory |
 | `ADSSH_GATEWAY_LOG` | `$ADSSH_RECORD_DIR/gateway_connections.jsonl` | Gateway connection evidence log |
-| `ADSSH_ADMIN_API_KEY` | — | Bearer or `X-ADSSH-API-Key` token for `admin serve` |
+| `ADSSH_ADMIN_API_KEY` | — | Read-only bearer / `X-ADSSH-API-Key` token for `admin serve` |
+| `ADSSH_ADMIN_KEYS` | — | 0600 `name=key` file; a named key is required to approve, deny or unban, and the name is the audited approver |
 | `ADSSH_AGENT_ID` | process-specific MCP ID | MCP agent identity exposed as `input.agent.id` |
 | `ADSSH_AGENT_REQUIRE_DRY_RUN` | off | Require `dry_run=true` for destructive MCP shell plans |
 | `ADSSH_HISTORY` | `~/.adssh/history` | Readline history |
 | `ADSSH_HOST_KEY` | `~/.adssh/host_key` | SSH host key |
-| `ADSSH_AUTHORIZED_KEYS` | `~/.adssh/authorized_keys` | SSH pubkeys |
+| `ADSSH_AUTHORIZED_KEYS` | `~/.adssh/authorized_keys` | SSH pubkeys, each bound with `user="name"` |
+| `ADSSH_SSH_PERMIT_ROOT` | off | Allow SSH logins that resolve to uid 0 (`1`/`true`/`yes`) |
 | `ADSSH_PROFILE` | `~/.adsshprofile` | Login profile (Starlark) |
 | `ADSSH_RC` | `~/.adsshrc` | RC script (Starlark) |
+| `ADSSH_AUDIT_URL` | — | Remote audit sink; must be an https URL to a public host (private hosts need `ADSSH_CALLBACK_ALLOW_PRIVATE=1`); requires `ADSSH_AUDIT_LOG` |
+| `ADSSH_AUDIT_TOKEN` | — | Bearer token for `ADSSH_AUDIT_URL` |
+| `ADSSH_CONTROLPLANE_URL` | — | https origin of the systemapi control plane for `identity device login`; unset fails closed |
+| `ADSSH_OIDC_ISSUER`, `ADSSH_OIDC_JWKS_URL`, `ADSSH_OIDC_LOGIN_AUDIENCE` | — | Pinned issuer, https JWKS URL and audience for `identity oidc import`; unset fails closed |
+| `ADSSH_OIDC_ADMIN_ISSUER`, `ADSSH_OIDC_ADMIN_JWKS_URL`, `ADSSH_OIDC_ADMIN_AUDIENCE` | — | Same for `--provider admin`; the admin audience must differ from the login audience |
+| `ADSSH_CALLBACK_ALLOW_PRIVATE` | off | Allow RFC1918, 100.64/10 and fc00::/7 hosts for the audit, approval-notice and OIDC callbacks |
+| `ADSSH_SAH` | off | `1`/`true`/`yes` enables the `sah/1` stdio frame (`adssh sah`) |
+| `ADSSH_MAX_SESSIONS` | 128 | Global cap on registered sessions (SSH logins are also capped at 4 per connection and 8 per user) |
+| `ADSSH_SESSION_NPROC`, `ADSSH_SESSION_NOFILE`, `ADSSH_SESSION_AS`, `ADSSH_SESSION_FSIZE`, `ADSSH_SESSION_CPU_SECONDS` | unset | Hard rlimits applied to each SSH login process; `0`/unset leaves a limit alone |
+| `ADSSH_GIT_PROMPT` | off | Show the git branch for `\g` in the prompt (`1`/`true`/`yes`/`on`; ignored in restricted mode and SSH sessions) |
 
 ## Plugins
 
