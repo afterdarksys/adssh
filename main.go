@@ -10,9 +10,11 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	osuser "os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.starlark.net/resolve"
@@ -23,6 +25,7 @@ import (
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/agent"
 	"github.com/afterdarksys/adssh/internal/config"
+	"golang.org/x/term"
 
 	// grid registers the grid, flight, agent, worktree, and repo vbins.
 	_ "github.com/afterdarksys/adssh/internal/grid"
@@ -345,6 +348,22 @@ func main() {
 		// SIGHUP on the listener stops new logins and leaves running SSH
 		// sessions alone instead of exiting.
 		onHangup(listenerHangup)
+		if listen := os.Getenv("ADSSH_ADMIN_LISTEN"); listen != "" {
+			if err := eng.Security().StartAdminAPI(listen, os.Getenv("ADSSH_ADMIN_KEYS"), os.Getenv("ADSSH_ADMIN_API_KEY")); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				os.Exit(1)
+			}
+		}
+		// Run as a service: with no script and no terminal (systemd), serve
+		// until SIGTERM or SIGINT instead of starting a REPL on /dev/null.
+		if cfg.ScriptPath == "" && cmdFlag == "" && !term.IsTerminal(int(os.Stdin.Fd())) {
+			slog.Info("serving without a terminal; waiting for SIGTERM")
+			stop := make(chan os.Signal, 1)
+			signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
+			<-stop
+			slog.Info("shutting down")
+			return
+		}
 	}
 
 	// Instrumentation agent: a hardened HTTP listener that runs only NAMED,
@@ -666,6 +685,7 @@ ENVIRONMENT VARIABLES
   ADSSH_RC                RC script (default: ~/.adsshrc)
   ADSSH_ADMIN_KEYS        admin serve named-key file, enterprise build (0600 name=key; approve/deny/unban)
   ADSSH_REVOKED_KEYS      SSH revocation file: SHA256:<fp>, serial:<n>, keyid:<id> per line (fails closed)
+  ADSSH_ADMIN_LISTEN      Enterprise: start the admin API with the SSH server (unix:/path or loopback)
   ADSSH_LOG_LEVEL         Listener log level: error|warn|info|debug (default info; stderr)
   ADSSH_LOG_FORMAT        Listener log format: text|json (default text)
   ADSSH_SNOOP_NOTIFY      Snoop attach notice default for support (on|off; default on)

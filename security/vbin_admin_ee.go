@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -406,3 +407,39 @@ func parseJSONFlag(name string, args []string) (bool, error) {
 }
 
 func init() { Register(adminBinary{}) }
+
+// StartAdminAPI starts the admin API in this process, next to the SSH
+// listener (ADSSH_ADMIN_LISTEN), so it sees the listener's sessions. It
+// returns once the socket is bound; the same auth, keys, and audit rules as
+// `admin serve` apply. A failed ADMIN_HTTP_START record refuses to start.
+func (e *Engine) StartAdminAPI(listen, keysFile, apiKey string) error {
+	var keys []AdminKey
+	if keysFile != "" {
+		loaded, err := LoadAdminKeysFile(keysFile)
+		if err != nil {
+			return fmt.Errorf("admin API: %w", err)
+		}
+		keys = loaded
+	}
+	listener, err := adminListen(context.Background(), listen)
+	if err != nil {
+		return fmt.Errorf("admin API: %w", err)
+	}
+	actual := listener.Addr().String()
+	if listener.Addr().Network() == "unix" {
+		actual = "unix:" + actual
+	}
+	if err := e.LogEvent(fmt.Sprintf("ADMIN_HTTP_START: listen=%s legacy=%t keys=%s",
+		actual, apiKey != "", emptyDash(adminKeyFingerprints(keys)))); err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("admin API: audit: %w", err)
+	}
+	slog.Info("admin api listening", "listen", actual, "named_keys", len(keys), "legacy_key", apiKey != "")
+	server := adminHTTPServerTimeouts(NewAdminHTTPHandlerWithKeys(e, apiKey, keys))
+	go func() {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			slog.Error("admin api stopped", "error", err)
+		}
+	}()
+	return nil
+}
