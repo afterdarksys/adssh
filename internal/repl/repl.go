@@ -479,6 +479,17 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		}
 	}()
 
+	// A keymap chosen in a profile (set_keymap before the REPL existed, or
+	// KEYMAP = "vi") applies now.
+	if v, ok := globals["KEYMAP"].(starlark.String); ok {
+		switch string(v) {
+		case "vi":
+			rl.SetVimMode(true)
+		case "emacs":
+			rl.SetVimMode(false)
+		}
+	}
+
 	// Register set_keymap into Starlark globals
 	globals["set_keymap"] = starlark.NewBuiltin("set_keymap", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 		var mode string

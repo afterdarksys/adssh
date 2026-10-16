@@ -24,6 +24,23 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 
 	paths = append(paths, profilePath, rcPath)
 
+	// Profiles run before the REPL exists, so the REPL's set_keymap is not
+	// defined yet. This stand-in validates the mode and records it as KEYMAP,
+	// which the REPL applies when it starts (the PROMPT convention).
+	if _, ok := env["set_keymap"]; !ok {
+		env["set_keymap"] = starlark.NewBuiltin("set_keymap", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var mode string
+			if err := starlark.UnpackArgs(b.Name(), args, kwargs, "mode", &mode); err != nil {
+				return nil, err
+			}
+			if mode != "vi" && mode != "emacs" {
+				return nil, fmt.Errorf("set_keymap: unknown mode '%s'. Use 'vi' or 'emacs'", mode)
+			}
+			env["KEYMAP"] = starlark.String(mode)
+			return starlark.None, nil
+		})
+	}
+
 	for _, path := range paths {
 		if path == "" {
 			continue
