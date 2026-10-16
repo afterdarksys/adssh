@@ -1,3 +1,5 @@
+//go:build ee
+
 package main
 
 // Threats: adsshadm holds an admin API key, and a named key can approve,

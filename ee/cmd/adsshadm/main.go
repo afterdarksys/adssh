@@ -1,3 +1,5 @@
+//go:build ee
+
 // Command adsshadm administers a running adssh through its local admin API.
 //
 // With no command it opens an adsshadm> prompt with completion; with a

@@ -30,9 +30,17 @@ jobs:
         run: go build -o adssh-mcp ./cmd/adssh-mcp
       - name: Core build carries no enterprise code
         run: |
-          # Apache core: no *_ee.go file and nothing under ee/ may be compiled in.
-          if go list -deps -f '{{.ImportPath}} {{join .GoFiles " "}}' . ./cmd/adssh-mcp | grep -E '(_ee\.go|/ee/)'; then
+          # Apache core: no *_ee*.go file and nothing under ee/ may be compiled in.
+          # go list must succeed on its own, so a broken listing cannot pass silently.
+          set -euo pipefail
+          go list -deps -f '{{.ImportPath}} {{join .GoFiles " "}} {{join .CgoFiles " "}}' . ./cmd/adssh-mcp > core-files.txt
+          test -s core-files.txt
+          if grep -E '(_ee(_[A-Za-z0-9]+)*\.go|/ee(/|$| ))' core-files.txt; then
             echo "FAIL: the core build includes enterprise code (see docs/LICENSING.md)"
+            exit 1
+          fi
+          if go list ./... | grep -E '/ee(/|$)'; then
+            echo "FAIL: an ee/ package builds without the ee tag"
             exit 1
           fi
       - name: Build adssh (enterprise)
@@ -126,4 +134,4 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
-          args: --timeout=5m --build-tags=ee
+          args: --timeout=5m --build-tags=ee,e2e

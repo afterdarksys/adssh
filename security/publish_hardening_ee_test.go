@@ -166,7 +166,7 @@ func TestAdminListChainUnavailableAndMissingFile(t *testing.T) {
 	}
 }
 
-func TestFourEyesApproveBySecretUsesRequestIDMarker(t *testing.T) {
+func TestApprovalsPublicOmitsTokenAfterApproval(t *testing.T) {
 	eng, err := NewEngine(EngineConfig{FourEyesDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)

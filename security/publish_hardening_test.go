@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/afterdarksys/adssh/internal/sys"
 )
 
 func TestExplainUsesRequiredRoleFromPolicy(t *testing.T) {
@@ -243,5 +245,37 @@ func TestLeaseDeliveryPathsAndEvidenceDigest(t *testing.T) {
 	}
 	if !bytes.Contains(raw, []byte("delivery=stdin")) || !bytes.Contains(raw, []byte("as=stdin")) {
 		t.Fatalf("lease audit missing delivery: %s", raw)
+	}
+}
+
+func TestFourEyesApproveBySecretUsesRequestIDMarker(t *testing.T) {
+	eng, err := NewEngine(EngineConfig{FourEyesDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ensureFourEyesDirs(); err != nil {
+		t.Fatal(err)
+	}
+	session := &sys.Session{ID: "approve-session", User: "alice"}
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
+	pending, pendingFile, err := eng.createFourEyesPending("rm -rf /tmp/x", FourEyesRule{Approver: "bob"}, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := formatApprovalPrompt(pendingFile, pending.RequestID, "bob")
+	if strings.Contains(prompt, pending.Token) || !strings.Contains(prompt, pending.RequestID) {
+		t.Fatalf("prompt leaked the token or hid the request id: %q", prompt)
+	}
+	if err := eng.ApproveRequestAs(pending.Token, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(eng.fourEyesApprovedDir(), pending.RequestID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(pendingFile); !os.IsNotExist(err) {
+		t.Fatalf("pending file remained: %v", err)
 	}
 }

@@ -181,7 +181,7 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `yq` | YAML processor |
 | `http` | HTTP GET client |
 | `mirror` | Live session metadata, viewer, console, audited termination, and time-boxed `share`/`unshare` grants |
-| `admin` | Local admin API for sessions, gateways, approvals, evidence, and explanations |
+| `admin` | Local admin API for sessions, gateways, approvals, evidence, and explanations (enterprise build) |
 | `identity` | OIDC identity import and short-lived SSH certificate issuance |
 | `cmdgen` | Cloud CLI command generator |
 | `package` | Cross-platform package manager |
@@ -272,7 +272,7 @@ lease --from aws-sm:prod/deploy-token?region=us-east-1 --as TOKEN -- deploy --to
   its principals, and a certificate with no principals is refused. Logins as
   root (or any uid 0 account) are refused unless `ADSSH_SSH_PERMIT_ROOT=1`.
   Short-lived user certs can be issued with `identity ssh-ca issue`.
-- **Local admin API** — `admin sessions/gateways/approvals/explain/evidence`
+- **Local admin API** (enterprise build, `go build -tags ee`; see `docs/LICENSING.md`) — `admin sessions/gateways/approvals/explain/evidence`
   exposes the current operational state through governed VBINs, and
   `admin serve` exposes the same surfaces over a token-capable local HTTP API.
 - **SSH listener jail** — failed handshakes and connection rate on `adssh --serve`
@@ -389,7 +389,7 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |
 | `ADSSH_RECORD_DIR` | `~/.adssh/recordings` | JSONL session recording directory |
 | `ADSSH_GATEWAY_LOG` | `$ADSSH_RECORD_DIR/gateway_connections.jsonl` | Gateway connection evidence log |
-| `ADSSH_ADMIN_API_KEY` | — | Read-only bearer / `X-ADSSH-API-Key` token for `admin serve` |
+| `ADSSH_ADMIN_API_KEY` | — | Read-only bearer / `X-ADSSH-API-Key` token for `admin serve` (enterprise build) |
 | `ADSSH_ADMIN_KEYS` | — | 0600 `name=key` file; a named key is required to approve, deny or unban, and the name is the audited approver |
 | `ADSSH_AGENT_ID` | process-specific MCP ID | MCP agent identity exposed as `input.agent.id` |
 | `ADSSH_AGENT_REQUIRE_DRY_RUN` | off | Require `dry_run=true` for destructive MCP shell plans |

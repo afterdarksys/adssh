@@ -1,3 +1,5 @@
+//go:build ee
+
 package main
 
 // Threats: snoop attaches an operator to another user's live terminal, so

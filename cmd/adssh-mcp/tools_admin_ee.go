@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
@@ -140,4 +141,16 @@ func handleAdminExplain() server.ToolHandlerFunc {
 		}
 		return mcpJSONResult(explanation)
 	}
+}
+
+type sessionListItem struct {
+	ID             string         `json:"id"`
+	User           string         `json:"user"`
+	Principals     []string       `json:"principals"`
+	CreatedAt      time.Time      `json:"created_at"`
+	LastActive     time.Time      `json:"last_active"`
+	CurrentCommand string         `json:"current_command,omitempty"`
+	Terminated     bool           `json:"terminated,omitempty"`
+	Recording      string         `json:"recording,omitempty"`
+	Elevation      *sys.Elevation `json:"elevation,omitempty"`
 }
