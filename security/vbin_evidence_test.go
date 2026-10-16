@@ -19,8 +19,12 @@ func TestEvidenceBundleVerifiesAndFiltersChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.AppendChain(ChainEntry{SessionID: "session-a", ChangeID: "CHG-1", Type: "cmd", Command: "one"})
-	eng.AppendChain(ChainEntry{SessionID: "session-b", ChangeID: "CHG-2", Type: "cmd", Command: "two"})
+	if err := eng.AppendChain(ChainEntry{SessionID: "session-a", ChangeID: "CHG-1", Type: "cmd", Command: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.AppendChain(ChainEntry{SessionID: "session-b", ChangeID: "CHG-2", Type: "cmd", Command: "two"}); err != nil {
+		t.Fatal(err)
+	}
 
 	bundle, err := eng.BuildEvidence(EvidenceFilter{SessionID: "session-a"})
 	if err != nil {
@@ -38,7 +42,9 @@ func TestEvidenceRejectsTamperedLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.AppendChain(ChainEntry{Type: "cmd", Command: "safe"})
+	if err := eng.AppendChain(ChainEntry{Type: "cmd", Command: "safe"}); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(ledger)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +60,9 @@ func TestEvidenceRejectsTamperedLedger(t *testing.T) {
 func TestEvidenceWritesPrivateBundleFile(t *testing.T) {
 	dir := t.TempDir()
 	eng, _ := NewEngine(EngineConfig{ChainPath: filepath.Join(dir, "chain"), ChainKeyPath: filepath.Join(dir, "key")})
-	eng.AppendChain(ChainEntry{Type: "event", Command: "test"})
+	if err := eng.AppendChain(ChainEntry{Type: "event", Command: "test"}); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "bundle.json")
 	writer := evidenceBinary{}
 	if err := writer.write(context.Background(), eng, EvidenceFilter{}, path); err != nil {
@@ -85,7 +93,9 @@ func TestEvidenceIncludesRecordingDigestForMatchingSession(t *testing.T) {
 	if err := os.WriteFile(recordingPath, []byte("{\"type\":\"start\"}\n{\"type\":\"end\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eng.AppendChain(ChainEntry{SessionID: "recorded-session", Type: "cmd", Command: "whoami"})
+	if err := eng.AppendChain(ChainEntry{SessionID: "recorded-session", Type: "cmd", Command: "whoami"}); err != nil {
+		t.Fatal(err)
+	}
 
 	bundle, err := eng.BuildEvidence(EvidenceFilter{SessionID: "recorded-session"})
 	if err != nil {
@@ -123,7 +133,9 @@ func TestEvidenceIncludesGatewayLogDigest(t *testing.T) {
 		BytesToClient: 8,
 		CloseReason:   "closed",
 	})
-	eng.AppendChain(ChainEntry{SessionID: "gateway-evidence", Type: "event", Command: "GATEWAY_START"})
+	if err := eng.AppendChain(ChainEntry{SessionID: "gateway-evidence", Type: "event", Command: "GATEWAY_START"}); err != nil {
+		t.Fatal(err)
+	}
 
 	bundle, err := eng.BuildEvidence(EvidenceFilter{})
 	if err != nil {

@@ -44,7 +44,7 @@ func TestExecHandlerSetWritesSessionOverlay(t *testing.T) {
 	if nextCalled {
 		t.Fatal("set assignment called next")
 	}
-	if os.Getenv(key) != prev && !(!had && os.Getenv(key) == "") {
+	if os.Getenv(key) != prev && (had || os.Getenv(key) != "") {
 		t.Fatalf("process env changed to %q", os.Getenv(key))
 	}
 	got, ok := session.LookupEnv(key)

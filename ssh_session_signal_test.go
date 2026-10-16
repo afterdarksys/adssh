@@ -33,7 +33,7 @@ func TestHelperSSHSessionSignals(t *testing.T) {
 		os.Exit(2)
 	}
 	sys.SetupSignals()
-	installSessionSignals(overlay)
+	installSessionSignals(overlay, nil)
 
 	for _, sig := range []string{"INT", "QUIT"} {
 		out, _ := exec.Command("/bin/sh", "-c", "kill -"+sig+" $$; echo survived-"+sig).CombinedOutput()
@@ -45,9 +45,9 @@ func TestHelperSSHSessionSignals(t *testing.T) {
 	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
 	select {
 	case <-ctx.Done():
-		fmt.Println("command-cancelled")
+		fmt.Println("command-canceled")
 	case <-time.After(2 * time.Second):
-		fmt.Println("command-not-cancelled")
+		fmt.Println("command-not-canceled")
 	}
 	fmt.Println("session-alive")
 	os.Exit(0)
@@ -72,7 +72,7 @@ func TestSSHSessionCommandsDieOnSIGINT(t *testing.T) {
 	if !strings.Contains(got, "session-alive") {
 		t.Fatalf("the session process did not survive SIGINT: %q", got)
 	}
-	if !strings.Contains(got, "command-cancelled") {
+	if !strings.Contains(got, "command-canceled") {
 		t.Fatalf("SIGINT did not cancel the running command: %q", got)
 	}
 }

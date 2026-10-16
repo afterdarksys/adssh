@@ -1077,8 +1077,22 @@ func TestPluginRootShape(t *testing.T) {
 	mustExact(t, err, "plugin: root is group/world writable")
 
 	sealRoot(t, root)
+	if os.Geteuid() == 0 {
+		// root reads a 0000 directory, so there is no permission error.
+		return
+	}
 	err = pluginBinary{}.Run(WithVBinSession(context.Background(), false, nil), []string{"plugin", "list"})
 	mustSub(t, err, "permission")
+}
+
+// A context without the shell's handler context is an error, not a panic.
+// Seen as root, where the sealed root above is readable and the list ran on.
+func TestPluginOutputWithoutShellContext(t *testing.T) {
+	root := usePluginRoot(t)
+	writePlugin(t, root, "hello", "says hello", greetOne)
+	mustExact(t, runPluginList(context.Background()), "plugin: no shell context")
+	mustExact(t, printLoaded(context.Background(), []string{"hello"}), "plugin: no shell context")
+	mustExact(t, pluginBinary{}.Run(WithVBinSession(context.Background(), false, nil), []string{"plugin", "list"}), "plugin: no shell context")
 }
 
 func TestPluginEntryLimit(t *testing.T) {
@@ -1199,7 +1213,7 @@ func TestPluginRestrictedAndUsage(t *testing.T) {
 	err = pluginBinary{}.Run(context.Background(), []string{"plugin"})
 	mustSub(t, err, "session is not available")
 	mustNotSub(t, err, "usage")
-	err = pluginBinary{}.Run(nil, []string{"plugin", "load", "hello"})
+	err = pluginBinary{}.Run(nil, []string{"plugin", "load", "hello"}) //nolint:staticcheck // SA1012: a nil context is the case under test.
 	mustSub(t, err, "session is not available")
 	mustNotOpen(t, err)
 	err = pluginBinary{}.Run(context.Background(), []string{"plugin", "load", "hello"})

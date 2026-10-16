@@ -17,8 +17,11 @@ import (
 )
 
 // Threats: the listener is the monitor. One exec per SSH login. Policy and
-// the audit chain stay in the listener. Virtual binaries run in the child
-// after allow. A memory exploit in the setuid child can still execve.
+// the audit chain stay in the listener. Stateless virtual binaries run in
+// the child after allow; the state-changing ones run in the listener over a
+// monitor Run frame (see security/ssh_monitor.go). The listener's plugin
+// directory, when configured, reaches the child as --plugin-dir, an
+// absolute path; the child lists plugins there but does not load them. A memory exploit in the setuid child can still execve.
 // Starlark file, network, and cloud calls that do not pass the gate are
 // privilege-safe after setuid and crash-contained by RLIMIT_AS and CPU, but
 // they are policy-bypassable. The pair is FD_CLOEXEC from creation (darwin:
@@ -255,6 +258,9 @@ func validateSSHSessionSpec(spec SSHSessionSpec) error {
 			return errors.New("adssh: ssh session: invalid value")
 		}
 	}
+	if spec.PluginDir != "" && (!filepath.IsAbs(spec.PluginDir) || !validSessionToken(spec.PluginDir)) {
+		return errors.New("adssh: ssh session: invalid value")
+	}
 	return nil
 }
 
@@ -278,6 +284,9 @@ func buildSSHSessionCmd(exe string, spec SSHSessionSpec, home string) *exec.Cmd 
 	)
 	for _, principal := range spec.Principals {
 		args = append(args, "--principal", principal)
+	}
+	if spec.PluginDir != "" {
+		args = append(args, "--plugin-dir", filepath.Clean(spec.PluginDir))
 	}
 	return exec.Command(exe, args...)
 }

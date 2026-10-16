@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
@@ -92,7 +91,7 @@ func (e *Engine) BashInterceptorSession(sess *SessionState) func(next interp.Exe
 // mvdan.cc/sh invokes only for commands it does NOT implement itself), mvdan's
 // call handler fires for EVERY simple command it routes through Runner.call —
 // including its native builtins (alias, set, unset, cd, read, type, pushd, popd,
-// dirs, disown, ...) — before dispatching them. Wiring the gate here closes the
+// dirs, ...) — before dispatching them. Wiring the gate here closes the
 // hole where builtins bypassed policy/CM/four-eyes/audit entirely. See
 // (*Engine).callHandler for the exact coverage and the documented residual gaps.
 func CallInterceptor(restricted bool, globals starlark.StringDict) interp.CallHandlerFunc {
@@ -133,6 +132,11 @@ func (e *Engine) gateCommand(restricted bool, args []string, sessionID string) e
 }
 
 func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID string, extra PolicyContextExtra) error {
+	return e.gateCommandContext(context.Background(), restricted, args, sessionID, extra)
+}
+
+// gateCommandContext is the gate. ctx ends a pending four-eyes wait.
+func (e *Engine) gateCommandContext(ctx context.Context, restricted bool, args []string, sessionID string, extra PolicyContextExtra) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -197,7 +201,8 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 	// whole classes (cloud, fileops, proc, ...). Nil for shell-layer commands;
 	// populated for governed Starlark builtins (starlark.* paths).
 	pctx.Capabilities = ClassifyCapabilities(args[0])
-	allowed, reason, requiredRole, policyErr := e.evaluatePolicy(pctx)
+	decision, policyErr := e.EvaluatePolicyDecision(pctx)
+	allowed, reason, requiredRole := decision.Allowed, decision.DenyReason, decision.RequiredRole
 	if policyErr != nil {
 		e.rememberDeniedCommand(sessionID, args)
 		return fmt.Errorf("adssh: policy evaluation error: %v", policyErr)
@@ -219,7 +224,7 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 				})
 			}()
 		}
-		auditErr := e.LogPolicyDecision(pctx.User, cmd, false, reason)
+		auditErr := e.LogPolicyDecisionDetail(pctx.User, cmd, decision)
 		e.rememberDeniedCommand(sessionID, args)
 		msg := fmt.Sprintf("adssh: access denied for '%s' by policy", args[0])
 		if reason != "" {
@@ -227,7 +232,10 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 		}
 		return joinDeny(msg, auditErr)
 	}
-	if err := e.LogPolicyDecision(pctx.User, cmd, true, ""); err != nil {
+	// An allow line keeps reason="" as before; rule and entitlement stay.
+	allowDecision := decision
+	allowDecision.DenyReason = ""
+	if err := e.LogPolicyDecisionDetail(pctx.User, cmd, allowDecision); err != nil {
 		return fmt.Errorf("adssh: audit log failed: %w", err)
 	}
 
@@ -247,7 +255,7 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 	}
 
 	// 0b. 4-eyes dual-approval gate.
-	if err := e.CheckFourEyesForSession(cmd, args, sessionID); err != nil {
+	if err := e.CheckFourEyesForSessionContext(ctx, cmd, args, sessionID); err != nil {
 		e.rememberDeniedCommand(sessionID, args)
 		return err
 	}
@@ -285,10 +293,16 @@ func (e *Engine) AuthorizeCommandWithExtra(args []string, sessionID string, extr
 	return e.gateCommandWithExtra(e.restricted, args, sessionID, extra)
 }
 
+// AuthorizeCommandContext is AuthorizeCommand whose four-eyes wait ends when
+// ctx is done. The SSH monitor uses it so Cancel ends the wait.
+func (e *Engine) AuthorizeCommandContext(ctx context.Context, args []string, sessionID string) error {
+	return e.gateCommandContext(ctx, e.restricted, args, sessionID, PolicyContextExtra{})
+}
+
 // callHandler is the AUTHORIZATION GATE for every simple command mvdan.cc/sh
 // routes through Runner.call — normal external commands, virtual binaries, custom
 // Starlark commands, AND mvdan's native builtins (alias/set/unset/cd/read/type/
-// pushd/popd/dirs/disown/...). Returning a non-nil error aborts the command in the
+// pushd/popd/dirs/...). Returning a non-nil error aborts the command in the
 // Runner (it never reaches dispatch/exec), so this is the single point at which
 // such a command is authorized and audited — the exec handler (execHandler) no
 // longer duplicates any of this, so every command is authorized+audited EXACTLY
@@ -317,6 +331,12 @@ func (e *Engine) AuthorizeCommandWithExtra(args []string, sessionID string, extr
 func (e *Engine) callHandler(sess *SessionState) interp.CallHandlerFunc {
 	return func(ctx context.Context, args []string) ([]string, error) {
 		if len(args) == 0 {
+			return args, nil
+		}
+		// In an SSH session process a listener-run vbin is not authorized
+		// here: the exec handler sends it as a Run, which the listener
+		// gates. Nothing runs locally under that name.
+		if RemoteGateProcess() && sshRunsInListener(args) {
 			return args, nil
 		}
 		if err := e.gateCommand(sess.Restricted, args, sess.gateSessionID()); err != nil {
@@ -537,6 +557,12 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 				}
 			}
 
+			// An SSH session process sends a listener-run vbin to the
+			// listener before a custom command or the OS can take the name.
+			if RemoteGateProcess() && sshRunsInListener(args) {
+				return runInListener(ctx, restricted, args, sess.gateSessionID())
+			}
+
 			// AUTHORIZATION GATE MOVED: policy eval, CM check, four-eyes and the
 			// audit LogCommand/LogPolicyDecision now run in callHandler (which
 			// fires for every command, including builtins) BEFORE the Runner
@@ -723,26 +749,6 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 				err := next(ctx, args[1:])
 				fmt.Fprintf(hc.Stderr, "\nreal\t%s\n", time.Since(start).Round(time.Millisecond))
 				return err
-
-			// ------------------------------------------------------------------
-			// disown
-			// ------------------------------------------------------------------
-			case "disown":
-				if len(args) >= 2 && args[1] == "-a" {
-					sys.GlobalJobTable().DisownAll()
-					fmt.Fprintf(hc.Stdout, "all jobs disowned\n")
-					return nil
-				}
-				if len(args) >= 2 {
-					id, err := strconv.Atoi(args[1])
-					if err != nil {
-						return fmt.Errorf("disown: %s: invalid job id", args[1])
-					}
-					sys.GlobalJobTable().Disown(id)
-					fmt.Fprintf(hc.Stdout, "[%d] disowned\n", id)
-					return nil
-				}
-				return fmt.Errorf("disown: usage: disown [N|-a]")
 
 			// ------------------------------------------------------------------
 			// read

@@ -19,7 +19,9 @@ func TestRegisteredSessionRecordsOutputJSONL(t *testing.T) {
 		User: "alice",
 		Out:  NewOutputBroadcaster(&primary),
 	}
-	RegisterSession(session)
+	if err := RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	_, _ = session.Out.Write([]byte("hello\r\n"))
 	UnregisterSession(session.ID)
 

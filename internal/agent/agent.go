@@ -302,10 +302,21 @@ func (s *Server) handleInstrument(w http.ResponseWriter, r *http.Request) {
 		dryRun = *req.DryRun
 	}
 
+	// audit records one outcome before the response that reports it. A failed
+	// write answers 503 and the handler stops, so nothing runs unaudited.
+	audit := func(entry string) bool {
+		if err := security.LogCommand(auditSource, entry); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "audit log unavailable")
+			return false
+		}
+		return true
+	}
+
 	task, ok := s.currentTasks().Get(name)
 	if !ok {
-		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q result=unknown-task", name))
-		writeError(w, http.StatusNotFound, "unknown task")
+		if audit(fmt.Sprintf("instrument task=%q result=unknown-task", name)) {
+			writeError(w, http.StatusNotFound, "unknown task")
+		}
 		return
 	}
 
@@ -322,21 +333,24 @@ func (s *Server) handleInstrument(w http.ResponseWriter, r *http.Request) {
 	allowed, reason, evalErr := security.EvaluatePolicy(pctx)
 	if evalErr != nil {
 		// Fail closed: a policy evaluation error denies.
-		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q vbin=%q result=policy-error", name, task.VBin))
-		writeError(w, http.StatusForbidden, "denied by policy")
+		if audit(fmt.Sprintf("instrument task=%q vbin=%q result=policy-error", name, task.VBin)) {
+			writeError(w, http.StatusForbidden, "denied by policy")
+		}
 		return
 	}
 	if !allowed {
-		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q vbin=%q dry_run=%v result=denied reason=%q", name, task.VBin, dryRun, reason))
-		writeError(w, http.StatusForbidden, denyMessage(reason))
+		if audit(fmt.Sprintf("instrument task=%q vbin=%q dry_run=%v result=denied reason=%q", name, task.VBin, dryRun, reason)) {
+			writeError(w, http.StatusForbidden, denyMessage(reason))
+		}
 		return
 	}
 
 	vb, ok := security.Lookup(task.VBin)
 	if !ok {
 		// Allowlist references a virtual binary that does not exist: refuse.
-		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q vbin=%q result=unknown-vbin", name, task.VBin))
-		writeError(w, http.StatusInternalServerError, "task maps to unknown virtual binary")
+		if audit(fmt.Sprintf("instrument task=%q vbin=%q result=unknown-vbin", name, task.VBin)) {
+			writeError(w, http.StatusInternalServerError, "task maps to unknown virtual binary")
+		}
 		return
 	}
 
@@ -346,12 +360,15 @@ func (s *Server) handleInstrument(w http.ResponseWriter, r *http.Request) {
 	case s.sem <- struct{}{}:
 		defer func() { <-s.sem }()
 	default:
-		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q result=busy", name))
-		writeError(w, http.StatusTooManyRequests, "agent busy; try again")
+		if audit(fmt.Sprintf("instrument task=%q result=busy", name)) {
+			writeError(w, http.StatusTooManyRequests, "agent busy; try again")
+		}
 		return
 	}
 
-	security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q vbin=%q dry_run=%v result=allowed", name, task.VBin, dryRun))
+	if !audit(fmt.Sprintf("instrument task=%q vbin=%q dry_run=%v result=allowed", name, task.VBin, dryRun)) {
+		return
+	}
 
 	// Per-task timeout: a hung virtual binary must not wedge a worker slot.
 	ctx, cancel := context.WithTimeout(r.Context(), s.taskTimeout)
@@ -359,8 +376,8 @@ func (s *Server) handleInstrument(w http.ResponseWriter, r *http.Request) {
 
 	fullArgs := append([]string{task.VBin}, task.Args...)
 	output, truncated, exit, runErr := runVBinCaptured(ctx, vb, fullArgs)
-	if runErr != nil {
-		security.LogCommand(auditSource, fmt.Sprintf("instrument task=%q vbin=%q exit=%d result=ran-with-error", name, task.VBin, exit))
+	if runErr != nil && !audit(fmt.Sprintf("instrument task=%q vbin=%q exit=%d result=ran-with-error", name, task.VBin, exit)) {
+		return
 	}
 
 	writeJSON(w, http.StatusOK, instrumentResponse{

@@ -15,7 +15,7 @@ import (
 )
 
 // Threats: the --session-child re-exec applies the session rlimits before it
-// execs a session command. It is honoured only as argv[1], so a user
+// execs a session command. It is honored only as argv[1], so a user
 // argument spelled --session-child neither triggers it nor skips the wrap;
 // a command is treated as already wrapped only when its path is this binary
 // and argv[1] is --session-child. Each limit sets the soft and the hard limit

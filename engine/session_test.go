@@ -78,7 +78,9 @@ authz := {"allow": input.user == "alice", "reason": "alice required"}
 		t.Fatal(err)
 	}
 	sessionID := "declaration-identity"
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
+	if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 
 	s, err := NewSession(SessionOptions{SessionID: sessionID, User: "alice", Engine: sec})
@@ -338,10 +340,10 @@ func TestRunShellDenyAllDoesNotExec(t *testing.T) {
 	if rec.count() != 0 {
 		t.Fatalf("deny-all reached OS exec: %v", rec.calls)
 	}
-	cancelled, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := s.RunShell(cancelled, "extcmd-deny"); err == nil {
-		t.Fatal("cancelled RunShell ran")
+	if err := s.RunShell(canceled, "extcmd-deny"); err == nil {
+		t.Fatal("canceled RunShell ran")
 	}
 }
 
@@ -385,9 +387,9 @@ func TestRunStarlarkPrintAndDenyExec(t *testing.T) {
 	if _, err := s.RunStarlark(context.Background(), "   "); err == nil {
 		t.Fatal("empty starlark source was accepted")
 	}
-	cancelled, cancel := context.WithCancel(context.Background())
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.RunStarlark(cancelled, "print('no')"); err == nil {
-		t.Fatal("cancelled RunStarlark ran")
+	if _, err := s.RunStarlark(canceled, "print('no')"); err == nil {
+		t.Fatal("canceled RunStarlark ran")
 	}
 }

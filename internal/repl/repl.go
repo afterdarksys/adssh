@@ -175,20 +175,7 @@ func EvalStarlarkOnce(thread *starlark.Thread, name, src string, globals starlar
 // evalStarlark executes src in the REPL context: expressions print a non-None
 // result, statements merge new bindings back into globals.
 func evalStarlark(thread *starlark.Thread, src string, globals starlark.StringDict, errOut io.Writer) int {
-	val, isExpr, newBindings, err := EvalStarlarkOnce(thread, "<stdin>", src, globals)
-	if err != nil {
-		fmt.Fprintf(errOut, "Starlark error: %v\n", err)
-		return 1
-	}
-	if isExpr {
-		if val != nil && val != starlark.None {
-			fmt.Println(val.String())
-		}
-		return 0
-	}
-	// Merge new definitions (functions, variables) back into the live globals
-	MergeStarlarkBindings(globals, newBindings, errOut)
-	return 0
+	return evalStarlarkInterruptible(nil, thread, src, globals, errOut)
 }
 
 // MergeStarlarkBindings copies Starlark bindings into globals. SESSION_ID,
@@ -218,74 +205,6 @@ func newSessionState(globals starlark.StringDict, restricted bool, dirs *sys.Dir
 		id = string(v)
 	}
 	return &security.SessionState{Restricted: restricted, Globals: globals, Dirs: dirs, SessionID: id}
-}
-
-// jobControlHandler returns an ExecHandler that intercepts jobs/fg/bg/wait.
-func jobControlHandler(out io.Writer) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-		return func(ctx context.Context, args []string) error {
-			if len(args) == 0 {
-				return next(ctx, args)
-			}
-
-			hc := interp.HandlerCtx(ctx)
-			stdout := hc.Stdout
-			if stdout == nil {
-				stdout = out
-			}
-
-			switch args[0] {
-			case "jobs":
-				jobs := sys.Jobs()
-				// Sort by ID for stable output.
-				sort.Slice(jobs, func(i, j int) bool { return jobs[i].ID < jobs[j].ID })
-				for _, j := range jobs {
-					cmdStr := strings.Join(j.Args, " ")
-					fmt.Fprintf(stdout, "[%d] %-8s PID %-6d %s\n", j.ID, string(j.Status), j.PID, cmdStr)
-				}
-				return nil
-
-			case "fg":
-				id, err := jobIDArg(args)
-				if err != nil {
-					return err
-				}
-				return sys.FgJob(id)
-
-			case "bg":
-				id, err := jobIDArg(args)
-				if err != nil {
-					return err
-				}
-				return sys.BgJob(id)
-
-			case "wait":
-				id := 0 // 0 means wait for all
-				if len(args) >= 2 {
-					n, err := strconv.Atoi(args[1])
-					if err != nil {
-						return fmt.Errorf("wait: invalid job id: %s", args[1])
-					}
-					id = n
-				}
-				return sys.WaitJob(id)
-			}
-
-			return next(ctx, args)
-		}
-	}
-}
-
-// jobIDArg extracts and validates a numeric job ID from args[1].
-func jobIDArg(args []string) (int, error) {
-	if len(args) < 2 {
-		return 0, fmt.Errorf("%s: missing job id", args[0])
-	}
-	id, err := strconv.Atoi(args[1])
-	if err != nil || id < 1 {
-		return 0, fmt.Errorf("%s: invalid job id: %s", args[0], args[1])
-	}
-	return id, nil
 }
 
 // expandPrompt expands bash/zsh-style prompt escape sequences. cwd is the
@@ -481,6 +400,12 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	pasteTTY := bracketPasteTTY(out)
 	editorIn := editorInput(in, pasteTTY != nil, heldPaste)
 
+	// Pre-enter danger highlighting: off unless ADSSH_HIGHLIGHT or `set
+	// highlight on`, and only on a terminal. The policy is asked after a
+	// debounce, off the input path.
+	hlAllowed := highlightPermitted(pasteTTY != nil)
+	hl := &highlighter{denied: policyDenyFunc(sessionID), debounce: highlightDebounce}
+
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:            "adssh> ",
 		HistoryFile:       historyFile,
@@ -489,6 +414,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		HistorySearchFold: true,
 		AutoComplete:      &adsshCompleter{globals: globals},
 		Listener:          newAdsshListener(&shellHistory),
+		Painter:           hl,
 		Stdin:             editorIn,
 		Stdout:            out,
 		Stderr:            errOut,
@@ -498,6 +424,18 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		return
 	}
 	defer rl.Close()
+	hl.refresh = rl.Refresh
+	if highlightInitial(os.Getenv("ADSSH_HIGHLIGHT"), hlAllowed) {
+		if err := security.DefaultEngine().AuthorizeCommand([]string{"set", "highlight", "on"}, sessionID); err != nil {
+			fmt.Fprintf(errOut, "adssh: ADSSH_HIGHLIGHT: %v\n", err)
+		} else {
+			hl.enabled.Store(true)
+		}
+	}
+
+	// Ctrl-C cancels the Starlark line that is running.
+	starInt := &starlarkInterrupt{}
+	defer watchStarlarkInterrupts(starInt)()
 
 	// Welcome banner — one line, shows both modes
 	fmt.Fprintf(out, "adssh  shell: ls -la | jq '.'    starlark: aws.ec2.list_instances()    vbins: list tools    exit: quit\n")
@@ -575,16 +513,18 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		}
 	}
 
-	runner, err := interp.New(
+	var runner *interp.Runner
+	runner, err = interp.New(
 		interp.Env(envBridge),
 		interp.StdIO(in, out, errOut),
-		// Job control, then the session interceptor, then the PTY handler, then
+		// confirm, then the session interceptor, then the PTY handler, then
 		// SessionExecHandler. The last handler does not fall through, so a
 		// credential or rlimit failure is not retried as the listener uid.
-		// The gate/audit chokepoint is the CallHandler.
+		// The gate/audit chokepoint is the CallHandler. mvdan runs `&` and
+		// `wait` itself; background jobs are not listed.
 		interp.CallHandler(security.CallInterceptorSession(sessState)),
 		interp.ExecHandlers(
-			jobControlHandler(out),
+			confirmHandler(newConfirmDeps(sessState.SessionID, func() *interp.Runner { return runner })),
 			security.BashInterceptorSession(sessState),
 			ptyExecHandler(ptyTTY, in, out, errOut),
 			security.SessionExecHandler,
@@ -676,13 +616,14 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		// Review tokens and safepaste run before history, alias, or dispatch.
 		// A held paste is not a command until the operator runs it.
 		if handlePasteLine(line, heldPaste, pasteRunner{
-			state:    sessState,
-			runner:   runner,
-			thread:   thread,
-			globals:  globals,
-			out:      out,
-			errOut:   errOut,
-			markBusy: commandRunning.Store,
+			state:     sessState,
+			runner:    runner,
+			thread:    thread,
+			globals:   globals,
+			out:       out,
+			errOut:    errOut,
+			markBusy:  commandRunning.Store,
+			interrupt: starInt,
 		}) {
 			continue
 		}
@@ -726,8 +667,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			}
 			src := string(data)
 			if strings.HasSuffix(path, ".adssh") || strings.HasSuffix(path, ".star") {
+				starInt.begin(thread)
 				newBindings, err := starlark.ExecFile(thread, path, src, globals)
-				if err != nil {
+				if starInt.end() && err != nil {
+					fmt.Fprintln(errOut, "interrupted")
+				} else if err != nil {
 					fmt.Fprintf(errOut, "source: %v\n", err)
 				} else {
 					MergeStarlarkBindings(globals, newBindings, errOut)
@@ -755,6 +699,13 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		// set gitprompt is the prompt switch. It is not the shell set builtin.
 		if next, ok := handleGitPromptLine(line, gitPrompt, gitAllowed, out, errOut); ok {
 			gitPrompt = next
+			continue
+		}
+		authorize := func(args []string) error {
+			return security.DefaultEngine().AuthorizeCommand(args, sessState.SessionID)
+		}
+		if next, ok := handleHighlightLine(line, hl.enabled.Load(), hlAllowed, authorize, out, errOut); ok {
+			hl.enabled.Store(next)
 			continue
 		}
 
@@ -843,7 +794,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			buf = readStarlarkBlock(rl, buf, out)
 			rl.SetPrompt(prompt)
 
-			exitCode := evalStarlark(thread, buf, globals, errOut)
+			exitCode := evalStarlarkInterruptible(starInt, thread, buf, globals, errOut)
 			globals["?"] = starlark.MakeInt(exitCode)
 
 			// 4f. postcmd hook

@@ -74,7 +74,9 @@ func TestDeviceLoginStoresBearerAndSetsUser(t *testing.T) {
 	sessionID := "device-login-happy"
 	session := &sys.Session{ID: sessionID, User: "bob", Principals: []string{"ops"}}
 	session.SetOIDC(OIDCProviderAdmin, []string{RoleOSRoot, RoleGridOps})
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	ctx := WithSessionID(context.WithValue(context.Background(), engineCtxKey, engine), sessionID)
 
@@ -135,7 +137,9 @@ func TestDeviceLoginStoresBearerAndSetsUser(t *testing.T) {
 
 func TestDeviceLoginRejectsUnsafeURLsWithoutDial(t *testing.T) {
 	sessionID := "device-login-urls"
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
+	if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	ctx := WithSessionID(context.Background(), sessionID)
 	tokenPath := filepath.Join(t.TempDir(), "device.token")
@@ -242,7 +246,9 @@ func TestDeviceLoginMapsPollAndRedirectFailures(t *testing.T) {
 			base = server.URL
 			pinControlPlane(t, server)
 			sessionID := "device-login-" + tc.name
-			sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
+			if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"}); err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 			ctx := WithSessionID(context.Background(), sessionID)
 			tokenPath := filepath.Join(t.TempDir(), "device.token")
@@ -303,7 +309,9 @@ func TestDeviceLoginIntervalFloorAndSlowDown(t *testing.T) {
 	}
 	t.Cleanup(func() { deviceSleepFn = prev })
 	sessionID := "device-login-interval"
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: "bob"})
+	if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: "bob"}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	ctx := WithSessionID(context.Background(), sessionID)
 	result, err := DeviceLogin(ctx, DeviceLoginRequest{
@@ -330,7 +338,9 @@ func TestDeviceLoginRejectsRelativePathAndMissingSession(t *testing.T) {
 		t.Fatalf("session: %v", err)
 	}
 	sessionID := "device-login-relative"
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
+	if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	ctx := WithSessionID(context.Background(), sessionID)
 	_, err = DeviceLogin(ctx, DeviceLoginRequest{

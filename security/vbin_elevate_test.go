@@ -39,7 +39,9 @@ func runElevateVBin(t *testing.T, eng *Engine, sessionID string, args []string) 
 
 func TestElevateRequestAddsPolicyVisibleClaimAndAudits(t *testing.T) {
 	session := &sys.Session{ID: "elevate-policy", User: "alice", Principals: []string{"ops"}}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	defer sys.UnregisterSession(session.ID)
 
 	dir := t.TempDir()
@@ -94,7 +96,9 @@ allow {
 
 func TestElevationExpiresAndDropClearsIt(t *testing.T) {
 	session := &sys.Session{ID: "elevate-expire", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	defer sys.UnregisterSession(session.ID)
 
 	session.ActivateElevation("prod-admin", "test", time.Now().Add(-time.Second))

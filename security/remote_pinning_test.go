@@ -108,7 +108,9 @@ func TestOIDCAdminImportRejectsCallerJWKSProbe(t *testing.T) {
 	}))
 	t.Cleanup(plain.Close)
 	session := &sys.Session{ID: "oidc-probe", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	t.Setenv("ADSSH_OIDC_LOGIN_AUDIENCE", "login-audience")
 	t.Setenv("ADSSH_OIDC_ADMIN_AUDIENCE", "admin-audience")
@@ -274,7 +276,9 @@ func TestOIDCImportClaimChecks(t *testing.T) {
 			claims := base()
 			tc.mutate(claims)
 			session := &sys.Session{ID: "oidc-claims-" + tc.name, User: "alice"}
-			sys.RegisterSession(session)
+			if err := sys.RegisterSession(session); err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 			_, err := runVBin(t, nil, session.ID, []string{
 				"identity", "oidc", "import", "--token", signedOIDCTestToken(t, private, "kid", claims),
@@ -300,7 +304,9 @@ func TestOIDCAdminImportValidTokenOverPinnedTLS(t *testing.T) {
 	t.Setenv("ADSSH_OIDC_ADMIN_AUDIENCE", "admin-audience")
 	audience := audienceFor(t, OIDCProviderAdmin)
 	session := &sys.Session{ID: "oidc-admin-valid", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	dir := t.TempDir()
 	auditPath := filepath.Join(dir, "audit.log")
@@ -354,7 +360,9 @@ func deviceHappyServer(t *testing.T, access string) *httptest.Server {
 
 func deviceSession(t *testing.T, id string) context.Context {
 	t.Helper()
-	sys.RegisterSession(&sys.Session{ID: id, User: "alice"})
+	if err := sys.RegisterSession(&sys.Session{ID: id, User: "alice"}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(id) })
 	return WithSessionID(context.Background(), id)
 }
@@ -676,7 +684,9 @@ func TestDeviceLoginAuditFailureLeavesIdentity(t *testing.T) {
 	sessionID := "device-audit-fail"
 	session := &sys.Session{ID: sessionID, User: "alice", Principals: []string{"ops"}}
 	session.SetOIDC(OIDCProviderLogin, nil)
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	ctx := WithSessionID(context.WithValue(context.Background(), engineCtxKey, eng), sessionID)
 	failAuditSync(t)
@@ -708,7 +718,9 @@ func TestOIDCImportAuditFailureLeavesIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := &sys.Session{ID: "oidc-audit-fail", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	token := signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, audience, "bob@example.com", []string{"gridops", "ops"}, time.Now().Add(time.Hour).Unix()))
 	failAuditSync(t)
@@ -755,7 +767,9 @@ func TestOIDCCrossAudienceReplayRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			session := &sys.Session{ID: "oidc-cross-" + tc.name, User: "alice"}
-			sys.RegisterSession(session)
+			if err := sys.RegisterSession(session); err != nil {
+				t.Fatal(err)
+			}
 			t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 			args := append([]string{"identity", "oidc", "import", "--token", tc.token}, tc.provider...)
 			_, err := runVBin(t, nil, session.ID, args)
@@ -772,7 +786,9 @@ func TestOIDCCrossAudienceReplayRejected(t *testing.T) {
 		provider string
 	}{{loginToken, OIDCProviderLogin}, {adminToken, OIDCProviderAdmin}} {
 		session := &sys.Session{ID: "oidc-cross-ok-" + tc.provider, User: "alice"}
-		sys.RegisterSession(session)
+		if err := sys.RegisterSession(session); err != nil {
+			t.Fatal(err)
+		}
 		t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 		if _, err := runVBin(t, nil, session.ID, []string{"identity", "oidc", "import", "--token", tc.token, "--provider", tc.provider}); err != nil {
 			t.Fatalf("%s: %v", tc.provider, err)
@@ -790,7 +806,9 @@ func TestOIDCAudienceConfigFailsClosed(t *testing.T) {
 	pinOIDCProviders(t, issuer, server)
 	token := signedOIDCTestToken(t, private, "kid", oidcClaims(issuer, "login-audience", "bob@example.com", nil, time.Now().Add(time.Hour).Unix()))
 	session := &sys.Session{ID: "oidc-aud-config", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 
 	t.Setenv("ADSSH_OIDC_LOGIN_AUDIENCE", "")

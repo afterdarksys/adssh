@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -338,20 +339,46 @@ func ClearActiveCMTicket() {
 	defaultEngine.ClearActiveCMTicket()
 }
 
-// CMRequiredForCommand checks whether cmd matches any pattern in
-// ADSSH_CM_PATTERNS (comma-separated, filepath.Match globs).
-func CMRequiredForCommand(cmd string) bool {
-	// TODO(engine-config): read from EngineConfig instead of the process env.
-	raw := os.Getenv("ADSSH_CM_PATTERNS")
-	if raw == "" {
+// parseCMPatterns splits a comma-separated ADSSH_CM_PATTERNS value.
+func parseCMPatterns(raw string) []string {
+	var out []string
+	for _, pat := range strings.Split(raw, ",") {
+		if pat = strings.TrimSpace(pat); pat != "" {
+			out = append(out, pat)
+		}
+	}
+	return out
+}
+
+// CMPatternsForSession returns the process default patterns followed by the
+// ones sessionID added with cm require.
+func (e *Engine) CMPatternsForSession(sessionID string) []string {
+	e.cmMu.Lock()
+	defer e.cmMu.Unlock()
+	out := append([]string(nil), e.cmDefaultPatterns...)
+	return append(out, e.cmPatterns[sessionID]...)
+}
+
+// AddCMPatternForSession adds pattern to sessionID's own list. It reports
+// false when the session already requires the pattern.
+func (e *Engine) AddCMPatternForSession(sessionID, pattern string) bool {
+	e.cmMu.Lock()
+	defer e.cmMu.Unlock()
+	if slices.Contains(e.cmDefaultPatterns, pattern) || slices.Contains(e.cmPatterns[sessionID], pattern) {
 		return false
 	}
+	if e.cmPatterns == nil {
+		e.cmPatterns = map[string][]string{}
+	}
+	e.cmPatterns[sessionID] = append(e.cmPatterns[sessionID], pattern)
+	return true
+}
+
+// CMRequiredForSession reports whether cmd matches a pattern sessionID is
+// held to (filepath.Match globs on the command and its base name).
+func (e *Engine) CMRequiredForSession(sessionID, cmd string) bool {
 	base := filepath.Base(cmd)
-	for _, pat := range strings.Split(raw, ",") {
-		pat = strings.TrimSpace(pat)
-		if pat == "" {
-			continue
-		}
+	for _, pat := range e.CMPatternsForSession(sessionID) {
 		if matched, _ := filepath.Match(pat, cmd); matched {
 			return true
 		}
@@ -360,6 +387,14 @@ func CMRequiredForCommand(cmd string) bool {
 		}
 	}
 	return false
+}
+
+// CMRequiredForCommand checks cmd against the default engine's process-wide
+// patterns.
+//
+// Deprecated: use Engine.CMRequiredForSession.
+func CMRequiredForCommand(cmd string) bool {
+	return defaultEngine.CMRequiredForSession("", cmd)
 }
 
 // CMStrictMode returns true when ADSSH_CM_STRICT=1.

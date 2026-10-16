@@ -32,14 +32,16 @@ func handleEvalStarlark(globals starlark.StringDict) server.ToolHandlerFunc {
 		var buf bytes.Buffer
 		thread.Print = func(_ *starlark.Thread, msg string) { buf.WriteString(msg + "\n") }
 
+		// Record before evaluating; a failed write runs nothing.
+		if err := security.LogCommand("MCP:eval_starlark", code); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("audit log failed: %v", err)), nil
+		}
+
 		// ExecFile supports both multi-statement code and single expressions
 		val, err := starlark.ExecFile(thread, "<mcp>", code, evalGlobals)
 		if err != nil {
-			security.LogCommand("MCP:eval_starlark", code)
 			return mcp.NewToolResultError(fmt.Sprintf("starlark error: %v", err)), nil
 		}
-
-		security.LogCommand("MCP:eval_starlark", code)
 
 		// Build result with output and result value as separate fields
 		result := fmt.Sprintf("output: %s\nresult: %v", buf.String(), val)

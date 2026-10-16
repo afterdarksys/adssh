@@ -1,6 +1,7 @@
 package security
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,6 +244,16 @@ func (e *Engine) RequestApproval(cmd string, rule FourEyesRule) error {
 // RequestApprovalForSession creates a pending request attributed to the
 // authenticated session identity, then waits for a distinct approver.
 func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessionID string) error {
+	return e.RequestApprovalForSessionContext(context.Background(), cmd, rule, sessionID)
+}
+
+// RequestApprovalForSessionContext is RequestApprovalForSession whose wait
+// ends when ctx is done. A canceled wait removes the pending request and
+// denies.
+func (e *Engine) RequestApprovalForSessionContext(ctx context.Context, cmd string, rule FourEyesRule, sessionID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := e.ensureFourEyesDirs(); err != nil {
 		return err
 	}
@@ -302,7 +313,13 @@ func (e *Engine) RequestApprovalForSession(cmd string, rule FourEyesRule, sessio
 		fmt.Fprintf(sink, "\r%s waiting for approval (request: %s) [%ds remaining]",
 			spinChars[spinIdx%len(spinChars)], requestID, remaining)
 		spinIdx++
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(sink, "\r\033[K\u274C Request %s canceled.\n", requestID)
+			os.Remove(pendingFile) //nolint:errcheck
+			return fmt.Errorf("foureyes: request %s canceled (required approver: %s)", requestID, required)
+		case <-time.After(2 * time.Second):
+		}
 	}
 
 	fmt.Fprintf(sink, "\r\033[K\u23F0 Request %s timed out.\n", requestID)

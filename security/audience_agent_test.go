@@ -79,7 +79,9 @@ func TestOIDCRejectsWrongAudienceExpiredTamperedNoneAndOpaque(t *testing.T) {
 	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-reject", User: "before"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	eng, err := NewEngine(EngineConfig{})
 	if err != nil {
@@ -158,7 +160,9 @@ func TestLoginAudienceDoesNotGrantPrivilegedRoles(t *testing.T) {
 	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-login", User: "before"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	audience := audienceFor(t, OIDCProviderLogin)
 	issuer := "https://issuer.example"
@@ -198,7 +202,9 @@ func TestAdminAudienceElevateGridOpsNotOSRootAndUIDUnchanged(t *testing.T) {
 	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-admin", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	audience := audienceFor(t, OIDCProviderAdmin)
 	issuer := "https://issuer.example"
@@ -245,7 +251,9 @@ func TestAdminAudienceElevateGridOpsNotOSRootAndUIDUnchanged(t *testing.T) {
 
 func TestGrantRefusesGridOps(t *testing.T) {
 	session := &sys.Session{ID: "grant-gridops", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	err := grantBinary{}.Run(WithSessionID(context.Background(), session.ID), []string{"grant", "request", "gridops"})
 	if err == nil || !strings.Contains(err.Error(), `grant: role "gridops" is not assumable`) {
@@ -269,7 +277,9 @@ func TestOIDCImportChainStoresFingerprintOnly(t *testing.T) {
 	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "oidc-chain", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	dir := t.TempDir()
 	chainPath := filepath.Join(dir, "audit.chain")
@@ -322,7 +332,9 @@ func TestIdentityStatusJSONOmitsToken(t *testing.T) {
 	pinOIDCProviders(t, "https://issuer.example", server)
 
 	session := &sys.Session{ID: "status-login", User: "before"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	audience := audienceFor(t, OIDCProviderLogin)
 	issuer := "https://issuer.example"
@@ -353,7 +365,9 @@ func TestIdentityStatusJSONOmitsToken(t *testing.T) {
 func TestAgentGateAllowlistAndExpiredLease(t *testing.T) {
 	eng := policyEngine(t, allowAllPolicy)
 	live := &sys.Session{ID: testID(t, "live"), User: "agent"}
-	sys.RegisterSession(live)
+	if err := sys.RegisterSession(live); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(live.ID) })
 	live.BindManagedAgent(&sys.ManagedAgent{
 		ID:        "live-agent",
@@ -370,7 +384,9 @@ func TestAgentGateAllowlistAndExpiredLease(t *testing.T) {
 	}
 
 	expired := &sys.Session{ID: testID(t, "expired"), User: "agent"}
-	sys.RegisterSession(expired)
+	if err := sys.RegisterSession(expired); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(expired.ID) })
 	expired.BindManagedAgent(&sys.ManagedAgent{
 		ID:        "expired-agent",
@@ -391,7 +407,9 @@ func TestCloudClaimWinsOverExtraAgent(t *testing.T) {
 	extra := PolicyContextExtra{Agent: &AgentClaim{ID: "inst", Kind: "instrument", Risk: "worktree"}}
 
 	session := &sys.Session{ID: testID(t, "cloud"), User: "agent"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	session.BindManagedAgent(&sys.ManagedAgent{
 		ID:        "cloud-agent",
@@ -407,7 +425,9 @@ func TestCloudClaimWinsOverExtraAgent(t *testing.T) {
 	}
 
 	plain := &sys.Session{ID: testID(t, "plain"), User: "alice"}
-	sys.RegisterSession(plain)
+	if err := sys.RegisterSession(plain); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(plain.ID) })
 	if err := instrument.gateCommandWithExtra(false, []string{"repo"}, plain.ID, extra); err != nil {
 		t.Fatal(err)

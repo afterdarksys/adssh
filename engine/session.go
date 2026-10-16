@@ -276,7 +276,7 @@ func (s *Session) GateProgram(node syntax.Node) error {
 
 // Threats: DeclClause keywords bypass the shell call handler. RunShell always
 // runs GateProgram before Runner.Run. It does not authorize a program that
-// the caller executes through Runner directly. A cancelled context is refused
+// the caller executes through Runner directly. A canceled context is refused
 // before parse. RunStarlark executes on this session's thread; print is not a
 // policy decision, and sys.exec_cmd stays on the session engine's gate.
 func (s *Session) RunShell(ctx context.Context, src string) error {

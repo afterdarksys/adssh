@@ -38,7 +38,9 @@ func TestAdminHTTPRequiresToken(t *testing.T) {
 
 func TestAdminHTTPSessionsEndpoint(t *testing.T) {
 	session := &sys.Session{ID: "admin-http-session", User: "alice", Principals: []string{"ops"}}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	eng, err := NewEngine(EngineConfig{})
 	if err != nil {
@@ -93,7 +95,9 @@ func TestAdminHTTPEvidenceEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.AppendChain(ChainEntry{SessionID: "admin-http-evidence", Type: "cmd", Command: "whoami"})
+	if err := eng.AppendChain(ChainEntry{SessionID: "admin-http-evidence", Type: "cmd", Command: "whoami"}); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/evidence", bytes.NewBufferString(`{"session_id":"admin-http-evidence"}`))
 	rec := httptest.NewRecorder()
 	req.Header.Set("Authorization", "Bearer secret")

@@ -1,6 +1,7 @@
 package security
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -171,17 +172,39 @@ func (h *adminHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAdminJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
-	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+	// The response is buffered and sent only after the ADMIN_HTTP record is
+	// written, so a failed audit write discloses nothing.
+	rec := &bufferedResponse{header: http.Header{}, status: http.StatusOK}
 	principal, ok := h.authenticate(r)
 	name := adminNoPrincipal
 	if ok {
 		name = principal.Name
+		// A decision or an unban changes state; record it before it is served.
+		if r.Method == http.MethodPost && (r.URL.Path == "/v1/approvals/approve" ||
+			r.URL.Path == "/v1/approvals/deny" || r.URL.Path == "/v1/guard/unban") {
+			if err := h.engine.LogEvent(fmt.Sprintf("ADMIN_HTTP_REQUEST method=%s path=%s key_fp=%s principal=%s",
+				r.Method, r.URL.Path, presentedKeyFingerprint(r), name)); err != nil {
+				writeAdminJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_unavailable"})
+				return
+			}
+		}
 		h.serveAuthorized(rec, r.WithContext(context.WithValue(r.Context(), adminPrincipalKey{}, principal)))
 	} else {
 		writeAdminJSON(rec, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 	}
-	h.engine.LogEvent(fmt.Sprintf("ADMIN_HTTP method=%s path=%s status=%d key_fp=%s principal=%s",
-		r.Method, r.URL.Path, rec.status, presentedKeyFingerprint(r), name))
+	if err := h.engine.LogEvent(fmt.Sprintf("ADMIN_HTTP method=%s path=%s status=%d key_fp=%s principal=%s",
+		r.Method, r.URL.Path, rec.status, presentedKeyFingerprint(r), name)); err != nil {
+		writeAdminJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "audit_unavailable"})
+		return
+	}
+	for k, v := range rec.header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(rec.status)
+	if _, err := w.Write(rec.body.Bytes()); err != nil {
+		// The client left after the record was written; nothing to undo.
+		return
+	}
 }
 
 func (h *adminHTTPHandler) serveAuthorized(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +230,8 @@ func (h *adminHTTPHandler) serveAuthorized(w http.ResponseWriter, r *http.Reques
 		}
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/explain":
 		h.handleExplain(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/whoami":
+		h.handleWhoami(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/evidence":
 		h.handleEvidence(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/recordings":
@@ -239,26 +264,29 @@ func requireNamedAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-type statusRecorder struct {
-	http.ResponseWriter
+// bufferedResponse holds an admin response until its audit record is written.
+type bufferedResponse struct {
+	header http.Header
+	body   bytes.Buffer
 	status int
 	wrote  bool
 }
 
-func (s *statusRecorder) WriteHeader(code int) {
-	if s.wrote {
+func (b *bufferedResponse) Header() http.Header { return b.header }
+
+func (b *bufferedResponse) WriteHeader(code int) {
+	if b.wrote {
 		return
 	}
-	s.wrote = true
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
+	b.wrote = true
+	b.status = code
 }
 
-func (s *statusRecorder) Write(b []byte) (int, error) {
-	if !s.wrote {
-		s.WriteHeader(http.StatusOK)
+func (b *bufferedResponse) Write(p []byte) (int, error) {
+	if !b.wrote {
+		b.WriteHeader(http.StatusOK)
 	}
-	return s.ResponseWriter.Write(b)
+	return b.body.Write(p)
 }
 
 func presentedKeyFingerprint(r *http.Request) string {
@@ -343,6 +371,29 @@ func (h *adminHTTPHandler) handleExplain(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeAdminJSON(w, http.StatusOK, explanation)
+}
+
+// handleWhoami reports one named session's identity and, with caps, its
+// policy preview. The admin key reads any session, as /v1/sessions does.
+func (h *adminHTTPHandler) handleWhoami(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		Caps      bool   `json:"caps"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeAdminError(w, http.StatusBadRequest, fmt.Errorf("invalid json: %w", err))
+		return
+	}
+	if req.SessionID == "" {
+		writeAdminJSON(w, http.StatusBadRequest, map[string]any{"error": "session_id is required"})
+		return
+	}
+	report, err := h.engine.Whoami(req.SessionID, req.Caps)
+	if err != nil {
+		writeAdminJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, report)
 }
 
 func (h *adminHTTPHandler) handleApproval(w http.ResponseWriter, r *http.Request, approve bool) {

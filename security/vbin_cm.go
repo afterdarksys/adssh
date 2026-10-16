@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/interp"
@@ -30,7 +31,7 @@ func (cmBinary) Run(ctx context.Context, args []string) error {
 		fmt.Fprintln(hc.Stdout, "  check [ticket-id] Check ticket status (active ticket if no ID given)")
 		fmt.Fprintln(hc.Stdout, "  clear             Clear the active change ticket")
 		fmt.Fprintln(hc.Stdout, "  status            Show active ticket summary")
-		fmt.Fprintln(hc.Stdout, "  require <pattern> Append a command pattern to ADSSH_CM_PATTERNS")
+		fmt.Fprintln(hc.Stdout, "  require <pattern> Require a ticket for a command pattern in this session")
 		fmt.Fprintln(hc.Stdout, "  providers         Show configured provider information")
 		return nil
 	}
@@ -203,39 +204,33 @@ func cmStatus(ctx context.Context, hc interp.HandlerContext) error {
 	return nil
 }
 
-// cmRequire appends a command pattern to ADSSH_CM_PATTERNS.
-func cmRequire(_ context.Context, hc interp.HandlerContext, args []string) error {
+// cmRequire adds a command pattern to the caller's session only. Other
+// sessions keep the process default (ADSSH_CM_PATTERNS, read at startup).
+func cmRequire(ctx context.Context, hc interp.HandlerContext, args []string) error {
 	if len(args) < 3 {
 		return fmt.Errorf("cm require: missing pattern\nUsage: cm require <glob-pattern>")
 	}
-	pattern := args[2]
-
-	existing := os.Getenv("ADSSH_CM_PATTERNS")
-	var updated string
-	if existing == "" {
-		updated = pattern
-	} else {
-		// avoid duplicates
-		for _, p := range strings.Split(existing, ",") {
-			if strings.TrimSpace(p) == pattern {
-				fmt.Fprintf(hc.Stdout, "%s⚠%s Pattern %q already present in ADSSH_CM_PATTERNS.\n",
-					ansiYellow, ansiReset, pattern)
-				return nil
-			}
-		}
-		updated = existing + "," + pattern
+	pattern := strings.TrimSpace(args[2])
+	if pattern == "" || strings.Contains(pattern, ",") {
+		return fmt.Errorf("cm require: pattern must be one non-empty glob without commas")
 	}
-
-	if err := os.Setenv("ADSSH_CM_PATTERNS", updated); err != nil {
-		return fmt.Errorf("cm require: setenv: %w", err)
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return fmt.Errorf("cm require: invalid pattern %q: %w", pattern, err)
 	}
-	fmt.Fprintf(hc.Stdout, "%s✓%s Added %q to ADSSH_CM_PATTERNS\n", ansiGreen, ansiReset, pattern)
-	fmt.Fprintf(hc.Stdout, "  ADSSH_CM_PATTERNS=%s\n", updated)
+	engine := engineFromContext(ctx)
+	sessionID := SessionIDFromContext(ctx)
+	if !engine.AddCMPatternForSession(sessionID, pattern) {
+		fmt.Fprintf(hc.Stdout, "%s⚠%s Pattern %q is already required in this session.\n",
+			ansiYellow, ansiReset, pattern)
+		return nil
+	}
+	fmt.Fprintf(hc.Stdout, "%s✓%s Added %q for this session\n", ansiGreen, ansiReset, pattern)
+	fmt.Fprintf(hc.Stdout, "  patterns=%s\n", strings.Join(engine.CMPatternsForSession(sessionID), ","))
 	return nil
 }
 
 // cmProviders lists the configured CM provider and its status.
-func cmProviders(_ context.Context, hc interp.HandlerContext) error {
+func cmProviders(ctx context.Context, hc interp.HandlerContext) error {
 	provider := os.Getenv("ADSSH_CM_PROVIDER")
 	if provider == "" {
 		provider = "generic (default)"
@@ -243,7 +238,7 @@ func cmProviders(_ context.Context, hc interp.HandlerContext) error {
 	url := os.Getenv("ADSSH_CM_URL")
 	tokenSet := os.Getenv("ADSSH_CM_TOKEN") != ""
 	strictMode := CMStrictMode()
-	patterns := os.Getenv("ADSSH_CM_PATTERNS")
+	patterns := strings.Join(engineFromContext(ctx).CMPatternsForSession(SessionIDFromContext(ctx)), ",")
 
 	urlStatus := ansiGreen + "✓" + ansiReset
 	if url == "" {

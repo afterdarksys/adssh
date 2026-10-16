@@ -22,6 +22,8 @@ import (
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/agent"
 	"github.com/afterdarksys/adssh/internal/config"
+	// grid registers the grid, flight, agent, worktree, and repo vbins.
+	_ "github.com/afterdarksys/adssh/internal/grid"
 	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/afterdarksys/adssh/internal/repl"
 	"github.com/afterdarksys/adssh/internal/sah"
@@ -151,16 +153,13 @@ func main() {
 	// *engine.Engine directly.
 	security.SetDefaultEngine(eng.Security())
 	// sessionID here is the SSH login the listener bound. It is not the local REPL id.
-	sys.SetSSHMonitorServer(func(conn net.Conn, sessionID string) {
-		security.ServeSSHMonitor(conn, sessionID, func(args []string) error {
-			if sys.GetSession(sessionID) == nil {
-				return errors.New("adssh: ssh monitor: session is gone")
-			}
-			return eng.Security().AuthorizeCommand(args, sessionID)
-		})
-	})
+	sys.SetSSHMonitorServer(sshMonitorServer(eng.Security()))
 	guard.SetRecorder(func(ev guard.Event) {
-		eng.Security().LogEvent(fmt.Sprintf("GUARD action=%s addr=%s reason=%s", ev.Action, ev.Addr, ev.Reason))
+		// The guard has already applied the ban; it stands even when the
+		// record fails, so the failure is reported rather than dropped.
+		if err := eng.Security().LogEvent(fmt.Sprintf("GUARD action=%s addr=%s reason=%s", ev.Action, ev.Addr, ev.Reason)); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: guard audit write failed: %v\n", err)
+		}
 	})
 	if err := guard.Configure(guard.Options{
 		ConfigPath: cfg.GuardConfigPath,
@@ -193,11 +192,18 @@ func main() {
 		os.Exit(runSAH(eng.Security(), sessionID))
 	}
 
+	// An audit log that cannot record startup cannot record commands either.
 	if cfg.EntitlementsPath != "" {
-		eng.Security().LogEvent(fmt.Sprintf("Entitlements loaded from %s", cfg.EntitlementsPath))
+		if err := eng.Security().LogEvent(fmt.Sprintf("Entitlements loaded from %s", cfg.EntitlementsPath)); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: audit: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	if _, statErr := os.Stat(cfg.PolicyPath); statErr == nil {
-		eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath))
+		if err := eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", cfg.PolicyPath)); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: audit: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// 4. Setup signal handling and terminal
@@ -249,6 +255,13 @@ func main() {
 			fmt.Fprintf(errOut, "adssh: ssh session: pty is not a file\n")
 			return
 		}
+		// The certificate principals are the session's groups for its
+		// life; grant cannot add to them. Elevation still merges in.
+		if err := eng.Security().BindSessionIdentity(sessionID, user, principals); err != nil {
+			fmt.Fprintf(errOut, "adssh: %v\n", err)
+			return
+		}
+		defer eng.Security().UnbindSessionIdentity(sessionID)
 		// History, profile, and rc paths come from the target user's home,
 		// not from this listener's config.
 		err := sys.SpawnSSHSession(sys.SSHSessionSpec{
@@ -257,6 +270,7 @@ func main() {
 			Principals: principals,
 			Restricted: cfg.Restricted,
 			MenuPath:   eng.Security().GetMenuForUser(user, principals),
+			PluginDir:  security.ConfiguredPluginDir(),
 			PTY:        slave,
 		})
 		if err != nil {
@@ -369,7 +383,9 @@ func main() {
 // machinery as the REPL: Starlark runs on the session thread/globals, shell runs
 // on the session's engine-authorized runner.
 func evalOnce(sess *engine.Session, src string) error {
-	security.LogCommand(src, "")
+	if err := security.LogCommand(src, ""); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
 
 	flow := parser.ClassifyFlow(src)
 	switch flow.Kind {
@@ -977,7 +993,7 @@ func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricte
 
 	if sessionID != "" {
 		if session := sys.GetSession(sessionID); session != nil {
-			menuPath := eng.Security().GetMenuForUser(session.User, session.Principals)
+			menuPath := eng.Security().GetMenuForUser(session.User, session.PrincipalList())
 			if menuPath != "" {
 				repl.StartMenu(menuPath, globals, restricted, in, out, errOut)
 				return
@@ -1034,4 +1050,23 @@ func listenerHangup() {
 		return
 	}
 	fmt.Fprintln(os.Stderr, "adssh: SIGHUP: no longer accepting SSH connections; running sessions continue")
+}
+
+// sshMonitorServer serves one SSH login's monitor socket against sec. Authorize
+// and Run are gated by the same AuthorizeCommandContext; Run executes the
+// virtual binary here, in the listener, under the session the socket is bound
+// to. A Cancel frame ends the gate's four-eyes wait.
+func sshMonitorServer(sec *security.Engine) func(conn net.Conn, sessionID string) {
+	return func(conn net.Conn, sessionID string) {
+		gate := func(ctx context.Context, args []string) error {
+			if sys.GetSession(sessionID) == nil {
+				return errors.New("adssh: ssh monitor: session is gone")
+			}
+			return sec.AuthorizeCommandContext(ctx, args, sessionID)
+		}
+		run := func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+			return sec.RunVBinForSession(ctx, sessionID, args, stdin, stdout, stderr)
+		}
+		security.ServeSSHMonitorRun(conn, sessionID, gate, run)
+	}
 }

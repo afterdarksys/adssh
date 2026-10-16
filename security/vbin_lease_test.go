@@ -144,6 +144,10 @@ func TestLeaseRejectsInsecureSecretFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// WriteFile's mode is masked by the umask (077 on some hosts gives 0600).
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	eng, _ := NewEngine(EngineConfig{})
 	_, err := runLeaseVBin(t, eng, []string{"lease", "--from", "file:" + path, "--as", "TOKEN", "--", "/usr/bin/true"})
 	if err == nil || !strings.Contains(err.Error(), "permissions") {

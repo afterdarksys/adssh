@@ -596,7 +596,7 @@ notify.pagerduty(
 notify.webhook(url="https://hooks.example.com/deploy", payload={"status": "done", "version": "2.4.1"})
 
 # Microsoft Teams
-notify.teams(webhook_url="https://outlook.office.com/webhook/...", text="Deployment finished")
+notify.teams(title="Deploy", text="Deployment finished")  # URL from TEAMS_WEBHOOK_URL
 ```
 
 **Standard incident notification pattern:**

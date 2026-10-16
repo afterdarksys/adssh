@@ -71,10 +71,14 @@ func TestChain_AppendAndVerify(t *testing.T) {
 	dir := t.TempDir()
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	keyPath := filepath.Join(dir, "key")
-	InitChain(ledgerPath, keyPath, "s1")
+	if err := InitChain(ledgerPath, keyPath, "s1"); err != nil {
+		t.Fatal(err)
+	}
 
 	for i := 0; i < 5; i++ {
-		AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)})
+		if err := AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	ok, badSeq, err := VerifyChain(ledgerPath)
@@ -113,10 +117,14 @@ func TestChain_TamperedEntryDetected(t *testing.T) {
 	dir := t.TempDir()
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	keyPath := filepath.Join(dir, "key")
-	InitChain(ledgerPath, keyPath, "s1")
+	if err := InitChain(ledgerPath, keyPath, "s1"); err != nil {
+		t.Fatal(err)
+	}
 
 	for i := 0; i < 5; i++ {
-		AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)})
+		if err := AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	lines := readChainLines(t, ledgerPath)
@@ -155,10 +163,14 @@ func TestChain_TamperedHashDetected(t *testing.T) {
 	dir := t.TempDir()
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	keyPath := filepath.Join(dir, "key")
-	InitChain(ledgerPath, keyPath, "s1")
+	if err := InitChain(ledgerPath, keyPath, "s1"); err != nil {
+		t.Fatal(err)
+	}
 
 	for i := 0; i < 5; i++ {
-		AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)})
+		if err := AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	lines := readChainLines(t, ledgerPath)
@@ -201,10 +213,14 @@ func TestChain_MiddleLineDeletionDetected(t *testing.T) {
 	dir := t.TempDir()
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	keyPath := filepath.Join(dir, "key")
-	InitChain(ledgerPath, keyPath, "s1")
+	if err := InitChain(ledgerPath, keyPath, "s1"); err != nil {
+		t.Fatal(err)
+	}
 
 	for i := 0; i < 5; i++ {
-		AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)})
+		if err := AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("cmd%d", i)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	original := readChainLines(t, ledgerPath)
@@ -260,7 +276,9 @@ func TestChain_ConcurrentAppends(t *testing.T) {
 	dir := t.TempDir()
 	ledgerPath := filepath.Join(dir, "ledger.jsonl")
 	keyPath := filepath.Join(dir, "key")
-	InitChain(ledgerPath, keyPath, "s1")
+	if err := InitChain(ledgerPath, keyPath, "s1"); err != nil {
+		t.Fatal(err)
+	}
 
 	const goroutines = 20
 	const perGoroutine = 5
@@ -271,7 +289,10 @@ func TestChain_ConcurrentAppends(t *testing.T) {
 		go func(g int) {
 			defer wg.Done()
 			for i := 0; i < perGoroutine; i++ {
-				AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("g%d-cmd%d", g, i)})
+				if err := AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("g%d-cmd%d", g, i)}); err != nil {
+					t.Error(err)
+					return
+				}
 			}
 		}(g)
 	}
@@ -299,7 +320,9 @@ func TestChain_NoInitIsNoOp(t *testing.T) {
 
 	// AppendChain must not panic and must not write anything when InitChain
 	// has never been called (chainPath/chainKey are zero-valued).
-	AppendChain(ChainEntry{Type: "cmd", Command: "noop"})
+	if err := AppendChain(ChainEntry{Type: "cmd", Command: "noop"}); err != nil {
+		t.Fatal(err)
+	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {

@@ -108,7 +108,7 @@ func runOnPTY(ctx context.Context, args []string, tty *os.File, out, topStderr i
 		if hc.Stderr != nil {
 			_, _ = io.WriteString(hc.Stderr, lookErr.Error()+"\n")
 		}
-		return true, interp.NewExitStatus(127)
+		return true, interp.ExitStatus(127)
 	}
 
 	// CommandContext kills the child when the runner's context ends (timeout,
@@ -272,7 +272,7 @@ func pumpTerminalInput(tty *os.File, dst io.Writer, stop *atomic.Bool) {
 
 // exitStatusFromWait converts an *exec.Cmd.Wait error into the interp exit
 // status the Runner expects: nil for success, a signal-encoded 128+n status for
-// signalled children, and the plain exit code otherwise.
+// signaled children, and the plain exit code otherwise.
 func exitStatusFromWait(waitErr error) error {
 	if waitErr == nil {
 		return nil
@@ -282,11 +282,11 @@ func exitStatusFromWait(waitErr error) error {
 		return waitErr
 	}
 	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		return interp.NewExitStatus(uint8(128 + int(status.Signal())))
+		return interp.ExitStatus(uint8(128 + int(status.Signal())))
 	}
 	code := exitErr.ExitCode()
 	if code < 0 {
 		code = 1
 	}
-	return interp.NewExitStatus(uint8(code))
+	return interp.ExitStatus(uint8(code))
 }

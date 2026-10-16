@@ -39,7 +39,7 @@ func (b *OutputBroadcaster) Write(p []byte) (n int, err error) {
 
 // PrimaryTerminalFile returns the broadcaster's primary writer when it is an
 // *os.File attached to a real terminal, and nil otherwise. The PTY-backed
-// foreground exec path uses this to recognise the interactive local session
+// foreground exec path uses this to recognize the interactive local session
 // (primary = os.Stdout on a tty) and to skip everything else — SSH sessions
 // (primary = an ssh channel), scripts, and pipes — where the primary is not a
 // terminal-backed file.
@@ -77,8 +77,11 @@ func (b *OutputBroadcaster) RemoveListener(w io.Writer) {
 }
 
 type Session struct {
-	ID         string
-	User       string
+	ID   string
+	User string
+	// Principals is set when the session is built. After RegisterSession
+	// read and change it only through PrincipalList, AddPrincipal,
+	// RemovePrincipal, SetIdentity, or Info, which hold mu.
 	Principals []string
 	PTYMaster  *os.File
 	Out        *OutputBroadcaster
@@ -190,6 +193,48 @@ func (s *Session) SetIdentity(user string, principals []string) {
 	s.Principals = append([]string(nil), principals...)
 	s.identitySource = IdentitySourceAsserted
 	s.touchLocked()
+}
+
+// PrincipalList returns a copy of the session's principals. Read them
+// through this, not the field, once the session is registered.
+func (s *Session) PrincipalList() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.Principals...)
+}
+
+// AddPrincipal appends role unless it is present. It reports whether it
+// was added.
+func (s *Session) AddPrincipal(role string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.Principals {
+		if p == role {
+			return false
+		}
+	}
+	s.Principals = append(append([]string(nil), s.Principals...), role)
+	s.touchLocked()
+	return true
+}
+
+// RemovePrincipal removes every copy of role. It reports whether one was
+// present.
+func (s *Session) RemovePrincipal(role string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := make([]string, 0, len(s.Principals))
+	for _, p := range s.Principals {
+		if p != role {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == len(s.Principals) {
+		return false
+	}
+	s.Principals = kept
+	s.touchLocked()
+	return true
 }
 
 // SetIdentitySource records how the current User was established.
@@ -502,7 +547,45 @@ func LastEnvWins(list []string) []string {
 var (
 	globalSessions = make(map[string]*Session)
 	sessionsMu     sync.RWMutex
+
+	unregisterHooksMu sync.Mutex
+	unregisterHooks   = map[uint64]func(id string){}
+	unregisterHookSeq uint64
 )
+
+// OnSessionUnregister runs fn with the session id each time a registered
+// session is unregistered, after it has left the table. Listener state
+// keyed by session id (gateways, mirror grants) is released this way. The
+// returned function removes the hook.
+func OnSessionUnregister(fn func(id string)) (remove func()) {
+	unregisterHooksMu.Lock()
+	defer unregisterHooksMu.Unlock()
+	unregisterHookSeq++
+	key := unregisterHookSeq
+	unregisterHooks[key] = fn
+	return func() {
+		unregisterHooksMu.Lock()
+		delete(unregisterHooks, key)
+		unregisterHooksMu.Unlock()
+	}
+}
+
+func runUnregisterHooks(id string) {
+	unregisterHooksMu.Lock()
+	keys := make([]uint64, 0, len(unregisterHooks))
+	for k := range unregisterHooks {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	hooks := make([]func(string), 0, len(keys))
+	for _, k := range keys {
+		hooks = append(hooks, unregisterHooks[k])
+	}
+	unregisterHooksMu.Unlock()
+	for _, fn := range hooks {
+		fn(id)
+	}
+}
 
 // GenerateSessionID returns 128 random bits as 32 hex characters. A failure
 // of the system random source panics rather than return a guessable id.
@@ -560,6 +643,9 @@ func UnregisterSession(id string) {
 			session.Out.RemoveListener(session.recorder)
 		}
 		_ = session.recorder.Close(session)
+	}
+	if session != nil {
+		runUnregisterHooks(id)
 	}
 }
 

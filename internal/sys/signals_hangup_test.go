@@ -51,17 +51,34 @@ func TestHelperShellSignals(t *testing.T) {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
 		time.Sleep(2 * time.Second)
 		fmt.Println("still-running")
+	case "hangup-group":
+		// A child in this process group, as a mvdan background job would be.
+		child := exec.Command("sleep", "30")
+		if err := child.Start(); err != nil {
+			fmt.Println("start:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("child=%d\n", child.Process.Pid)
+		_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+		time.Sleep(2 * time.Second)
+		fmt.Println("still-running")
 	}
 	os.Exit(0)
 }
 
 func runShellSignalHelper(t *testing.T, mode string) string {
 	t.Helper()
+	return runShellSignalHelperCmd(t, mode, nil)
+}
+
+func runShellSignalHelperCmd(t *testing.T, mode string, attr *syscall.SysProcAttr) string {
+	t.Helper()
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("/bin/sh is not available")
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperShellSignals$")
 	cmd.Env = append(os.Environ(), shellSignalHelperEnv+"="+mode)
+	cmd.SysProcAttr = attr
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("helper %s: %v\n%s", mode, err, out)
@@ -97,14 +114,60 @@ func TestHangupDefaultExits(t *testing.T) {
 	}
 }
 
+// The default hangup sends SIGHUP to the shell's own process group, so a
+// command left running in the background (mvdan runs `&` in this group) does
+// not outlive the shell.
+func TestHangupDefaultSignalsProcessGroup(t *testing.T) {
+	out := runShellSignalHelperCmd(t, "hangup-group", &syscall.SysProcAttr{Setpgid: true})
+	if strings.Contains(out, "still-running") {
+		t.Fatalf("SIGHUP without a hook did not exit the shell: %q", out)
+	}
+	var pid int
+	for _, line := range strings.Split(out, "\n") {
+		if _, err := fmt.Sscanf(line, "child=%d", &pid); err == nil {
+			break
+		}
+	}
+	if pid <= 0 {
+		t.Fatalf("helper did not report its child: %q", out)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("background child %d survived the shell's hangup", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A shell that does not lead its process group must not signal the group:
+// that group belongs to whoever started it.
+func TestHangupGroupSkippedWhenNotLeader(t *testing.T) {
+	var signaled atomic.Int32
+	prev := killGroup
+	t.Cleanup(func() { killGroup = prev })
+	killGroup = func(int, syscall.Signal) error { signaled.Add(1); return nil }
+	if syscall.Getpgrp() == os.Getpid() {
+		t.Skip("the test binary leads its own process group")
+	}
+	hangupProcessGroup()
+	if signaled.Load() != 0 {
+		t.Fatal("signaled a process group this process does not lead")
+	}
+}
+
 func TestHangupHookCanBeCleared(t *testing.T) {
 	prevExit := exitProcess
+	prevKill := killGroup
 	t.Cleanup(func() {
 		exitProcess = prevExit
+		killGroup = prevKill
 		OnHangup(nil)
 	})
 	var exited atomic.Int32
 	exitProcess = func(int) { exited.Add(1) }
+	killGroup = func(int, syscall.Signal) error { return nil }
 	var hooked atomic.Int32
 	OnHangup(func() { hooked.Add(1) })
 	handleHangup()

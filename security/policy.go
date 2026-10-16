@@ -128,15 +128,37 @@ var roleNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,64}$`)
 var errPolicyRemoteOnly = errors.New("policy is evaluated by the listener; not available in this process")
 
 func (e *Engine) evaluatePolicy(pctx PolicyContext) (bool, string, string, error) {
+	d, err := e.EvaluatePolicyDecision(pctx)
+	return d.Allowed, d.DenyReason, d.RequiredRole, err
+}
+
+// PolicyDecision is the full result of one policy evaluation. Allowed is
+// authoritative. The other fields are optional strings a policy may set:
+// deny_reason (advisory text), required_role (the role that would allow it),
+// rule (a short name for the rule that decided), and required_entitlement (the
+// entitlement that would have allowed it).
+type PolicyDecision struct {
+	Allowed             bool   `json:"allowed"`
+	DenyReason          string `json:"deny_reason,omitempty"`
+	RequiredRole        string `json:"required_role,omitempty"`
+	Rule                string `json:"rule,omitempty"`
+	RequiredEntitlement string `json:"required_entitlement,omitempty"`
+}
+
+// EvaluatePolicyDecision evaluates the loaded policy and returns every field
+// of the decision. It follows the EvaluatePolicy fail-closed contract. In
+// addition, a `rule` or `required_entitlement` that is present but not a
+// string denies, as a non-boolean `allow` does.
+func (e *Engine) EvaluatePolicyDecision(pctx PolicyContext) (PolicyDecision, error) {
 	if RemoteGateProcess() {
-		return false, errPolicyRemoteOnly.Error(), "", errPolicyRemoteOnly
+		return PolicyDecision{DenyReason: errPolicyRemoteOnly.Error()}, errPolicyRemoteOnly
 	}
 	e.policyMu.RLock()
 	defer e.policyMu.RUnlock()
 
 	// No policy loaded => allow-by-default (see contract above).
 	if e.preparedQuery == nil {
-		return true, "", "", nil
+		return PolicyDecision{Allowed: true}, nil
 	}
 
 	ctx := context.Background()
@@ -190,7 +212,7 @@ func (e *Engine) evaluatePolicy(pctx PolicyContext) (bool, string, string, error
 
 	results, err := e.preparedQuery.Eval(ctx, rego.EvalInput(input))
 	if err != nil {
-		return false, "", "", fmt.Errorf("policy evaluation failed: %w", err)
+		return PolicyDecision{}, fmt.Errorf("policy evaluation failed: %w", err)
 	}
 
 	// From here a policy IS loaded, so the posture is DENY-BY-DEFAULT: any
@@ -201,38 +223,58 @@ func (e *Engine) evaluatePolicy(pctx PolicyContext) (bool, string, string, error
 	// is the defensive "no decision" case, not the allow-all case; an allow-all
 	// policy carries `default allow = true` and produces allow==true below.)
 	if len(results) == 0 {
-		return false, "policy: no decision (empty result set)", "", nil
+		return PolicyDecision{DenyReason: "policy: no decision (empty result set)"}, nil
 	}
 
 	// The decision document must be an object (the adssh.authz package). Anything
 	// else is malformed — deny.
 	resultMap, ok := results[0].Expressions[0].Value.(map[string]interface{})
 	if !ok {
-		return false, "policy: malformed decision document", "", nil
+		return PolicyDecision{DenyReason: "policy: malformed decision document"}, nil
 	}
-	role := decisionRequiredRole(resultMap)
+	decision := PolicyDecision{RequiredRole: decisionRequiredRole(resultMap)}
 
 	// deny_reason is advisory; extract it up front so denials can surface it.
-	denyReason := ""
 	if v, ok := resultMap["deny_reason"].(string); ok {
-		denyReason = v
+		decision.DenyReason = v
+	}
+
+	// rule and required_entitlement are optional. When present they must be
+	// strings; anything else is a policy error and denies.
+	for _, field := range []struct {
+		key string
+		dst *string
+	}{{"rule", &decision.Rule}, {"required_entitlement", &decision.RequiredEntitlement}} {
+		value, present := resultMap[field.key]
+		if !present {
+			continue
+		}
+		text, isString := value.(string)
+		if !isString {
+			decision.Rule, decision.RequiredEntitlement = "", ""
+			decision.DenyReason = "policy: non-string " + field.key
+			return decision, nil
+		}
+		*field.dst = text
 	}
 
 	allowVal, present := resultMap["allow"]
 	if !present {
 		// FIX #3: a loaded policy with no `allow` decision denies by default.
-		if denyReason == "" {
-			denyReason = "policy: deny by default (no allow decision)"
+		if decision.DenyReason == "" {
+			decision.DenyReason = "policy: deny by default (no allow decision)"
 		}
-		return false, denyReason, role, nil
+		return decision, nil
 	}
 	allowed, isBool := allowVal.(bool)
 	if !isBool {
 		// FIX #2: a non-boolean `allow` must never be ignored — fail closed.
-		return false, "policy: non-boolean allow", role, nil
+		decision.DenyReason = "policy: non-boolean allow"
+		return decision, nil
 	}
 
-	return allowed, denyReason, role, nil
+	decision.Allowed = allowed
+	return decision, nil
 }
 
 func decisionRequiredRole(resultMap map[string]interface{}) string {
@@ -270,7 +312,8 @@ func BuildPolicyContext(command string, args []string, sessionID string) PolicyC
 }
 
 // buildPolicyContext resolves the principal for sessionID in this order:
-//  1. the identity bound on this engine (BindSessionIdentity);
+//  1. the identity bound on this engine (BindSessionIdentity), plus the
+//     elevation and agent claims of a registered session with that id;
 //  2. the process sys session registry (SSH and local sessions), with the
 //     active elevation and managed-agent claims;
 //  3. for an empty sessionID only, the current OS user and its groups;
@@ -291,27 +334,17 @@ func (e *Engine) buildPolicyContext(command string, args []string, sessionID str
 		if user, groups, ok := e.boundIdentity(sessionID); ok {
 			pctx.User = user
 			pctx.Groups = groups
+			// The bound groups are fixed; a registered session with the
+			// same id still contributes its elevation and agent claims.
+			if session := sys.GetSession(sessionID); session != nil {
+				addSessionClaims(&pctx, session)
+			}
 			return pctx
 		}
 		if session := sys.GetSession(sessionID); session != nil {
 			pctx.User = session.User
-			pctx.Groups = append([]string(nil), session.Principals...)
-			if elevation := session.ActiveElevation(); elevation != nil {
-				pctx.Groups = append(pctx.Groups, elevation.Role)
-				pctx.Elevation = &ElevationClaim{
-					Role:      elevation.Role,
-					Reason:    elevation.Reason,
-					ExpiresAt: elevation.ExpiresAt.UTC().Format(time.RFC3339),
-				}
-			}
-			if agent := session.ManagedAgent(); agent != nil && time.Now().Before(agent.ExpiresAt) {
-				pctx.Agent = &AgentClaim{
-					ID:        agent.ID,
-					Kind:      agentKindCloud,
-					Risk:      "worktree",
-					SessionID: session.ID,
-				}
-			}
+			pctx.Groups = session.PrincipalList()
+			addSessionClaims(&pctx, session)
 			return pctx
 		}
 		pctx.IdentityUnknown = true
@@ -320,6 +353,27 @@ func (e *Engine) buildPolicyContext(command string, args []string, sessionID str
 
 	pctx.User, pctx.Groups = CurrentOSIdentity()
 	return pctx
+}
+
+// addSessionClaims adds the session's active elevation (to Groups and
+// Elevation) and its managed-agent claim.
+func addSessionClaims(pctx *PolicyContext, session *sys.Session) {
+	if elevation := session.ActiveElevation(); elevation != nil {
+		pctx.Groups = append(pctx.Groups, elevation.Role)
+		pctx.Elevation = &ElevationClaim{
+			Role:      elevation.Role,
+			Reason:    elevation.Reason,
+			ExpiresAt: elevation.ExpiresAt.UTC().Format(time.RFC3339),
+		}
+	}
+	if agent := session.ManagedAgent(); agent != nil && time.Now().Before(agent.ExpiresAt) {
+		pctx.Agent = &AgentClaim{
+			ID:        agent.ID,
+			Kind:      agentKindCloud,
+			Risk:      "worktree",
+			SessionID: session.ID,
+		}
+	}
 }
 
 // CurrentOSIdentity returns the process user's name and group names. It

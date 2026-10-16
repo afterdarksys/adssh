@@ -199,6 +199,13 @@ var (
 	auditWarnLast   atomic.Int64
 )
 
+// warnUnrecordedRevocation reports a failed audit write for a revocation that
+// happens regardless (session teardown, grant expiry). Undoing the revocation
+// would fail open, so the failure goes to auditWarnWriter instead.
+func warnUnrecordedRevocation(event string, err error) {
+	fmt.Fprintf(auditWarnWriter, "adssh: audit write for %s failed: %v\n", event, err)
+}
+
 // auditWarn writes one line naming the host and the cause, at most once per
 // auditWarnInterval. It never prints the URL path, query, or bearer.
 func auditWarn(host string, err error) {
@@ -362,29 +369,63 @@ func LogEvent(event string) error {
 
 // LogPolicyDecision records a Rego policy evaluation result in the audit log.
 func (e *Engine) LogPolicyDecision(user, command string, allowed bool, denyReason string) error {
+	return e.LogPolicyDecisionDetail(user, command, PolicyDecision{Allowed: allowed, DenyReason: denyReason})
+}
+
+// LogPolicyDecisionDetail records a policy decision with its matched rule and
+// required entitlement. A decision that sets neither writes the same flat line
+// and chain entry as LogPolicyDecision always has. When either is set, the flat
+// line gains rule= and required_entitlement= and the chain reason gains the
+// same text, so the chain record format does not change.
+func (e *Engine) LogPolicyDecisionDetail(user, command string, d PolicyDecision) error {
 	command = RedactSensitiveText(command)
-	denyReason = RedactSensitiveText(denyReason)
-	if err := e.writeAuditLine(fmt.Sprintf("[POLICY] user=%s command=%s allowed=%v reason=%q\n",
-		user, command, allowed, denyReason)); err != nil {
+	denyReason := RedactSensitiveText(d.DenyReason)
+	rule := RedactSensitiveText(d.Rule)
+	entitlement := RedactSensitiveText(d.RequiredEntitlement)
+	line := fmt.Sprintf("[POLICY] user=%s command=%s allowed=%v reason=%q", user, command, d.Allowed, denyReason)
+	chainReason := denyReason
+	if rule != "" || entitlement != "" {
+		line += fmt.Sprintf(" rule=%q required_entitlement=%q", rule, entitlement)
+		parts := []string{}
+		if denyReason != "" {
+			parts = append(parts, denyReason)
+		}
+		if rule != "" {
+			parts = append(parts, "rule="+rule)
+		}
+		if entitlement != "" {
+			parts = append(parts, "required_entitlement="+entitlement)
+		}
+		chainReason = strings.Join(parts, " ")
+	}
+	if err := e.writeAuditLine(line + "\n"); err != nil {
 		return err
 	}
+	allowed := d.Allowed
 	if err := e.AppendChain(ChainEntry{
 		Type:     "policy",
 		User:     user,
 		Command:  command,
 		Allowed:  &allowed,
-		Reason:   denyReason,
+		Reason:   chainReason,
 		ChangeID: e.GetAuditChangeID(),
 	}); err != nil {
 		return err
 	}
-	e.dispatchAuditEvent(map[string]interface{}{
+	event := map[string]interface{}{
 		"type":        "policy_decision",
 		"user":        user,
 		"command":     command,
 		"allowed":     allowed,
 		"deny_reason": denyReason,
-	})
+	}
+	if rule != "" {
+		event["rule"] = rule
+	}
+	if entitlement != "" {
+		event["required_entitlement"] = entitlement
+	}
+	e.dispatchAuditEvent(event)
 	return nil
 }
 

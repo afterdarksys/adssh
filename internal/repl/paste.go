@@ -361,6 +361,8 @@ type pasteRunner struct {
 	out      io.Writer
 	errOut   io.Writer
 	markBusy func(bool)
+	// interrupt lets Ctrl-C cancel a Starlark chunk. Nil disables it.
+	interrupt *starlarkInterrupt
 }
 
 // handlePasteLine owns review tokens and the safepaste command. Other lines
@@ -491,7 +493,7 @@ func runPasteChunk(run pasteRunner, chunk string) int {
 		}
 		code = shellStatus(run, err)
 	case kind.Mode == parser.ModeStarlark:
-		code = evalStarlark(run.thread, chunk, run.globals, run.errOut)
+		code = evalStarlarkInterruptible(run.interrupt, run.thread, chunk, run.globals, run.errOut)
 	default:
 		code = runShellSource(run, ctx, chunk)
 	}

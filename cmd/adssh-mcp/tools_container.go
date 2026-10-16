@@ -35,9 +35,12 @@ func handleContainerExec() server.ToolHandlerFunc {
 			cmdArgs = strings.Fields(cmdStr)
 		}
 
-		rec, runErr := starlarkext.RunEphemeralContainer(ctx, "", image, cmdArgs, nil, "")
+		// Record before the container starts; a failed write runs nothing.
+		if err := security.LogCommand("MCP:container_exec", fmt.Sprintf("%s %s", image, strings.Join(cmdArgs, " "))); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("audit log failed: %v", err)), nil
+		}
 
-		security.LogCommand("MCP:container_exec", fmt.Sprintf("%s %s", image, strings.Join(cmdArgs, " ")))
+		rec, runErr := starlarkext.RunEphemeralContainer(ctx, "", image, cmdArgs, nil, "")
 
 		// Return structured result
 		result := map[string]interface{}{

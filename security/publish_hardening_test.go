@@ -52,9 +52,15 @@ func TestAdminHTTPAuditsKeyFingerprintAndListRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng.LogEvent(`ELEVATE_REQUEST: session=sess-1 user=alice role=ops ttl=5m0s reason="ticket 1" expires_at=2099-01-01T00:00:00Z`)
-	eng.LogEvent("LEASE_REQUEST id=lease-old session=sess-1 source_type=file source=vaultfile as=TOKEN ttl=5m0s command=true")
-	eng.LogEvent("LEASE_GRANT id=lease-old")
+	if err := eng.LogEvent(`ELEVATE_REQUEST: session=sess-1 user=alice role=ops ttl=5m0s reason="ticket 1" expires_at=2099-01-01T00:00:00Z`); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.LogEvent("LEASE_REQUEST id=lease-old session=sess-1 source_type=file source=vaultfile as=TOKEN ttl=5m0s command=true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.LogEvent("LEASE_GRANT id=lease-old"); err != nil {
+		t.Fatal(err)
+	}
 
 	handler := NewAdminHTTPHandler(eng, "secret")
 	health := httptest.NewRecorder()
@@ -131,14 +137,18 @@ func TestAdminListChainUnavailableAndMissingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := &sys.Session{ID: "active-elev", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	session.ActivateElevation("ops", "ticket", time.Now().Add(time.Hour))
 	items, err := chained.ListElevations()
 	if err != nil || len(items) != 0 {
 		t.Fatalf("missing chain file included active elevation: %v %#v", err, items)
 	}
-	chained.LogEvent("ELEVATE_DROP: session=active-elev user=alice role=ops reason=\"done\"")
+	if err := chained.LogEvent("ELEVATE_DROP: session=active-elev user=alice role=ops reason=\"done\""); err != nil {
+		t.Fatal(err)
+	}
 	items, err = chained.ListElevations()
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +308,9 @@ func TestFourEyesApproveBySecretUsesRequestIDMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := &sys.Session{ID: "approve-session", User: "alice"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	pending, pendingFile, err := eng.createFourEyesPending("rm -rf /tmp/x", FourEyesRule{Approver: "bob"}, session.ID)
 	if err != nil {

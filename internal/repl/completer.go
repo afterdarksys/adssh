@@ -27,10 +27,10 @@ type adsshCompleter struct {
 var shellBuiltins = []string{
 	"cd", "export", "exit", "quit", "echo", "ls", "cat", "grep",
 	"find", "which", "env", "pwd", "mkdir", "rm", "cp", "mv",
-	"chmod", "chown", "ps", "kill", "jobs", "bg", "fg",
+	"chmod", "chown", "ps", "kill", "confirm",
 	// extended builtins
 	"alias", "unalias", "source", ".", "set", "read", "trap",
-	"pushd", "popd", "dirs", "type", "command", "time", "disown",
+	"pushd", "popd", "dirs", "type", "command", "time",
 	"fc", "history",
 }
 
@@ -87,11 +87,11 @@ var starlarkNamespaceKeys = map[string][]string{
 	"aws.route53":    {"list_zones", "list_records", "upsert_record", "delete_record"},
 	// GCP sub-namespaces
 	"gcp.gke":    {"list_clusters", "get_cluster"},
-	"gcp.pubsub": {"list_topics", "publish", "list_subscriptions"},
+	"gcp.pubsub": {"list_topics", "publish", "pull", "list_subscriptions"},
 	"gcp.run":    {"list_services", "get_service"},
 }
 
-var mirrorSubcmds = []string{"list", "view", "console", "kill"}
+var mirrorSubcmds = []string{"list", "view", "console", "kill", "share", "unshare"}
 var cmdgenProviders = []string{"docker", "kubectl", "aws"}
 
 // vbinSubcommands maps a vbin name to its recognized first-argument completions.
@@ -99,7 +99,8 @@ var vbinSubcommands = map[string][]string{
 	"stty":     {"sane", "size", "echo", "-echo", "raw", "-raw", "rows", "cols"},
 	"history":  {"-c", "-d"},
 	"fc":       {"-l", "-e"},
-	"mirror":   {"list", "view", "console", "kill"},
+	"mirror":   {"list", "view", "console", "kill", "share", "unshare"},
+	"whoami":   {"-v", "--caps", "--json"},
 	"cmdgen":   {"docker", "kubectl", "aws"},
 	"set":      {"-e", "+e", "-u", "+u", "-x", "+x", "-o", "+o"},
 	"help":     {"list", "search", "categories", "examples"},

@@ -5,12 +5,15 @@ package sys
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // respondWith reads one authorize request and answers with build(req).
@@ -129,7 +132,8 @@ func TestMonitorArgsDigestSeparatesArguments(t *testing.T) {
 	if MonitorArgsDigest([]string{"ab", "c"}) == MonitorArgsDigest([]string{"a", "bc"}) {
 		t.Fatal("argument boundaries are not bound")
 	}
-	if MonitorArgsDigest([]string{"ls"}) != MonitorArgsDigest([]string{"ls"}) {
+	first, second := MonitorArgsDigest([]string{"ls"}), MonitorArgsDigest([]string{"ls"})
+	if first != second {
 		t.Fatal("digest is not stable")
 	}
 }
@@ -154,7 +158,10 @@ func TestMonitorPairCloseUnblocksReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	select {
-	case <-done:
+	case readErr := <-done:
+		if readErr == nil {
+			t.Fatal("reader returned no error after Close")
+		}
 		if d := time.Since(start); d > 100*time.Millisecond {
 			t.Fatalf("reader released after %v", d)
 		}
@@ -187,44 +194,87 @@ func TestMonitorPairSupportsReadDeadline(t *testing.T) {
 	}
 }
 
-const monitorFDHelperEnv = "ADSSH_TEST_MONITOR_FD_HELPER"
+const (
+	monitorFDHelperEnv = "ADSSH_TEST_MONITOR_FD_HELPER"
+	monitorFDInodeEnv  = "ADSSH_TEST_MONITOR_FD_INODE"
+)
+
+// fdInode returns "dev:ino" of an open descriptor.
+func fdInode(fd int) (string, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d:%d", st.Dev, st.Ino), nil
+}
 
 // TestHelperMonitorFDCloexec runs only as a child of
-// TestOpenMonitorFDSetsCloexec. It takes fd 3 the way the session process
-// does and reports whether a command it starts can still see fd 3.
+// TestOpenMonitorFDSetsCloexec, in two stages. Stage "session" takes fd 3
+// the way the session process does and re-execs this binary with no extra
+// files. Stage "probe" is that command: it checks fd 3 with fstat and prints
+// exactly one token. fd3=open means fd 3 is the monitor socket (same dev and
+// inode); fd3=closed means fd 3 is closed or is some other descriptor the Go
+// runtime opened. A shell probe is not used: in dash a failed redirection on
+// the special builtin ":" exits the shell, which printed nothing on Linux.
 func TestHelperMonitorFDCloexec(t *testing.T) {
-	if os.Getenv(monitorFDHelperEnv) != "1" {
+	switch os.Getenv(monitorFDHelperEnv) {
+	case "session":
+		f, err := OpenMonitorFD(3)
+		if err != nil {
+			os.Stdout.WriteString("open-error\n")
+			os.Exit(2)
+		}
+		defer f.Close()
+		ino, err := fdInode(3)
+		if err != nil {
+			os.Stdout.WriteString("stat-error\n")
+			os.Exit(2)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHelperMonitorFDCloexec$")
+		cmd.Env = append(os.Environ(), monitorFDHelperEnv+"=probe", monitorFDInodeEnv+"="+ino)
+		cmd.Stderr = os.Stderr
+		out, err := cmd.Output()
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "probe-error:%v\n", err)
+			os.Exit(2)
+		}
+		os.Stdout.Write(out)
+		os.Exit(0)
+	case "probe":
+		ino, err := fdInode(3)
+		if err == nil && ino == os.Getenv(monitorFDInodeEnv) {
+			os.Stdout.WriteString("fd3=open\n")
+		} else {
+			os.Stdout.WriteString("fd3=closed\n")
+		}
+		os.Exit(0)
+	default:
 		t.Skip("helper process")
 	}
-	f, err := OpenMonitorFD(3)
-	if err != nil {
-		os.Stdout.WriteString("open-error\n")
-		os.Exit(2)
-	}
-	defer f.Close()
-	out, _ := exec.Command("/bin/sh", "-c", "{ : >&3; } 2>/dev/null && echo fd3=open || echo fd3=closed").Output()
-	os.Stdout.Write(out)
-	os.Exit(0)
 }
 
 func TestOpenMonitorFDSetsCloexec(t *testing.T) {
-	if _, err := os.Stat("/bin/sh"); err != nil {
-		t.Skip("/bin/sh is not available")
-	}
 	parent, child, err := newMonitorPair()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = parent.Close() })
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperMonitorFDCloexec$")
-	cmd.Env = append(os.Environ(), monitorFDHelperEnv+"=1")
+	cmd.Env = append(os.Environ(), monitorFDHelperEnv+"=session")
 	cmd.ExtraFiles = []*os.File{child}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	_ = child.Close()
+	got := strings.TrimSpace(string(out))
 	if err != nil {
-		t.Fatalf("helper: %v\n%s", err, out)
+		t.Fatalf("helper: %v\nstdout: %q\nstderr: %s", err, got, stderr.String())
 	}
-	if !strings.Contains(string(out), "fd3=closed") {
-		t.Fatalf("a command run by the session can use the monitor socket: %q", out)
+	switch got {
+	case "fd3=closed":
+	case "fd3=open":
+		t.Fatal("a command run by the session can use the monitor socket")
+	default:
+		t.Fatalf("helper printed %q, want fd3=closed or fd3=open\nstderr: %s", got, stderr.String())
 	}
 }

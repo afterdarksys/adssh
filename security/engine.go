@@ -90,6 +90,10 @@ type Engine struct {
 	// The empty key is retained for legacy single-session package APIs.
 	cmMu      sync.Mutex
 	cmTickets map[string]cmTicketState
+	// cmDefaultPatterns is ADSSH_CM_PATTERNS, read once when the engine is
+	// built; cmPatterns holds what each session added with cm require.
+	cmDefaultPatterns []string
+	cmPatterns        map[string][]string
 
 	// four-eyes base directory ("" => derive from HOME via FourEyesDir())
 	fourEyesDir string
@@ -203,6 +207,8 @@ func newDefaultEngine() *Engine {
 		cmTickets:   map[string]cmTicketState{},
 		lastDenials: map[string]CommandExplanation{},
 		identities:  map[string]sessionIdentity{},
+
+		cmDefaultPatterns: parseCMPatterns(os.Getenv("ADSSH_CM_PATTERNS")),
 	}
 }
 
@@ -243,6 +249,8 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		cmTickets:   map[string]cmTicketState{},
 		lastDenials: map[string]CommandExplanation{},
 		identities:  map[string]sessionIdentity{},
+
+		cmDefaultPatterns: parseCMPatterns(os.Getenv("ADSSH_CM_PATTERNS")),
 	}
 
 	// Seed the vbin registry from the package default (built by init()).

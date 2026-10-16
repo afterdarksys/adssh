@@ -49,6 +49,21 @@ func printCommandExplanation(out io.Writer, explanation CommandExplanation) {
 		fmt.Fprintf(out, " %s", strings.Join(explanation.Args, " "))
 	}
 	fmt.Fprintln(out)
+	if explanation.Rule != "" {
+		fmt.Fprintf(out, "  %-20s %s\n", "rule", explanation.Rule)
+	}
+	if explanation.RequiredRole != "" {
+		fmt.Fprintf(out, "  %-20s %s\n", "required_role", explanation.RequiredRole)
+	}
+	if explanation.RequiredEntitlement != "" {
+		fmt.Fprintf(out, "  %-20s %s\n", "required_entitlement", explanation.RequiredEntitlement)
+	}
+	if len(explanation.HeldEntitlements) > 0 {
+		fmt.Fprintf(out, "  %-20s %s\n", "entitlements held", strings.Join(explanation.HeldEntitlements, ", "))
+	}
+	if len(explanation.NeededEntitlements) > 0 {
+		fmt.Fprintf(out, "  %-20s %s\n", "entitlements needed", strings.Join(explanation.NeededEntitlements, ", "))
+	}
 	for _, stage := range explanation.Stages {
 		fmt.Fprintf(out, "  %-20s %-18s", stage.Name, stage.Status)
 		if stage.Reason != "" {

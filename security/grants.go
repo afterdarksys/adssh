@@ -3,11 +3,18 @@ package security
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/afterdarksys/adssh/internal/sys"
+	"mvdan.cc/sh/v3/interp"
 )
 
 // grant — temporary role escalation
+//
+// Threats: request and drop change the session's principals under the
+// session lock. A session whose identity is bound on the engine (an SSH
+// login) keeps its bound groups for policy; grant does not add to them.
+// Over an SSH Run only drop is accepted (sshListenerRuns).
 
 type grantBinary struct{}
 
@@ -39,33 +46,32 @@ func (grantBinary) Run(ctx context.Context, args []string) error {
 
 	switch action {
 	case "request":
-		for _, p := range session.Principals {
-			if p == role {
-				fmt.Printf("grant: role '%s' is already active\n", role)
-				return nil
-			}
+		if slices.Contains(session.PrincipalList(), role) {
+			fmt.Fprintf(interp.HandlerCtx(ctx).Stdout, "grant: role '%s' is already active\n", role)
+			return nil
 		}
-		session.Principals = append(session.Principals, role)
-		LogCommand("GRANT", fmt.Sprintf("User %s requested and assumed role %s", session.User, role))
-		fmt.Printf("grant: successfully assumed role '%s'\n", role)
+		// Record before the change; a failed write leaves the role unassumed.
+		if err := engineFromContext(ctx).LogCommand("GRANT", fmt.Sprintf("User %s requested and assumed role %s", session.User, role)); err != nil {
+			return fmt.Errorf("grant: audit: %w", err)
+		}
+		if !session.AddPrincipal(role) {
+			fmt.Fprintf(interp.HandlerCtx(ctx).Stdout, "grant: role '%s' is already active\n", role)
+			return nil
+		}
+		fmt.Fprintf(interp.HandlerCtx(ctx).Stdout, "grant: successfully assumed role '%s'\n", role)
 		return nil
 
 	case "drop":
-		found := false
-		newPrincipals := session.Principals[:0]
-		for _, p := range session.Principals {
-			if p == role {
-				found = true
-				continue
-			}
-			newPrincipals = append(newPrincipals, p)
-		}
-		if !found {
+		if !slices.Contains(session.PrincipalList(), role) {
 			return fmt.Errorf("grant: you do not currently hold role '%s'", role)
 		}
-		session.Principals = newPrincipals
-		LogCommand("GRANT", fmt.Sprintf("User %s dropped role %s", session.User, role))
-		fmt.Printf("grant: successfully dropped role '%s'\n", role)
+		if err := engineFromContext(ctx).LogCommand("GRANT", fmt.Sprintf("User %s dropped role %s", session.User, role)); err != nil {
+			return fmt.Errorf("grant: audit: %w", err)
+		}
+		if !session.RemovePrincipal(role) {
+			return fmt.Errorf("grant: you do not currently hold role '%s'", role)
+		}
+		fmt.Fprintf(interp.HandlerCtx(ctx).Stdout, "grant: successfully dropped role '%s'\n", role)
 		return nil
 
 	default:

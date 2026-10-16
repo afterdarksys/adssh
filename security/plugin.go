@@ -955,6 +955,20 @@ func (pluginBinary) Run(ctx context.Context, args []string) error {
 	return printLoaded(ctx, loaded)
 }
 
+var errPluginNoShell = errors.New("plugin: no shell context")
+
+// pluginHandlerCtx returns the shell handler context of ctx. Run accepts a
+// nil or bare context, and interp.HandlerCtx panics on one, so a missing
+// handler context is reported instead.
+func pluginHandlerCtx(ctx context.Context) (hc interp.HandlerContext, ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return interp.HandlerCtx(ctx), true
+}
+
 func runPluginList(ctx context.Context) error {
 	root, err := openPluginRoot()
 	if err != nil {
@@ -977,7 +991,10 @@ func runPluginList(ctx context.Context) error {
 	if text == "" {
 		return nil
 	}
-	hc := interp.HandlerCtx(ctx)
+	hc, ok := pluginHandlerCtx(ctx)
+	if !ok {
+		return errPluginNoShell
+	}
 	out := hc.Stdout
 	if out == nil {
 		out = io.Discard
@@ -1023,7 +1040,10 @@ func printLoaded(ctx context.Context, names []string) error {
 			return err
 		}
 	}
-	hc := interp.HandlerCtx(ctx)
+	hc, ok := pluginHandlerCtx(ctx)
+	if !ok {
+		return errPluginNoShell
+	}
 	out := hc.Stdout
 	if out == nil {
 		out = io.Discard

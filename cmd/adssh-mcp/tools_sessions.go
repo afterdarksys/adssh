@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/security"
@@ -15,8 +16,10 @@ import (
 // Calls sys.ListSessions() which reads from the global session registry.
 func handleListSessions() server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if err := security.LogCommand("MCP:list_sessions", ""); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("audit log failed: %v", err)), nil
+		}
 		ids := sys.ListSessions()
-		security.LogCommand("MCP:list_sessions", "")
 
 		data, err := json.Marshal(ids)
 		if err != nil {

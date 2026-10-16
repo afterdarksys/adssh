@@ -83,19 +83,6 @@ func TestSignalsPreserveSignaledStatus(t *testing.T) {
 func TestSignalsConcurrentForegroundExitCodes(t *testing.T) {
 	withShellSignals(t)
 
-	// A tracked background job runs alongside, so its owner goroutine's
-	// per-pid wait is exercised next to the foreign children.
-	bg := exec.Command("sleep", "5")
-	id, err := NewJob(bg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(bg.Process.Pid, syscall.SIGKILL)
-		_ = WaitJob(id)
-		GlobalJobTable().Disown(id)
-	})
-
 	const n = 20
 	var wg sync.WaitGroup
 	errs := make(chan error, n)

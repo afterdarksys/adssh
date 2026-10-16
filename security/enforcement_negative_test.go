@@ -110,7 +110,7 @@ func TestGateNeg_PolicyDenyBeatsCustomCommand(t *testing.T) {
 // A.3: deny-all policy + shell keywords/builtins the interceptor implements.
 //
 // FIXED IN THIS COMMIT (finding #1): mvdan.cc/sh implements alias/set/unset/read/
-// type/dirs/pushd/popd/disown/unalias as NATIVE builtins routed through
+// type/dirs/pushd/popd/unalias as NATIVE builtins routed through
 // Runner.call, and export/readonly/declare/local/typeset/nameref as DeclClause
 // KEYWORDS routed through neither the call nor the exec handler. Previously
 // BashInterceptor was wired only as an exec handler, so ALL of these bypassed the
@@ -209,7 +209,9 @@ func TestAuditNeg_PolicyDecisionsAreChained(t *testing.T) {
 
 	dir := t.TempDir()
 	ledger := filepath.Join(dir, "ledger.jsonl")
-	InitChain(ledger, filepath.Join(dir, "key"), "audit-neg")
+	if err := InitChain(ledger, filepath.Join(dir, "key"), "audit-neg"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Denied run.
 	denyRego := `package adssh.authz

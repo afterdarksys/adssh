@@ -31,6 +31,11 @@ func handleAuditLog(auditLogPath string) server.ToolHandlerFunc {
 		// Parse optional filter param
 		filter := req.GetString("filter", "")
 
+		// Record the read before it happens; a failed write discloses nothing.
+		if err := security.LogCommand("MCP:audit_log", fmt.Sprintf("limit=%d filter=%q", limit, filter)); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("audit log failed: %v", err)), nil
+		}
+
 		file, err := os.Open(auditLogPath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -68,7 +73,6 @@ func handleAuditLog(auditLogPath string) server.ToolHandlerFunc {
 			lines = ordered
 		}
 
-		security.LogCommand("MCP:audit_log", fmt.Sprintf("limit=%d filter=%q", limit, filter))
 		return mcp.NewToolResultText(strings.Join(lines, "\n")), nil
 	}
 }

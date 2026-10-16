@@ -2,8 +2,10 @@ package security
 
 import (
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"os"
+	"sort"
+
+	"gopkg.in/yaml.v3"
 )
 
 type EntitlementsConfig struct {
@@ -73,6 +75,72 @@ func (e *Engine) IsAuthorized(user string, principals []string, command string) 
 	}
 
 	return false
+}
+
+// EntitlementsHeld returns the entitlement entries that apply to user and
+// principals, as "user:<name>" and "group:<name>", sorted. It is empty when
+// no entitlements file is loaded.
+func (e *Engine) EntitlementsHeld(user string, principals []string) []string {
+	e.entitlementsMu.RLock()
+	defer e.entitlementsMu.RUnlock()
+	seen := map[string]bool{}
+	if _, ok := e.entitlements.Users[user]; ok && user != "" {
+		seen["user:"+user] = true
+	}
+	for _, principal := range principals {
+		if _, ok := e.entitlements.Groups[principal]; ok {
+			seen["group:"+principal] = true
+		}
+	}
+	return sortedKeys(seen)
+}
+
+// EntitlementsGranting returns the entitlement entries whose allow-list
+// names command or "*", in the same form and order as EntitlementsHeld.
+func (e *Engine) EntitlementsGranting(command string) []string {
+	e.entitlementsMu.RLock()
+	defer e.entitlementsMu.RUnlock()
+	seen := map[string]bool{}
+	for kind, entries := range map[string]map[string][]string{"user:": e.entitlements.Users, "group:": e.entitlements.Groups} {
+		for name, cmds := range entries {
+			for _, cmd := range cmds {
+				if cmd == command || cmd == "*" {
+					seen[kind+name] = true
+					break
+				}
+			}
+		}
+	}
+	return sortedKeys(seen)
+}
+
+// EntitledCommands returns the commands the entries held by user and
+// principals list, sorted. "*" is returned as is.
+func (e *Engine) EntitledCommands(user string, principals []string) []string {
+	e.entitlementsMu.RLock()
+	defer e.entitlementsMu.RUnlock()
+	seen := map[string]bool{}
+	add := func(cmds []string) {
+		for _, cmd := range cmds {
+			seen[cmd] = true
+		}
+	}
+	if user != "" {
+		add(e.entitlements.Users[user])
+	}
+	for _, principal := range principals {
+		add(e.entitlements.Groups[principal])
+	}
+	return sortedKeys(seen)
+}
+
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // GetMenuForUser checks if a specific menu YAML file is assigned to the user or their groups.

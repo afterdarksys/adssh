@@ -11,7 +11,7 @@ func (e *Engine) CMSessionCheck(cmd string, args []string) error {
 
 // CMSessionCheckForSession validates only the ticket associated with sessionID.
 func (e *Engine) CMSessionCheckForSession(sessionID, cmd string, args []string) error {
-	if !CMRequiredForCommand(cmd) {
+	if !e.CMRequiredForSession(sessionID, cmd) {
 		return nil
 	}
 	ticket, _ := e.GetActiveCMTicketForSession(sessionID)

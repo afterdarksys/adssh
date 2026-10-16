@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -32,10 +33,16 @@ import (
 // resets them for wrapped commands, and a command run with every session
 // limit at zero keeps them ignored. The environment and working directory
 // are the listener's allowlist for the target user. After the gate is
-// installed the process is marked: every local policy evaluation denies, and
-// vbins that change engine or session state (elevate, cm, lease, grant,
-// identity, 4eyes, gateway, ...) or evaluate policy locally (why, ??) are
-// refused before dispatch and recorded by the listener as denied.
+// installed the process is marked: every local policy evaluation denies.
+// Vbins that change engine or session state or explain policy (elevate, cm,
+// grant, 4eyes, why, ??, ...) are sent to the listener as monitor Run frames;
+// the listener gates and runs them under the session it bound, so this
+// process cannot pick the identity they run as. lease, repo, plugin load,
+// mirror view and console, and path-taking subcommands stay refused and are
+// recorded by the listener as denied (see security/ssh_monitor.go). SIGINT
+// during an Authorize or Run sends Cancel, which ends a pending four-eyes
+// wait in the listener. --plugin-dir is the listener's configured plugin
+// directory, so plugin list shows it; plugins are not loaded here.
 
 type sshSessionOpts struct {
 	sessionID  string
@@ -44,6 +51,7 @@ type sshSessionOpts struct {
 	history    string
 	profile    string
 	rc         string
+	pluginDir  string
 	principals []string
 	restricted bool
 }
@@ -71,6 +79,7 @@ func runSSHSession(args []string) int {
 	security.SetRemoteGate(func(_ bool, argv []string, _ string) error {
 		return client.Authorize(argv)
 	})
+	security.SetRemoteRun(client.Run)
 	if !security.RemoteGateEnabled() {
 		fmt.Fprintf(os.Stderr, "adssh: ssh session: monitor gate is not installed\n")
 		return 1
@@ -83,12 +92,16 @@ func runSSHSession(args []string) int {
 		return 1
 	}
 	defer sys.UnregisterSession(opts.sessionID)
+	if opts.pluginDir != "" {
+		_ = os.Setenv("ADSSH_PLUGIN_DIR", opts.pluginDir)
+	}
 	if binaryPath, err := os.Executable(); err == nil {
 		_ = os.Setenv("SHELL", binaryPath)
 	}
 	sys.SetupSignals()
-	// SIGINT also cancels the running command's context.
-	installSessionSignals(overlay)
+	// SIGINT also cancels the running command's context and the in-flight
+	// monitor request.
+	installSessionSignals(overlay, client.Cancel)
 	globals := starlark.StringDict{}
 	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{
 		Env:        globals,
@@ -178,6 +191,15 @@ func parseSSHSessionArgs(args []string) (sshSessionOpts, error) {
 			}
 			opts.rc = v
 			gotRC = true
+		case "--plugin-dir":
+			v, err := nextSessionValue(args, &i)
+			if err != nil {
+				return sshSessionOpts{}, err
+			}
+			if !filepath.IsAbs(v) {
+				return sshSessionOpts{}, errors.New("adssh: ssh session: invalid value")
+			}
+			opts.pluginDir = filepath.Clean(v)
 		case "--principal":
 			v, err := nextSessionValue(args, &i)
 			if err != nil {
@@ -210,14 +232,17 @@ func nextSessionValue(args []string, i *int) (string, error) {
 // A caught signal is reset to the default by execve and an ignored one is
 // not, so commands this process runs die on Ctrl-C and Ctrl-\ while this
 // process survives (SetupSignals catches them too). SIGINT also cancels the
-// running command's context.
-func installSessionSignals(overlay *sys.Session) {
+// running command's context and calls cancelMonitor, when set.
+func installSessionSignals(overlay *sys.Session, cancelMonitor func()) {
 	ch := make(chan os.Signal, 4)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGQUIT)
 	go func() {
 		for sig := range ch {
 			if sig == syscall.SIGINT {
 				overlay.CancelCommand()
+				if cancelMonitor != nil {
+					cancelMonitor()
+				}
 			}
 		}
 	}()

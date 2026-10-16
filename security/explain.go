@@ -12,15 +12,24 @@ type ExplanationStage struct {
 }
 
 type CommandExplanation struct {
-	Outcome      string             `json:"outcome"`
-	User         string             `json:"user,omitempty"`
-	Groups       []string           `json:"groups,omitempty"`
-	SessionID    string             `json:"session_id,omitempty"`
-	RequiredRole string             `json:"required_role,omitempty"`
-	Command      string             `json:"command"`
-	Args         []string           `json:"args,omitempty"`
-	Stages       []ExplanationStage `json:"stages"`
-	NextSteps    []string           `json:"next_steps,omitempty"`
+	Outcome      string   `json:"outcome"`
+	User         string   `json:"user,omitempty"`
+	Groups       []string `json:"groups,omitempty"`
+	SessionID    string   `json:"session_id,omitempty"`
+	RequiredRole string   `json:"required_role,omitempty"`
+	// Rule and RequiredEntitlement come from the policy decision.
+	Rule                string `json:"rule,omitempty"`
+	RequiredEntitlement string `json:"required_entitlement,omitempty"`
+	// HeldEntitlements are the RBAC entries this session holds. Needed are
+	// the entitlements that would allow the command when policy or RBAC
+	// denied it: the policy's required_entitlement, then the RBAC entries
+	// that list the command.
+	HeldEntitlements   []string           `json:"held_entitlements,omitempty"`
+	NeededEntitlements []string           `json:"needed_entitlements,omitempty"`
+	Command            string             `json:"command"`
+	Args               []string           `json:"args,omitempty"`
+	Stages             []ExplanationStage `json:"stages"`
+	NextSteps          []string           `json:"next_steps,omitempty"`
 }
 
 // ExplainCommand evaluates every governance stage without executing the
@@ -30,6 +39,9 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 		return CommandExplanation{}, fmt.Errorf("why: command is required")
 	}
 	pctx := e.buildPolicyContext(args[0], args[1:], sessionID)
+	// The gate classifies capabilities before policy; do the same so a
+	// capability-scoped policy explains what it would decide.
+	pctx.Capabilities = ClassifyCapabilities(args[0])
 	explanation := CommandExplanation{
 		Outcome:   "allowed",
 		User:      pctx.User,
@@ -46,14 +58,18 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 	if pctx.IdentityUnknown {
 		deny("identity", "session identity unknown")
 	}
-	allowed, reason, role, err := e.evaluatePolicy(pctx)
-	if role != "" {
-		explanation.RequiredRole = role
-	}
+	decision, err := e.EvaluatePolicyDecision(pctx)
+	explanation.RequiredRole = decision.RequiredRole
+	explanation.Rule = decision.Rule
+	explanation.RequiredEntitlement = decision.RequiredEntitlement
+	reason := decision.DenyReason
 	switch {
 	case err != nil:
 		deny("policy", err.Error())
-	case !allowed:
+	case !decision.Allowed:
+		if decision.RequiredEntitlement != "" {
+			explanation.NeededEntitlements = append(explanation.NeededEntitlements, decision.RequiredEntitlement)
+		}
 		if reason == "" {
 			reason = "policy returned allow=false"
 		}
@@ -64,13 +80,21 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 
 	if !e.hasEntitlements() {
 		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "entitlements", Status: "not_configured"})
-	} else if e.IsAuthorized(pctx.User, pctx.Groups, args[0]) {
-		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "entitlements", Status: "allowed"})
 	} else {
-		deny("entitlements", fmt.Sprintf("%q is not in the effective command allow-list", args[0]))
+		explanation.HeldEntitlements = e.EntitlementsHeld(pctx.User, pctx.Groups)
+		if e.IsAuthorized(pctx.User, pctx.Groups, args[0]) {
+			explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "entitlements", Status: "allowed"})
+		} else {
+			explanation.NeededEntitlements = append(explanation.NeededEntitlements, e.EntitlementsGranting(args[0])...)
+			deny("entitlements", fmt.Sprintf("%q is not in the effective command allow-list", args[0]))
+		}
+	}
+	explanation.NeededEntitlements = compactStrings(explanation.NeededEntitlements)
+	if len(explanation.NeededEntitlements) == 0 {
+		explanation.NeededEntitlements = nil
 	}
 
-	if !CMRequiredForCommand(args[0]) {
+	if !e.CMRequiredForSession(sessionID, args[0]) {
 		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "change_management", Status: "not_required"})
 	} else if ticket, id := e.GetActiveCMTicketForSession(sessionID); ticket == nil {
 		if CMStrictMode() {
@@ -122,6 +146,9 @@ func suggestNextSteps(explanation CommandExplanation) []string {
 					role = "<role>"
 				}
 				steps = append(steps, fmt.Sprintf(`request the required role with: elevate request %s --for 10m --reason "<ticket/reason>"`, role))
+				if explanation.RequiredEntitlement != "" {
+					steps = append(steps, fmt.Sprintf("or ask an administrator for the %s entitlement", explanation.RequiredEntitlement))
+				}
 			}
 		case "entitlements":
 			if stage.Status == "denied" {

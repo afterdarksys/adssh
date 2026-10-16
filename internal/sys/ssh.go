@@ -85,7 +85,7 @@ func loadOrGenerateHostKey(keyPath string) (ssh.Signer, error) {
 }
 
 type authorizedKeySet struct {
-	// userKeys maps a marshalled raw key to the login names it may use.
+	// userKeys maps a marshaled raw key to the login names it may use.
 	userKeys    map[string][]string
 	authorities map[string]bool
 }
@@ -175,16 +175,16 @@ func loadAuthorizedKeys(authKeysPath string) (authorizedKeySet, error) {
 				return keys, fmt.Errorf("unsupported authorized_keys option %q on line %d", option, lineNumber)
 			}
 		}
-		marshalled := string(pubKey.Marshal())
+		marshaled := string(pubKey.Marshal())
 		switch {
 		case isAuthority && names != nil:
 			return keys, fmt.Errorf("%s line %d: user= is not valid on a cert-authority line; certificates are bound by their principals", authKeysPath, lineNumber)
 		case isAuthority:
-			keys.authorities[marshalled] = true
+			keys.authorities[marshaled] = true
 		case names == nil:
 			return keys, fmt.Errorf("%s line %d: key has no user= option; bind it to its login names, e.g. user=\"alice\" %s", authKeysPath, lineNumber, pubKey.Type()+" AAAA...")
 		default:
-			keys.userKeys[marshalled] = append(keys.userKeys[marshalled], names...)
+			keys.userKeys[marshaled] = append(keys.userKeys[marshaled], names...)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -769,7 +769,7 @@ func ptyTerm(payload []byte) string {
 		return ""
 	}
 	for _, r := range req.Term {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' || r == '+') {
+		if ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' || r == '+'; !ok {
 			return ""
 		}
 	}

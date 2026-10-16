@@ -136,7 +136,7 @@ func TestAuditPostPrivateHostNeedsOverride(t *testing.T) {
 		t.Fatal("POST to an unanswered address succeeded")
 	}
 	if strings.Contains(err.Error(), "private address") || strings.Contains(err.Error(), "did not resolve") {
-		t.Fatalf("override not honoured: %v", err)
+		t.Fatalf("override not honored: %v", err)
 	}
 }
 

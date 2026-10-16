@@ -68,7 +68,7 @@ func TestGateNeg_CMStrict_NoTicket_BlocksThroughInterceptor(t *testing.T) {
 	t.Cleanup(ClearActiveCMTicket)
 
 	t.Setenv("ADSSH_CM_STRICT", "1")
-	t.Setenv("ADSSH_CM_PATTERNS", "negcmstrict*")
+	setDefaultCMPatterns(t, "negcmstrict*")
 
 	_, _, runErr, rec := runShell(t, false, starlark.StringDict{}, "negcmstrict-cmd")
 	if runErr == nil || !strings.Contains(runErr.Error(), "requires an active change ticket") {
@@ -86,7 +86,7 @@ func TestGateNeg_CMInvalidTicket_BlocksThroughInterceptor(t *testing.T) {
 	t.Cleanup(resetPolicy)
 	t.Cleanup(ClearActiveCMTicket)
 
-	t.Setenv("ADSSH_CM_PATTERNS", "negcmticket*")
+	setDefaultCMPatterns(t, "negcmticket*")
 
 	// Non-approved (open) ticket => blocked regardless of strict mode.
 	SetActiveCMTicket(&CMTicket{ID: "CHG-OPEN", State: "open"}, "CHG-OPEN")

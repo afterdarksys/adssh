@@ -1,6 +1,7 @@
 package security
 
 import (
+	"context"
 	"strings"
 )
 
@@ -14,12 +15,18 @@ func (e *Engine) CheckFourEyes(cmd string, args []string, globals interface{}) e
 // CheckFourEyesForSession attributes any pending approval request to the
 // authenticated session rather than the process OS account.
 func (e *Engine) CheckFourEyesForSession(cmd string, args []string, sessionID string) error {
+	return e.CheckFourEyesForSessionContext(context.Background(), cmd, args, sessionID)
+}
+
+// CheckFourEyesForSessionContext is CheckFourEyesForSession whose approval
+// wait ends when ctx is done.
+func (e *Engine) CheckFourEyesForSessionContext(ctx context.Context, cmd string, args []string, sessionID string) error {
 	fullCmd := strings.Join(args, " ")
 	rule, matched := e.MatchesFourEyes(fullCmd)
 	if !matched {
 		return nil
 	}
-	return e.RequestApprovalForSession(fullCmd, *rule, sessionID)
+	return e.RequestApprovalForSessionContext(ctx, fullCmd, *rule, sessionID)
 }
 
 // CheckFourEyes checks whether cmd+args requires dual approval.

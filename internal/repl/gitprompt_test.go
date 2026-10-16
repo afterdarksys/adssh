@@ -221,7 +221,7 @@ func TestGitPromptSanitisesBranchName(t *testing.T) {
 	writeHead(t, filepath.Join(repo, ".git"), hostile)
 	got := gitPromptSegment(repo)
 	if got != "main[31mxyz" {
-		t.Fatalf("sanitised %q", got)
+		t.Fatalf("sanitized %q", got)
 	}
 	long := "ref: refs/heads/" + strings.Repeat("\u00e9", 100) + "\n"
 	writeHead(t, filepath.Join(repo, ".git"), long)

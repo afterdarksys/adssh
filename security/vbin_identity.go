@@ -576,13 +576,15 @@ func identitySSHCAInit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_SSH_CA_INIT: path=%s", out)); err != nil {
+		return fmt.Errorf("identity ssh-ca init: audit: %w", err)
+	}
 	if err := os.WriteFile(out, key.PrivatePEM, 0o600); err != nil {
 		return fmt.Errorf("identity ssh-ca init: write private key: %w", err)
 	}
 	if err := os.WriteFile(out+".pub", ssh.MarshalAuthorizedKey(key.Public), 0o644); err != nil {
 		return fmt.Errorf("identity ssh-ca init: write public key: %w", err)
 	}
-	engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_SSH_CA_INIT: path=%s", out))
 	fmt.Fprintf(hc.Stdout, "identity: ssh ca private=%s public=%s.pub\n", out, out)
 	return nil
 }
@@ -634,11 +636,13 @@ func identitySSHCAIssue(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_SSH_CERT_ISSUE: out=%s principals=%s ttl=%s",
+		opts.OutPath, strings.Join(opts.Principals, ","), opts.TTL)); err != nil {
+		return fmt.Errorf("identity ssh-ca issue: audit: %w", err)
+	}
 	if err := os.WriteFile(opts.OutPath, ssh.MarshalAuthorizedKey(cert), 0o644); err != nil {
 		return fmt.Errorf("identity ssh-ca issue: write certificate: %w", err)
 	}
-	engineFromContext(ctx).LogEvent(fmt.Sprintf("IDENTITY_SSH_CERT_ISSUE: out=%s principals=%s ttl=%s",
-		opts.OutPath, strings.Join(opts.Principals, ","), opts.TTL))
 	fmt.Fprintf(hc.Stdout, "identity: ssh cert=%s principals=%s valid_for=%s\n",
 		opts.OutPath, strings.Join(opts.Principals, ","), opts.TTL)
 	return nil

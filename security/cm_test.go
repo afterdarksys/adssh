@@ -38,7 +38,7 @@ func TestIsTicketValid(t *testing.T) {
 }
 
 func TestCMRequiredForCommand(t *testing.T) {
-	t.Setenv("ADSSH_CM_PATTERNS", "rm,kubectl*")
+	setDefaultCMPatterns(t, "rm,kubectl*")
 
 	cases := []struct {
 		cmd  string
@@ -55,7 +55,7 @@ func TestCMRequiredForCommand(t *testing.T) {
 		}
 	}
 
-	t.Setenv("ADSSH_CM_PATTERNS", "")
+	setDefaultCMPatterns(t, "")
 	if CMRequiredForCommand("rm") {
 		t.Error("expected CMRequiredForCommand to always return false with empty ADSSH_CM_PATTERNS")
 	}
@@ -65,7 +65,7 @@ func TestCMSessionCheck_StrictBlocks(t *testing.T) {
 	ClearActiveCMTicket()
 	t.Cleanup(ClearActiveCMTicket)
 
-	t.Setenv("ADSSH_CM_PATTERNS", "rm,kubectl*")
+	setDefaultCMPatterns(t, "rm,kubectl*")
 
 	// Strict mode, no active ticket -> blocked.
 	t.Setenv("ADSSH_CM_STRICT", "1")

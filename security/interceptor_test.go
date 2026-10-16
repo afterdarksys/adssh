@@ -105,7 +105,9 @@ deny_reason = "nope" { input.command == "dangerous" }`)); err != nil {
 	}
 	dir := t.TempDir()
 	ledger := filepath.Join(dir, "audit.chain")
-	InitChain(ledger, filepath.Join(dir, "audit.key"), "background-test")
+	if err := InitChain(ledger, filepath.Join(dir, "audit.key"), "background-test"); err != nil {
+		t.Fatal(err)
+	}
 
 	_, _, _, rec := runShell(t, false, starlark.StringDict{}, "dangerous --arg &")
 	deadline := time.Now().Add(2 * time.Second)
@@ -151,7 +153,9 @@ allow = true { input.user == "alice"; input.groups[_] == "ops" }
 	}
 
 	const sessionID = "identity-policy-test"
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice", Principals: []string{"ops"}})
+	if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice", Principals: []string{"ops"}}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	globals := starlark.StringDict{"SESSION_ID": starlark.String(sessionID)}
 
@@ -176,7 +180,9 @@ func TestInterceptor_EnforcesConfiguredEntitlements(t *testing.T) {
 	}
 
 	const sessionID = "identity-rbac-test"
-	sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"})
+	if err := sys.RegisterSession(&sys.Session{ID: sessionID, User: "alice"}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(sessionID) })
 	globals := starlark.StringDict{"SESSION_ID": starlark.String(sessionID)}
 	handler := eng.callHandler(&SessionState{Globals: globals})

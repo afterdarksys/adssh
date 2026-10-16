@@ -8,6 +8,8 @@ func TestAdvancedVBinSubcommandCompletions(t *testing.T) {
 		"plugin":  {"list", "load", "reload"},
 		"from":    {"json", "jsonl", "csv"},
 		"to":      {"json", "jsonl", "csv", "table"},
+		"whoami":  {"-v", "--caps", "--json"},
+		"mirror":  {"share", "unshare"},
 	}
 	for command, expected := range wants {
 		actual := vbinSubcommands[command]
@@ -22,6 +24,18 @@ func TestAdvancedVBinSubcommandCompletions(t *testing.T) {
 			if !found {
 				t.Errorf("%s completions %v do not include %q", command, actual, wanted)
 			}
+			if command == "mirror" && !containsString(mirrorSubcmds, wanted) {
+				t.Errorf("mirror first-argument completions %v do not include %q", mirrorSubcmds, wanted)
+			}
 		}
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

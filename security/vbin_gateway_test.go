@@ -100,9 +100,18 @@ func TestGatewayStartProxiesTCPAndAuditsStop(t *testing.T) {
 	if !strings.Contains(string(chain), "GATEWAY_START") || !strings.Contains(string(chain), "GATEWAY_STOP") {
 		t.Fatalf("gateway events were not audited: %s", chain)
 	}
-	gatewayLog, err := os.ReadFile(filepath.Join(dir, "gateway_connections.jsonl"))
-	if err != nil {
-		t.Fatal(err)
+	// The proxy writes the record when the client's connection finishes,
+	// asynchronously to stop, so wait for it.
+	var gatewayLog []byte
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		gatewayLog, err = os.ReadFile(filepath.Join(dir, "gateway_connections.jsonl"))
+		if err == nil && len(bytes.TrimSpace(gatewayLog)) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("gateway connection record not written: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	var record GatewayConnectionRecord
 	if err := json.Unmarshal(bytes.TrimSpace(gatewayLog), &record); err != nil {

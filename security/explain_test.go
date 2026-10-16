@@ -16,7 +16,9 @@ authz := {"allow": false, "deny_reason": "production freeze"}
 	if err != nil {
 		t.Fatal(err)
 	}
-	sys.RegisterSession(&sys.Session{ID: "why-policy", User: "alice", Principals: []string{"ops"}})
+	if err := sys.RegisterSession(&sys.Session{ID: "why-policy", User: "alice", Principals: []string{"ops"}}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession("why-policy") })
 
 	explanation, err := eng.ExplainCommand("why-policy", []string{"deploy", "prod"})

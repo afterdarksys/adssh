@@ -176,7 +176,9 @@ func TestIdentityStatusOmitsTokenAndElevation(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := &sys.Session{ID: "mcp-status", User: "bound-agent"}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	session.ActivateElevation("ops", "ticket", time.Now().Add(time.Hour))
 	ctx := context.WithValue(context.Background(), mcpSecurityEngineContextKey{}, eng.Security())

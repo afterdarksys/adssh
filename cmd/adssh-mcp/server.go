@@ -13,6 +13,7 @@ import (
 
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
+	"github.com/afterdarksys/adssh/internal/risk"
 	"github.com/afterdarksys/adssh/security"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -134,7 +135,9 @@ func serveMCP(cfg config.AppConfig, eng *engine.Engine, globals starlark.StringD
 
 	registerGovernedAdminTools(s, toolMu, eng, agent)
 
-	eng.Security().LogEvent("adssh-mcp serving on stdio")
+	if err := eng.Security().LogEvent("adssh-mcp serving on stdio"); err != nil {
+		return fmt.Errorf("audit: %w", err)
+	}
 	return server.ServeStdio(s)
 }
 
@@ -270,28 +273,10 @@ func classifyAgentRisk(toolName string, req mcp.CallToolRequest) string {
 		return "mutable"
 	case toolName == "run_shell":
 		command, _ := req.GetArguments()["command"].(string)
-		if shellCommandLooksDestructive(command) {
-			return "destructive"
-		}
-		return "mutable"
+		return risk.ShellCommandClass(command)
 	default:
 		return "unknown"
 	}
-}
-
-func shellCommandLooksDestructive(command string) bool {
-	lower := strings.ToLower(command)
-	destructiveFragments := []string{
-		"rm -", "rm ", " rmdir ", "delete", "destroy", "terminate",
-		"kubectl delete", "terraform apply", "terraform destroy", "tofu apply", "tofu destroy",
-		"docker rm", "docker rmi", "git push --force", "chmod 777",
-	}
-	for _, fragment := range destructiveFragments {
-		if strings.Contains(lower, fragment) {
-			return true
-		}
-	}
-	return false
 }
 
 func policyArgs(req mcp.CallToolRequest) []string {

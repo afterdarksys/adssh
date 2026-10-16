@@ -47,14 +47,16 @@ func handleCloudQuery(globals starlark.StringDict) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(fmt.Sprintf("%s.%s is not callable", namespace, fn)), nil
 		}
 
+		// Record before calling; a failed write calls nothing.
+		if err := security.LogCommand("MCP:cloud_query", fmt.Sprintf("%s.%s", namespace, fn)); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("audit log failed: %v", err)), nil
+		}
+
 		thread := &starlark.Thread{Name: "mcp-cloud"}
 		result, err := starlark.Call(thread, callFn, nil, nil)
 		if err != nil {
-			security.LogCommand("MCP:cloud_query", fmt.Sprintf("%s.%s", namespace, fn))
 			return mcp.NewToolResultError(fmt.Sprintf("error calling %s.%s: %v", namespace, fn, err)), nil
 		}
-
-		security.LogCommand("MCP:cloud_query", fmt.Sprintf("%s.%s", namespace, fn))
 		return mcp.NewToolResultText(result.String()), nil
 	}
 }

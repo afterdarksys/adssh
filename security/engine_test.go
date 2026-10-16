@@ -85,9 +85,13 @@ func TestEngine_IsolatedChains(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		engA.AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("a-cmd%d", i)})
+		if err := engA.AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("a-cmd%d", i)}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	engB.AppendChain(ChainEntry{Type: "cmd", Command: "b-only"})
+	if err := engB.AppendChain(ChainEntry{Type: "cmd", Command: "b-only"}); err != nil {
+		t.Fatal(err)
+	}
 
 	linesA := readChainLines(t, engA.chainPath)
 	if len(linesA) != 5 {
@@ -213,7 +217,10 @@ func TestEngine_ConcurrentSessionsSmoke(t *testing.T) {
 					t.Errorf("EvaluatePolicy: %v", err)
 					return
 				}
-				eng.AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("g%d-c%d", g, i)})
+				if err := eng.AppendChain(ChainEntry{Type: "cmd", Command: fmt.Sprintf("g%d-c%d", g, i)}); err != nil {
+					t.Error(err)
+					return
+				}
 			}
 		}(g)
 	}

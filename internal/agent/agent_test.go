@@ -37,6 +37,7 @@ const testToken = "correct-horse-battery-staple"
 // seeds its registry from the default) can find it.
 func TestMain(m *testing.M) {
 	security.Register(fakeVBin{})
+	security.Register(countingVBin{})
 	os.Exit(m.Run())
 }
 

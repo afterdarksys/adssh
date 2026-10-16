@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/afterdarksys/adssh/internal/sys"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -22,7 +23,7 @@ func (gatewayBinary) Description() string {
 	return "Policy-audited TCP gateway for SSH and internal service access"
 }
 func (gatewayBinary) Usage() string {
-	return `gateway start --listen 127.0.0.1:0 --target host:port [--name label]
+	return `gateway start --listen 127.0.0.1:0 [--listen-any] --target host:port [--name label]
 gateway list
 gateway stop <id>`
 }
@@ -33,6 +34,13 @@ gateway stop <id>`
 // constrain input.gateway.target_ip as well as target_host. An unresolvable
 // name fails closed. Not covered: a name whose address legitimately moves
 // while the gateway is running keeps the old address until restarted.
+//
+// A gateway belongs to the session that started it. Only that session or a
+// caller holding adssh-admin can stop it, and it is torn down when its
+// session unregisters. It listens on loopback unless the caller holds
+// adssh-admin and passes --listen-any, and on a port below 1024 only for
+// adssh-admin. Over an SSH Run, start is refused and list shows the bound
+// session's gateways only (sshListenerRuns).
 type gatewaySession struct {
 	ID     string
 	Name   string
@@ -43,9 +51,12 @@ type gatewaySession struct {
 	// check.
 	dialAddr string
 	User     string
+	// Owner is the session id that started the gateway.
+	Owner    string
 	Started  time.Time
 	listener net.Listener
 	cancel   context.CancelFunc
+	engine   *Engine
 }
 
 // gatewayResolveTimeout bounds the one lookup of a gateway target name.
@@ -85,7 +96,14 @@ func (gatewayBinary) Run(ctx context.Context, args []string) error {
 	case "start":
 		return gatewayStart(ctx, hc, args[2:])
 	case "list":
-		return gatewayList(hc)
+		owner := ""
+		if sshRunFrom(ctx) {
+			owner = SessionIDFromContext(ctx)
+			if owner == "" {
+				return fmt.Errorf("gateway: list requires a session")
+			}
+		}
+		return gatewayList(hc, owner)
 	case "stop":
 		if len(args) != 3 {
 			return fmt.Errorf("gateway: stop requires an id")
@@ -100,8 +118,11 @@ func gatewayStart(ctx context.Context, hc interp.HandlerContext, args []string) 
 	listenAddr := "127.0.0.1:0"
 	target := ""
 	name := ""
+	listenAny := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--listen-any":
+			listenAny = true
 		case "--listen":
 			if i+1 >= len(args) {
 				return fmt.Errorf("gateway: --listen requires an address")
@@ -130,6 +151,11 @@ func gatewayStart(ctx context.Context, hc interp.HandlerContext, args []string) 
 	if err := validateGatewayAddress("listen", listenAddr); err != nil {
 		return err
 	}
+	engine := engineFromContext(ctx)
+	sessionID := SessionIDFromContext(ctx)
+	if err := validateGatewayListen(listenAddr, listenAny, gatewayCallerIsAdmin(engine, sessionID)); err != nil {
+		return err
+	}
 	if err := validateGatewayAddress("target", target); err != nil {
 		return err
 	}
@@ -143,9 +169,8 @@ func gatewayStart(ctx context.Context, hc interp.HandlerContext, args []string) 
 	if err != nil {
 		return err
 	}
-	engine := engineFromContext(ctx)
 	if err := engine.AuthorizeGateway(GatewayPolicyRequest{
-		SessionID:  SessionIDFromContext(ctx),
+		SessionID:  sessionID,
 		Action:     "connect",
 		Listen:     listenAddr,
 		Name:       name,
@@ -167,26 +192,47 @@ func gatewayStart(ctx context.Context, hc interp.HandlerContext, args []string) 
 		Listen:   listener.Addr().String(),
 		Target:   target,
 		dialAddr: net.JoinHostPort(targetIP.String(), strconv.FormatUint(uint64(targetPort), 10)),
-		User:     engine.buildPolicyContext("gateway", []string{"connect", target}, SessionIDFromContext(ctx)).User,
+		User:     engine.buildPolicyContext("gateway", []string{"connect", target}, sessionID).User,
+		Owner:    sessionID,
 		Started:  time.Now().UTC(),
 		listener: listener,
 		cancel:   cancel,
+		engine:   engine,
+	}
+	// Record before the gateway is registered or served. A failed write
+	// closes the bound listener, which has not accepted a connection yet.
+	if err := engine.LogEvent(fmt.Sprintf("GATEWAY_START: id=%s listen=%s target=%s user=%s name=%q",
+		id, entry.Listen, target, entry.User, name)); err != nil {
+		cancel()
+		if closeErr := listener.Close(); closeErr != nil {
+			return fmt.Errorf("gateway: audit: %w (close listener: %v)", err, closeErr)
+		}
+		return fmt.Errorf("gateway: audit: %w", err)
 	}
 	gatewayMu.Lock()
 	gatewaySessions[id] = entry
 	gatewayMu.Unlock()
-	engine.LogEvent(fmt.Sprintf("GATEWAY_START: id=%s listen=%s target=%s user=%s name=%q",
-		id, entry.Listen, target, entry.User, name))
+	// The owner may have unregistered while the gateway was starting; its
+	// hook has run, so tear this one down now.
+	if sessionID != "" && sys.GetSession(sessionID) == nil && !isBound(engine, sessionID) {
+		stopOwnedGateways(sessionID)
+		return fmt.Errorf("gateway: session ended")
+	}
 	fmt.Fprintf(hc.Stdout, "gateway: id=%s listen=%s target=%s\n", id, entry.Listen, target)
 
 	go serveGateway(sessionCtx, entry)
 	return nil
 }
 
-func gatewayList(hc interp.HandlerContext) error {
+// gatewayList prints the active gateways; a non-empty owner limits it to
+// that session's.
+func gatewayList(hc interp.HandlerContext, owner string) error {
 	gatewayMu.RLock()
 	sessions := make([]*gatewaySession, 0, len(gatewaySessions))
 	for _, session := range gatewaySessions {
+		if owner != "" && session.Owner != owner {
+			continue
+		}
 		copy := *session
 		sessions = append(sessions, &copy)
 	}
@@ -209,22 +255,77 @@ func gatewayList(hc interp.HandlerContext) error {
 	return nil
 }
 
+// gatewayStop stops gateway id. A gateway owned by another session is
+// refused unless the caller holds adssh-admin; the refusal does not say
+// whether the id exists.
 func gatewayStop(ctx context.Context, hc interp.HandlerContext, id string) error {
-	gatewayMu.Lock()
+	engine := engineFromContext(ctx)
+	caller := SessionIDFromContext(ctx)
+	admin := gatewayCallerIsAdmin(engine, caller)
+	gatewayMu.RLock()
 	session := gatewaySessions[id]
-	if session != nil {
+	gatewayMu.RUnlock()
+	if session == nil || (session.Owner != caller && !admin) {
+		return fmt.Errorf("gateway: not found: %s", id)
+	}
+	// Record before the stop; a failed write leaves the gateway running.
+	if err := engine.LogEvent(fmt.Sprintf("GATEWAY_STOP: id=%s listen=%s target=%s", id, session.Listen, session.Target)); err != nil {
+		return fmt.Errorf("gateway: stop not recorded, gateway left running: %w", err)
+	}
+	gatewayMu.Lock()
+	if gatewaySessions[id] == session {
 		delete(gatewaySessions, id)
 	}
 	gatewayMu.Unlock()
-	if session == nil {
-		return fmt.Errorf("gateway: not found: %s", id)
-	}
 	session.cancel()
 	_ = session.listener.Close()
-	engineFromContext(ctx).LogEvent(fmt.Sprintf("GATEWAY_STOP: id=%s listen=%s target=%s", id, session.Listen, session.Target))
 	fmt.Fprintf(hc.Stdout, "gateway: stopped %s\n", id)
 	return nil
 }
+
+// gatewayCallerIsAdmin reports whether the session holds adssh-admin, as
+// policy sees it (bound or registered groups, or an active elevation).
+func gatewayCallerIsAdmin(engine *Engine, sessionID string) bool {
+	pctx := engine.buildPolicyContext("gateway", nil, sessionID)
+	if pctx.IdentityUnknown {
+		return false
+	}
+	for _, group := range pctx.Groups {
+		if group == RoleAdsshAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+// stopOwnedGateways stops every gateway the session owns.
+func stopOwnedGateways(owner string) {
+	if owner == "" {
+		return
+	}
+	gatewayMu.Lock()
+	var stopped []*gatewaySession
+	for id, session := range gatewaySessions {
+		if session.Owner == owner {
+			stopped = append(stopped, session)
+			delete(gatewaySessions, id)
+		}
+	}
+	gatewayMu.Unlock()
+	for _, session := range stopped {
+		session.cancel()
+		_ = session.listener.Close()
+		if session.engine != nil {
+			// The owner is gone, so the gateway stops whether or not the
+			// record is written; a failed write is reported, not dropped.
+			if err := session.engine.LogEvent(fmt.Sprintf("GATEWAY_STOP: id=%s listen=%s target=%s reason=session_ended", session.ID, session.Listen, session.Target)); err != nil {
+				warnUnrecordedRevocation("GATEWAY_STOP", err)
+			}
+		}
+	}
+}
+
+func init() { sys.OnSessionUnregister(stopOwnedGateways) }
 
 func serveGateway(ctx context.Context, session *gatewaySession) {
 	go func() {
@@ -302,6 +403,34 @@ func validateGatewayAddress(label, addr string) error {
 	}
 	if port == "" {
 		return fmt.Errorf("gateway: %s port is required", label)
+	}
+	return nil
+}
+
+// validateGatewayListen refuses a non-loopback listen address unless
+// listenAny is set and the caller is admin, and a port below 1024 unless
+// the caller is admin. Port 0 picks an ephemeral port.
+func validateGatewayListen(addr string, listenAny, admin bool) error {
+	host, portString, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("gateway: invalid listen address %q", addr)
+	}
+	port, err := strconv.ParseUint(portString, 10, 16)
+	if err != nil {
+		return fmt.Errorf("gateway: invalid listen port %q", portString)
+	}
+	if port != 0 && port < 1024 && !admin {
+		return fmt.Errorf("gateway: listen port %d needs adssh-admin", port)
+	}
+	ip := net.ParseIP(host)
+	loopback := host == "localhost" || (ip != nil && ip.IsLoopback())
+	if !loopback {
+		if !listenAny {
+			return fmt.Errorf("gateway: listen address %q is not loopback; pass --listen-any (adssh-admin only)", host)
+		}
+		if !admin {
+			return fmt.Errorf("gateway: --listen-any needs adssh-admin")
+		}
 	}
 	return nil
 }

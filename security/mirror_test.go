@@ -38,7 +38,9 @@ func runMirrorVBin(t *testing.T, eng *Engine, args []string) (string, error) {
 
 func TestMirrorListShowsSessionMetadataWithRedactedCommand(t *testing.T) {
 	session := &sys.Session{ID: "mirror-list", User: "alice", Principals: []string{"ops"}}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	defer sys.UnregisterSession(session.ID)
 	session.SetCurrentCommand("deploy token=ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ")
 
@@ -64,7 +66,9 @@ func TestMirrorKillCancelsSessionAndAudits(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	session := &sys.Session{ID: "mirror-kill", User: "alice"}
 	session.SetContext(ctx, cancel)
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	defer sys.UnregisterSession(session.ID)
 
 	dir := t.TempDir()
