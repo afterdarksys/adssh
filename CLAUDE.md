@@ -69,8 +69,9 @@ dual-approval gate (`security.CheckFourEyes`), (4) custom commands registered fr
 `mirror`, `cmdgen`, `package`, `proc`, `grant`, `darkscan`, `memforensics`, ...) that run in-process
 instead of shelling out. Each implements the `security.VirtualBinary` interface (`Name`,
 `Description`, `Usage`, `Run`) and self-registers via `security.Register` from an `init()`; the
-registry is package-global in `security/` (`vbin_*.go` files), with `internal/sysmgmt/` and `internal/starlarkext/`
-supplying some of the underlying implementations (e.g. `/proc` access, package management, container
+registry is package-global in `security/` (`vbin_*.go` files; the grid vbins live in `internal/grid` and
+self-register from their own package, which `main.go`, `cmd/adssh-mcp` and `engine` blank-import), with
+`internal/sysmgmt/` and `internal/starlarkext/` supplying some of the underlying implementations (e.g. `/proc` access, package management, container
 exec). See `docs/VBIN-SPEC.md` for the contract new virtual binaries must follow.
 
 **Starlark standard library (`internal/starlarkext/`).** `SetupExtensions` is the single place that assembles
@@ -94,8 +95,10 @@ tamper-evident hash chain (`audit.go`, `audit_chain.go`), change-management gati
 
 **`internal/sys/`** owns OS-level session concerns that `security/` and `internal/repl/` build on: the SSH server
 (`ssh.go`, using host keys + `authorized_keys` for pubkey-only auth), session tracking
-(`session.go`), job control (`job.go`), terminal/ioctl handling (per-OS in `termios_linux.go` /
-`termios_darwin.go`), signal setup, and the `pushd`/`popd` directory stack.
+(`session.go`), terminal/ioctl handling (per-OS in `termios_linux.go` /
+`termios_darwin.go`), signal setup, and the `pushd`/`popd` directory stack. There is no job table:
+mvdan runs `&` and `wait` itself, background jobs are not listed, and a hangup signals the shell's
+process group.
 
 **`cmd/adssh-mcp/`** is a separate binary that exposes adssh as a Model Context Protocol server so AI
 agents (e.g. Claude) can drive the shell programmatically. `server.go` registers MCP tools
@@ -115,7 +118,7 @@ defaults), including `ADSSH_RESTRICTED`, `ADSSH_SERVE`, `ADSSH_POLICY`, `ADSSH_E
 `ADSSH_AUDIT_LOG`, `ADSSH_HISTORY`, `ADSSH_HOST_KEY`, `ADSSH_AUTHORIZED_KEYS`, `ADSSH_SSH_PERMIT_ROOT`
 (root SSH login, default off), `ADSSH_GUARD*` (SSH listener jail), `ADSSH_ADMIN_KEYS` (named keys
 for `admin serve`), `ADSSH_CONTROLPLANE_URL` (device-login origin), `ADSSH_OIDC_*` (pinned issuer,
-JWKS URL and audience per provider), `ADSSH_CALLBACK_ALLOW_PRIVATE`, `ADSSH_GIT_PROMPT`,
+JWKS URL and audience per provider), `ADSSH_CALLBACK_ALLOW_PRIVATE`, `ADSSH_GIT_PROMPT`, `ADSSH_HIGHLIGHT`,
 `ADSSH_PROFILE`, and `ADSSH_RC`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
 `.adsshrc` files.
 

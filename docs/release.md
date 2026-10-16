@@ -29,15 +29,19 @@ scripts/render-homebrew-formula.sh vX.Y.Z \
 
 Pass a sixth argument to write somewhere else, for example `/tmp/adssh.rb`. The default path is `packaging/homebrew-tap/Formula/adssh.rb`. The script exits 2 unless every digest matches `^[0-9a-fA-F]{64}$`. Creating the tap repository and pushing the formula are separate steps. This repository does not create that GitHub repository.
 
-## SLSA
+## Provenance
 
-On a tag, the `provenance` job calls:
+On a tag, after `Package`, the release job runs `actions/attest-build-provenance@v4` with `subject-path: 'dist/*'`. GitHub signs a Sigstore-backed build-provenance attestation for every file in `dist/` and stores it with the repository. The job has `id-token: write` and `attestations: write` for that step. Verify a downloaded asset with:
 
-`slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0`
+```sh
+gh attestation verify adssh_vX.Y.Z_darwin_amd64.tar.gz --repo afterdarksys/adssh
+```
 
-That generator's latest release is v2.1.0 (February 2025). The project is no longer actively maintained. The generic generator attests the SHA-256 subjects the caller supplies in `base64-subjects`. It does not rebuild the artifacts in a hermetic builder. The subjects are `sha256sum dist/*`, base64-encoded on one line, and only when `github.ref` is a tag and `dist` is non-empty. `upload-assets` is true. Job permissions are `actions: read`, `id-token: write`, and `contents: write`.
+`workflow_dispatch` on a branch is not `refs/tags/`, so a dispatch run packages and uploads artifacts but does not attest or publish. No attestation file is checked in. The earlier `slsa-github-generator` job is gone; that project's last release is v2.1.0 (February 2025) and it is no longer maintained.
 
-`workflow_dispatch` on a branch is not `refs/tags/`, so that run does not start the provenance job. Nothing is signed until a real Actions run on a tag. No attestation file is checked in.
+## Homebrew tap
+
+`afterdarksys/homebrew-tap` exists and publishes formulas through its `scripts/publish-spec.sh --spec <repo>/homebrew-formula.json` (kind `go` builds from the tag archive). adssh does not ship there yet: it needs a `homebrew-formula.json` at the repo root and a LICENSE file (the formula has a `license` field and the repository is public with none). The `render-homebrew-formula.sh` path above is the older, manual route and becomes redundant once the spec file exists.
 
 ## What this procedure does not do
 

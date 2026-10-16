@@ -126,25 +126,48 @@ Shell `if`/`then`/`else`/`fi` runs as a shell program. A one-line form is `if tr
 
 `\g` in `PROMPT` or `RPROMPT` shows the current git branch, or a 7-character hash for a detached HEAD. It stays empty until `ADSSH_GIT_PROMPT=1` or `set gitprompt on`. `set gitprompt off` turns it off again. The segment reads `.git/HEAD` and never runs git, so a cloned repository's `core.fsmonitor` or filter commands cannot run on a prompt draw. It has no dirty marker, because that needs `git status`. Restricted mode and SSH sessions refuse `set gitprompt on` and ignore `ADSSH_GIT_PROMPT`. A directory that is not a repository, or a HEAD it cannot read, leaves the segment empty.
 
+Pre-enter highlighting colours the line you are typing: red when policy would deny a command in it, yellow when it looks destructive (`rm -rf`, `kubectl delete`, `terraform destroy`, `git push --force`, the same check the MCP `run_shell` dry-run gate uses). It is off until `ADSSH_HIGHLIGHT=1` or `set highlight on`, and `set highlight on` itself passes the policy gate. It needs a terminal and is never on in the menu REPL. The line is only parsed: nothing is expanded or run, and the policy is asked through the same explanation `why` uses, 150 ms after you stop typing, without blocking input or writing audit entries. In an SSH session only the destructive check applies. The colour is advice; the gate still decides when you press Enter.
+
+`confirm <command>` previews a command before it runs: the command, its risk class, the policy decision with any denied or approval stage, and the matched rule or required role. It then asks `run it? [y/N]` on the terminal and runs the command through the normal gate only on `y`. `confirm --dry-run <command>` prints the preview and stops. `confirm` refuses when stdin is not a terminal, and never runs a command the policy would deny. `confirm` is gated like any command, so a policy can require it (`input.command == "confirm"`).
+
+Ctrl-C during a Starlark line (a long loop, a function call) cancels it at its next step, prints `interrupted`, and returns to the prompt; the next line runs normally. `sys.parallel` watches the same cancel and stops its running commands within a few hundred milliseconds. Ctrl-C during a shell command interrupts that command as before.
+
+Background commands (`cmd &`) run inside the shell interpreter and `wait` waits for them. adssh does not list background jobs: there is no `jobs`, `fg` or `bg`. A hangup of the shell sends SIGHUP to its process group, so background commands end with it.
+
 ## Starlark namespaces
 
 | Namespace | What it does |
 |---|---|
-| `aws` | EC2, S3, ECS, Lambda |
-| `gcp` | Compute, Storage |
+| `aws` | EC2, S3, ECS, Lambda, CloudWatch (get_metric, list_metrics, alarms), Route 53 (list_zones, list_records, upsert_record) |
+| `gcp` | Compute, Storage, GKE (list_clusters, describe), Pub/Sub (list_topics, publish, pull), Cloud Run (list_services) |
 | `oci` | Compute, Storage |
 | `git` | clone, status, add, commit, push, pull, log |
 | `github` | repos, PRs, issues, releases, workflows |
 | `containers` | exec (audited), list, audit, replay, clean |
-| `data` | json_parse/dump, yaml_parse/dump |
+| `data` | json_parse/dump, yaml_parse/dump, assert_type, validate (JSON Schema) |
 | `sys` | exec_cmd, exec_async, parallel, read_file, write_file, getenv, load_plugin, load_plugins |
-| `net` | tcp_send, http_get |
+| `net` | tcp_send, http_get, dial, dial_tls, dial_udp |
+| `str` | split, join, fields, trim, replace, sprintf, slugify, template, ... |
+| `log` | info, warn, error (audit stream) |
 | `crypto` | md5, sha256 |
 | `re` | match (RE2), pcre_match |
 | `sec` | audit, is_restricted, file_hash, check_policy |
 | `i18n` | load, set_lang, T |
+| `notify` | slack, webhook, pagerduty, teams |
 
 `sys.parallel` runs a list of command strings with a bounded number of goroutines. Each string goes through the same gate as `sys.exec_cmd`. The call returns stdout in input order. A denial, a non-zero exit, a timeout, or an output overrun fails the call. A list that is empty, too long, or not all strings runs nothing. Restricted mode does not provide `parallel`. `par` remains the shell tool that stamps one argv template across items.
+
+`data.assert_type(value, expected)` returns `value` or fails naming the type it got and the types it wanted (`"dict"` or `["int", "float"]`). `data.validate(schema, value, strict=False)` checks `value` against a JSON Schema (draft 2020-12 unless `$schema` says otherwise). `schema` is a dict or a JSON or YAML string. It returns `True` or a list of `{path, message}`; `strict=True` fails instead. A `$ref` outside the schema fails: no network or file loads. Schema and value are capped at 1 MiB and the check at 2 seconds.
+
+`str.slugify(s, sep="-", max=80)` lowercases, strips accents (NFKD), and joins runs of letters and digits with `sep`. `str.template(tmpl, vars={}, strict=True)` renders a Go `text/template`. Only the comparison, logic and `printf` functions exist; `call`, `html`, `js` and `urlquery` fail. A template cannot read files, call out, or include anything not defined in its own text. `strict=True` fails on a missing key. Template and output are capped at 1 MiB and rendering at 2 seconds.
+
+`log.info(msg, **fields)`, `log.warn` and `log.error` write `STARLARK_LOG level=... session=... msg=... k=v` to the audit log and hash chain, then print the same line to stderr. Fields are redacted. If the audit write fails the call fails and prints nothing. A policy gates them as `starlark.log.*` in the `audit` capability group.
+
+`net.dial_udp(host, port, data, timeout=5)` sends one datagram and returns the first reply, capped at 64 KiB. No reply within the timeout is an error. It is gated like `net.dial`.
+
+`aws.route53.upsert_record(zone_id=, name=, type=, values=[...], ttl=300)` and `aws.route53.delete_record(zone_id=, name=, type="A")` take keyword arguments only, so the gate sees the record as `"name"="<record>"`. Record names must be canonical (lowercase, ending in a dot, no `\NNN` escapes); Route 53 treats other spellings as the same name, so they are refused rather than let past a rule on the canonical one. Upsert and delete carry the `dns` capability on top of `cloud`, so a policy can deny DNS changes and keep reads. `gcp.pubsub.pull(project, subscription, max=10, ack=True)` acknowledges what it returns; with `ack=False` the messages are redelivered. `ack` is a required keyword so a policy can always match on it. `notify.teams(webhook_url="", title=, text="", color="")` posts an Adaptive Card to a Teams Workflows or legacy incoming webhook. The URL must be https to a public DNS name, and an empty `webhook_url` reads `TEAMS_WEBHOOK_URL`, which keeps the secret URL out of the audit log. Restricted mode omits `gcp.gke`, `gcp.pubsub`, `gcp.run`, `aws.cloudwatch`, `aws.route53` and `notify.teams`.
+
+Restricted mode keeps `data.assert_type`, `data.validate`, `str.slugify` and `str.template`, and omits `log.*` and `net.*`.
 
 Starlark plugins live in `~/.adssh/plugins/<name>/` as `manifest.yaml` and `plugin.star`. Nothing in that directory loads at startup. `plugin load <name>` and `plugin load --all` read them only when asked. `plugin load --all` checks every plugin first and loads none if any check fails. `sys.load_plugins` does the same load into the current session. Restricted mode does not provide `sys.load_plugins` and refuses `plugin load`. `sys.load_plugin` still loads a Go `.so`.
 
@@ -157,7 +180,7 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `jq` | JSON processor |
 | `yq` | YAML processor |
 | `http` | HTTP GET client |
-| `mirror` | Live session metadata, viewer, console, and audited termination |
+| `mirror` | Live session metadata, viewer, console, audited termination, and time-boxed `share`/`unshare` grants |
 | `admin` | Local admin API for sessions, gateways, approvals, evidence, and explanations |
 | `identity` | OIDC identity import and short-lived SSH certificate issuance |
 | `cmdgen` | Cloud CLI command generator |
@@ -170,6 +193,7 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `nav` | Interactive three-column file navigator with previews |
 | `from` / `where` / `select` / `to` | JSONL pipeline for JSON, YAML, CSV, and struct-shaped JSON |
 | `why` | Side-effect-free policy/RBAC/CM/four-eyes explanation |
+| `whoami` | Session user (like the OS `whoami`); `-v` adds principals, identity source, elevation, and agent; `--caps` previews entitlements and what policy allows, without side effects |
 | `??` | Explain the last blocked command in the current session |
 | `runbook` | Typed Starlark runbooks with governed argv-only steps |
 | `plugin` | Load checked Starlark plugins from the config plugins directory |
@@ -270,6 +294,13 @@ deny {
 
 allow { not deny }
 ```
+
+A decision can also say why. Besides `allow` (bool, required) and
+`deny_reason`, a policy may set `required_role`, `rule` (the rule that
+decided), and `required_entitlement` (what would allow it). `why`, `??`,
+`whoami --caps`, and the `[POLICY]` audit line show them. A `rule` or
+`required_entitlement` that is not a string denies. See
+`policy/examples/explained.rego` and `docs/site/policy.md`.
 
 Gateway policies can use structured target fields instead of parsing argv:
 ```rego
@@ -378,6 +409,7 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_MAX_SESSIONS` | 128 | Global cap on registered sessions (SSH logins are also capped at 4 per connection and 8 per user) |
 | `ADSSH_SESSION_NPROC`, `ADSSH_SESSION_NOFILE`, `ADSSH_SESSION_AS`, `ADSSH_SESSION_FSIZE`, `ADSSH_SESSION_CPU_SECONDS` | unset | Hard rlimits applied to each SSH login process; `0`/unset leaves a limit alone |
 | `ADSSH_GIT_PROMPT` | off | Show the git branch for `\g` in the prompt (`1`/`true`/`yes`/`on`; ignored in restricted mode and SSH sessions) |
+| `ADSSH_HIGHLIGHT` | off | Pre-enter danger highlighting (`1`/`true`/`yes`/`on`; needs a terminal and passes the policy gate as `set highlight on`) |
 
 ## Plugins
 

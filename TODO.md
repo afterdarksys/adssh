@@ -55,15 +55,14 @@ control, with a programmable and AI-native operations shell.
 The items above are in the tree. Publishing is a morning step. Do not treat this list as done.
 
 - Tag and push are not done. GPG signing needs `secrets.GPG_PRIVATE_KEY` on the Actions run. The SLSA provenance job has not run.
-- The Homebrew tap repository is not created. Render the formula only from a real `SHA256SUMS`.
+- The Homebrew tap `afterdarksys/homebrew-tap` exists and publishes via its `publish-spec.sh`; adssh needs a `homebrew-formula.json` and a LICENSE file (the repo is public with none) before a formula can ship.
 - `docs/site/` is source. It is not a hosted site.
 - The provision → enroll → execute handoff is not wired. Do not mark it implemented.
 
 ## Deferred from the 2026-10-16 remediation
 
-- Move `security/grid.go` and `security/vbin_grid.go` to `internal/grid` with the engine injected. The grid is a loopback TLS server, a go-git client and scratch-tree management; only its policy call is enforcement. `loadFlightCA` should use `internal/safefile`.
-- `sys.parallel` workers share `__aliases__` and `__shopts__`. REPL Ctrl-C does not call `thread.Cancel`, so an interactive interrupt does not reach a running batch.
+- `sys.parallel` workers share `__aliases__` and `__shopts__`. REPL Ctrl-C now cancels the Starlark thread, but `sys.parallel` runs its batch under `context.Background()`, so the batch finishes before the cancel is seen; it needs the REPL's cancellation as a context.
 - Release note for the next tag: `authorized_keys` lines need `user="name"`; `identity oidc import` takes issuer, JWKS URL and audience from `ADSSH_OIDC_*` only; `identity device login` needs `ADSSH_CONTROLPLANE_URL`; `ADSSH_AUDIT_URL` must be https; approvals need a named key from `ADSSH_ADMIN_KEYS`.
 - `sudo make test-e2e` has not been run since the SSH changes; the SSH e2e test now binds the key to the test user.
-- `internal/sys/job.go` (`jobs`/`fg`/`bg`/`wait`) has no production caller since the ungated `/bin/sh` background launcher was removed; mvdan runs `&` itself. Either wire mvdan background jobs into the table (and reap finished entries) or delete the table and the builtins.
+- The job table and `jobs`/`fg`/`bg` are gone. The `disown` builtin in `security/interceptor.go` still calls the empty `sys.GlobalJobTable()` shim in `internal/sys/disown.go`; remove the builtin, its help entry and the shim together.
 - `sys.parallel` `isolated()` copies the caller's globals map without a lock while a mvdan background job on the same session could write to it; low likelihood, no fix yet.

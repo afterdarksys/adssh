@@ -50,7 +50,7 @@ type VirtualBinary interface {
 
 ## Registration
 
-A VBIN registers itself by calling `security.Register` inside a package-level `init()` function. This guarantees the VBIN is available as soon as the package is imported.
+A VBIN registers itself by calling `security.Register` inside a package-level `init()` function. This guarantees the VBIN is available as soon as the package is imported. A VBIN package outside `security/` (for example `internal/grid`) is linked only when each binary imports it; `main.go` and `cmd/adssh-mcp` blank-import `internal/grid`.
 
 ```go
 func init() {
@@ -239,6 +239,7 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `stty` | `security/vbin_stty.go` | Terminal mode controls |
 | `proc` | `security/vbin_proc.go` | Linux `/proc` filesystem accessor — `proc get|set <path> [value]` |
 | `package` | `security/vbin_package.go` | Cross-distro package manager wrapper — `package install|remove|update|list <pkg>` |
+| `grid`, `flight`, `agent`, `worktree`, `repo` | `internal/grid/vbin.go`, `internal/grid/grid.go` | sah-grid membership on a loopback TLS listener, supervised agent flights, and scratch worktrees; the policy gate is injected (`grid.SetGate`) |
 
 ### Governed child execution
 

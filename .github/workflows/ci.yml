@@ -87,6 +87,9 @@ jobs:
           cache: true
       - name: Run end-to-end suite
         run: make test-e2e
+      - name: Run root-only SSH end-to-end test
+        if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" go test -tags e2e -count=1 -run '^TestSSHRoundTrip$' ./e2e/...
 
   lint:
     name: golangci-lint
