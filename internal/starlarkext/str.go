@@ -35,6 +35,8 @@ func SetupStringsAPI(env starlark.StringDict) {
 	set("lower", strLower)
 	set("upper", strUpper)
 	set("sprintf", strSprintf)
+	set("slugify", strSlugify)   // strtext.go
+	set("template", strTemplate) // strtext.go
 	env["str"] = d
 }
 

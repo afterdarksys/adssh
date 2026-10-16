@@ -39,10 +39,19 @@ func TestFSWriteThenReadBack(t *testing.T) {
 
 func TestFSWriteTruncatesAndAppendAdds(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "out.txt")
-	callFS(t, false, "write", starlark.Tuple{starlark.String(p), starlark.String("aaa")})
-	callFS(t, false, "write", starlark.Tuple{starlark.String(p), starlark.String("b")}) // truncates
-	callFS(t, false, "append", starlark.Tuple{starlark.String(p), starlark.String("c")})
-	got, _ := os.ReadFile(p)
+	for _, step := range []struct{ fn, content string }{
+		{"write", "aaa"},
+		{"write", "b"}, // truncates
+		{"append", "c"},
+	} {
+		if _, err := callFS(t, false, step.fn, starlark.Tuple{starlark.String(p), starlark.String(step.content)}); err != nil {
+			t.Fatalf("fs.%s: %v", step.fn, err)
+		}
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(got) != "bc" {
 		t.Fatalf("got %q; want %q", got, "bc")
 	}

@@ -12,6 +12,8 @@ import (
 
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
+	// grid registers the grid, flight, agent, worktree, and repo vbins.
+	_ "github.com/afterdarksys/adssh/internal/grid"
 	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
 	"github.com/afterdarksys/adssh/internal/sys"
@@ -46,7 +48,11 @@ func main() {
 	// through the same policy and audit log as policyGate.
 	security.SetDefaultEngine(prepared.eng.Security())
 	guard.SetRecorder(func(ev guard.Event) {
-		prepared.eng.Security().LogEvent(fmt.Sprintf("GUARD action=%s addr=%s reason=%s", ev.Action, ev.Addr, ev.Reason))
+		// The guard has already applied the ban; it stands even when the
+		// record fails, so the failure is reported rather than dropped.
+		if err := prepared.eng.Security().LogEvent(fmt.Sprintf("GUARD action=%s addr=%s reason=%s", ev.Action, ev.Addr, ev.Reason)); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh-mcp: guard audit write failed: %v\n", err)
+		}
 	})
 	if err := guard.Configure(guard.Options{
 		ConfigPath: prepared.cfg.GuardConfigPath,
@@ -56,7 +62,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "adssh-mcp: guard: %v\n", err)
 	}
 	if _, statErr := os.Stat(prepared.cfg.PolicyPath); statErr == nil {
-		prepared.eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", prepared.cfg.PolicyPath))
+		if err := prepared.eng.Security().LogEvent(fmt.Sprintf("Policy loaded from %s", prepared.cfg.PolicyPath)); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh-mcp: audit: %v\n", err)
+			sys.UnregisterSession(prepared.sessionID)
+			os.Exit(1)
+		}
 	}
 
 	globals := starlark.StringDict{}
@@ -67,7 +77,11 @@ func main() {
 		Engine:     prepared.eng.Security(),
 	})
 
-	prepared.eng.Security().LogEvent("adssh-mcp server starting")
+	if err := prepared.eng.Security().LogEvent("adssh-mcp server starting"); err != nil {
+		fmt.Fprintf(os.Stderr, "adssh-mcp: audit: %v\n", err)
+		sys.UnregisterSession(prepared.sessionID)
+		os.Exit(1)
+	}
 	if err := serveMCP(prepared.cfg, prepared.eng, globals, prepared.agent); err != nil {
 		fmt.Fprintf(os.Stderr, "MCP server error: %v\n", err)
 		sys.UnregisterSession(prepared.sessionID)

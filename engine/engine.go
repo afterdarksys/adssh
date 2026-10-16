@@ -5,6 +5,10 @@ import (
 	"strings"
 
 	"github.com/afterdarksys/adssh/security"
+
+	// The grid virtual binaries register themselves from their own package;
+	// an embedder that builds on engine gets them without a second import.
+	_ "github.com/afterdarksys/adssh/internal/grid"
 )
 
 // Config is the embedder-facing configuration for an Engine. It unifies the

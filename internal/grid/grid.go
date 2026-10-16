@@ -1,14 +1,24 @@
-package security
+// Package grid is sah-grid membership: a loopback TLS listener that places,
+// rehearses, and cancels supervised agent flights, go-git scratch worktree
+// management, and the grid, flight, agent, worktree, and repo virtual
+// binaries. It registers those binaries with security.Register from init, so
+// a binary that blank-imports this package links them.
+package grid
 
 // Threats: a peer token, a remote flight, or a managed-agent checkout must
 // not become root, skip policy, run git hooks, or read outside the scratch
-// worktree. Membership tokens are compared in constant time and never logged;
-// the token file is opened with O_NOFOLLOW and refused unless fstat shows a
-// regular file with no group or other bits. The listener is TLS 1.3 on a
-// loopback address and is not the admin API. A parent allow does not bind the
-// peer: each host evaluates policy locally and fails closed when no policy is
-// loaded. A remote peer may cancel or read only flights it placed. Flights
-// past their TTL are cancelled and their agent sessions released.
+// worktree. This code lives in internal/grid, outside the security package;
+// its only enforcement is the policy Gate injected into the grid state
+// (security.DefaultEngine() unless SetGate replaces it). A nil gate refuses
+// every operation. Membership tokens are compared in constant time and never
+// logged; the token file is opened with O_NOFOLLOW and refused unless fstat
+// shows a regular file with no group or other bits. The flight CA file is
+// read through internal/safefile, so a symlink, FIFO, or oversized file is
+// refused. The listener is TLS 1.3 on a loopback address and is not the admin
+// API. A parent allow does not bind the peer: each host evaluates policy
+// locally and fails closed when no policy is loaded. A remote peer may cancel
+// or read only flights it placed. Flights past their TTL are canceled and
+// their agent sessions released.
 // The scratch root lives under the XDG data dir, never os.TempDir(). It must
 // be a real directory (not a symlink) owned by the euid with mode 0700, and no
 // ancestor may be world-writable; destroy removes only worktree ids this grid
@@ -16,7 +26,8 @@ package security
 // its flight at place time.
 // Non-goals: this does not push policy, continue after a deny, or change the
 // process uid. A frame lease_id does not authorize a command. It does not
-// defend against another process running as the same uid.
+// defend against another process running as the same uid, or against an
+// embedder that injects a permissive gate.
 
 import (
 	"bytes"
@@ -46,7 +57,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/afterdarksys/adssh/internal/config"
+	"github.com/afterdarksys/adssh/internal/safefile"
 	"github.com/afterdarksys/adssh/internal/sys"
+	"github.com/afterdarksys/adssh/security"
 )
 
 const (
@@ -59,23 +72,101 @@ const (
 	gridMaxArgs      = 32
 	gridMaxArgLen    = 256
 
-	// gridCancelledRetention is how long a cancelled flight stays readable.
+	// gridCancelledRetention is how long a canceled flight stays readable.
 	gridCancelledRetention = time.Hour
+	// flightStatusCanceled is a canceled flight's status. Grid members
+	// exchange it, so it keeps the spelling already on the wire.
+	flightStatusCanceled = "cancelled" //nolint:misspell // wire value shared with other grid members.
 	// worktreeDestroying reserves a worktree id while destroy removes it, so
 	// place cannot bind it in the meantime.
 	worktreeDestroying = "\x00destroying"
 )
 
-var (
-	gridMu      sync.Mutex
-	gridState   *gridMembership
-	scratchRoot = defaultScratchRoot()
+// Gate is the policy engine the grid evaluates against. *security.Engine
+// satisfies it.
+type Gate interface {
+	// PolicyLoaded reports whether a Rego policy is installed. The grid
+	// refuses place, rehearse, cancel, and status without one.
+	PolicyLoaded() bool
+	// BuildPolicyContext resolves the principal for a command under sessionID.
+	BuildPolicyContext(command string, args []string, sessionID string) security.PolicyContext
+	// EvaluatePolicy evaluates a policy context.
+	EvaluatePolicy(pctx security.PolicyContext) (bool, string, error)
+}
 
-	// gridReapInterval is how often a listening grid cancels expired flights.
-	gridReapInterval = 30 * time.Second
+// defaultEngineGate resolves security.DefaultEngine() on every call, because
+// the binaries replace the default engine (security.SetDefaultEngine) after
+// package init has run.
+type defaultEngineGate struct{}
+
+func (defaultEngineGate) PolicyLoaded() bool { return security.DefaultEngine().PolicyLoaded() }
+
+func (defaultEngineGate) BuildPolicyContext(command string, args []string, sessionID string) security.PolicyContext {
+	return security.DefaultEngine().BuildPolicyContext(command, args, sessionID)
+}
+
+func (defaultEngineGate) EvaluatePolicy(pctx security.PolicyContext) (bool, string, error) {
+	return security.DefaultEngine().EvaluatePolicy(pctx)
+}
+
+var errNoGate = errors.New("grid: no policy gate")
+
+// gridState is one process's grid membership. It is process-global (procGrid)
+// because one adssh process is one grid member and the virtual binaries,
+// which the registry constructs with no arguments, must share it. Every
+// function that reads or changes it takes the state as its receiver.
+type gridState struct {
+	mu           sync.Mutex
+	member       *gridMembership
+	scratchRoot  string
+	gate         Gate
+	reapInterval time.Duration // how often a listening grid cancels expired flights
+}
+
+var (
+	procGrid = &gridState{
+		scratchRoot:  defaultScratchRoot(),
+		gate:         defaultEngineGate{},
+		reapInterval: 30 * time.Second,
+	}
 
 	commitHashPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+	// gridIDPattern is the security package's role-name shape.
+	gridIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,64}$`)
 )
+
+// SetGate replaces the policy gate of the process grid. A nil gate makes
+// every grid operation refuse. It is for tests and embedders.
+func SetGate(g Gate) {
+	procGrid.setGate(g)
+}
+
+func (st *gridState) setGate(g Gate) {
+	st.mu.Lock()
+	st.gate = g
+	st.mu.Unlock()
+}
+
+// gateFor returns the gate a virtual binary evaluates against: the engine
+// that dispatched it, or the state gate when ctx carries none. It fails
+// closed when the state gate is nil.
+func (st *gridState) gateFor(ctx context.Context) (Gate, error) {
+	st.mu.Lock()
+	g := st.gate
+	st.mu.Unlock()
+	if g == nil {
+		return nil, errNoGate
+	}
+	if eng := security.EngineFromContext(ctx); eng != nil {
+		return eng, nil
+	}
+	return g, nil
+}
+
+// gateReady reports whether g is a non-nil gate with a policy loaded.
+func gateReady(g Gate) bool {
+	return g != nil && g.PolicyLoaded()
+}
 
 type gridError struct {
 	Status  int
@@ -100,7 +191,7 @@ type gridMembership struct {
 	listenURL string
 	server    *http.Server
 	listener  net.Listener
-	engine    *Engine
+	gate      Gate
 	flights   map[string]*flightRecord
 	agents    map[string]string
 	worktrees map[string]string
@@ -151,7 +242,7 @@ type placeOpts struct {
 	TTL        time.Duration
 	User       string
 	Remote     bool
-	Engine     *Engine
+	Gate       Gate
 	Source     string
 }
 
@@ -167,7 +258,7 @@ type flightClientOpts struct {
 func writeMembershipToken(path string, raw []byte) (fingerprint string, err error) {
 	encoded := make([]byte, hex.EncodedLen(len(raw)))
 	hex.Encode(encoded, raw)
-	fingerprint = fingerprintSecret(string(encoded))
+	fingerprint = fingerprintToken(string(encoded))
 	payload := make([]byte, len(encoded)+1)
 	copy(payload, encoded)
 	payload[len(encoded)] = '\n'
@@ -207,6 +298,12 @@ func writeMembershipToken(path string, raw []byte) (fingerprint string, err erro
 		return "", err
 	}
 	return fingerprint, nil
+}
+
+// fingerprintToken is the hex SHA-256 of a token, the only form printed.
+func fingerprintToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 func loadMembershipToken(path string) (string, []byte, error) {
@@ -269,7 +366,7 @@ func gridTokenMatches(stored []byte, bearer string) bool {
 }
 
 func validGridID(id string) bool {
-	return roleNamePattern.MatchString(id)
+	return gridIDPattern.MatchString(id)
 }
 
 // defaultScratchRoot keeps worktrees under the adssh XDG data dir. There is no
@@ -278,19 +375,19 @@ func defaultScratchRoot() string {
 	return filepath.Join(config.XDGDataHome(), "worktrees")
 }
 
-func setScratchRoot(dir string) {
-	gridMu.Lock()
-	scratchRoot = dir
-	gridMu.Unlock()
+func (st *gridState) setScratchRoot(dir string) {
+	st.mu.Lock()
+	st.scratchRoot = dir
+	st.mu.Unlock()
 }
 
-func currentScratchRoot() string {
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	return scratchRoot
+func (st *gridState) currentScratchRoot() string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.scratchRoot
 }
 
-func initGrid(id, tokenFile, tokenOut string) (string, string, error) {
+func (st *gridState) initGrid(id, tokenFile, tokenOut string) (string, string, error) {
 	if tokenFile != "" && tokenOut != "" {
 		return "", "", fmt.Errorf("grid: --token-file and --token-out cannot be combined")
 	}
@@ -301,9 +398,9 @@ func initGrid(id, tokenFile, tokenOut string) (string, string, error) {
 		return "", "", fmt.Errorf("grid: invalid id")
 	}
 
-	gridMu.Lock()
-	already := gridState != nil
-	gridMu.Unlock()
+	st.mu.Lock()
+	already := st.member != nil
+	st.mu.Unlock()
 	if already {
 		return "", "", fmt.Errorf("grid: already initialized")
 	}
@@ -342,12 +439,12 @@ func initGrid(id, tokenFile, tokenOut string) (string, string, error) {
 		fingerprint = fp
 	}
 
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState != nil {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member != nil {
 		return "", "", fmt.Errorf("grid: already initialized")
 	}
-	gridState = &gridMembership{
+	st.member = &gridMembership{
 		id:        id,
 		tokenHash: hash,
 		flights:   map[string]*flightRecord{},
@@ -358,37 +455,37 @@ func initGrid(id, tokenFile, tokenOut string) (string, string, error) {
 	return id, fingerprint, nil
 }
 
-func gridStatus() (id, fingerprint, listen string, drained bool, flights int, err error) {
-	reapExpiredFlights(time.Now())
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+func (st *gridState) gridStatus() (id, fingerprint, listen string, drained bool, flights int, err error) {
+	st.reapExpiredFlights(time.Now())
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return "", "", "", false, 0, fmt.Errorf("grid: not initialized")
 	}
 	live := 0
-	for _, flight := range gridState.flights {
-		if flight.Status != "cancelled" {
+	for _, flight := range st.member.flights {
+		if flight.Status != flightStatusCanceled {
 			live++
 		}
 	}
 	fp := ""
-	if len(gridState.tokenHash) == sha256.Size {
-		fp = hex.EncodeToString(gridState.tokenHash)
+	if len(st.member.tokenHash) == sha256.Size {
+		fp = hex.EncodeToString(st.member.tokenHash)
 	}
-	return gridState.id, fp, gridState.listenURL, gridState.drained, live, nil
+	return st.member.id, fp, st.member.listenURL, st.member.drained, live, nil
 }
 
-func drainGrid() error {
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+func (st *gridState) drainGrid() error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return fmt.Errorf("grid: not initialized")
 	}
-	gridState.drained = true
+	st.member.drained = true
 	return nil
 }
 
-func listenGrid(listen, certFile, keyFile, tokenFile string, eng *Engine) (string, error) {
+func (st *gridState) listenGrid(listen, certFile, keyFile, tokenFile string, gate Gate) (string, error) {
 	cert, hexToken, hash, err := loadGridListenConfig(listen, certFile, keyFile, tokenFile)
 	if err != nil {
 		return "", err
@@ -401,14 +498,14 @@ func listenGrid(listen, certFile, keyFile, tokenFile string, eng *Engine) (strin
 		return "", err
 	}
 	srv := &http.Server{
-		Handler:           http.HandlerFunc(gridFlightHandler),
+		Handler:           http.HandlerFunc(st.gridFlightHandler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
 	stop := make(chan struct{})
-	listenURL, err := installGridServer(srv, ln, eng, hexToken, hash, stop)
+	listenURL, err := st.installGridServer(srv, ln, gate, hexToken, hash, stop)
 	if err != nil {
 		if closeErr := ln.Close(); closeErr != nil {
 			return "", errors.Join(err, closeErr)
@@ -416,16 +513,16 @@ func listenGrid(listen, certFile, keyFile, tokenFile string, eng *Engine) (strin
 		return "", err
 	}
 
-	go runGridReaper(stop, gridReapInterval)
+	go st.runGridReaper(stop, st.reapInterval)
 	go func() {
 		// tls.Listen already owns the handshake. ServeTLS would listen again.
 		serveErr := srv.Serve(ln)
 		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-			gridMu.Lock()
-			if gridState != nil && gridState.server == srv {
-				gridState.serveErr = serveErr
+			st.mu.Lock()
+			if st.member != nil && st.member.server == srv {
+				st.member.serveErr = serveErr
 			}
-			gridMu.Unlock()
+			st.mu.Unlock()
 		}
 	}()
 	return listenURL, nil
@@ -456,32 +553,32 @@ func loadGridListenConfig(listen, certFile, keyFile, tokenFile string) (tls.Cert
 
 // installGridServer records the listener on the grid, or refuses when the
 // grid is missing, already listening, or the token does not match.
-func installGridServer(srv *http.Server, ln net.Listener, eng *Engine, hexToken string, hash []byte, stop chan struct{}) (string, error) {
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+func (st *gridState) installGridServer(srv *http.Server, ln net.Listener, gate Gate, hexToken string, hash []byte, stop chan struct{}) (string, error) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return "", fmt.Errorf("grid: not initialized")
 	}
-	if gridState.listener != nil {
+	if st.member.listener != nil {
 		return "", fmt.Errorf("grid: already listening")
 	}
-	if len(gridState.tokenHash) == sha256.Size {
-		if !gridTokenMatches(gridState.tokenHash, hexToken) {
+	if len(st.member.tokenHash) == sha256.Size {
+		if !gridTokenMatches(st.member.tokenHash, hexToken) {
 			return "", fmt.Errorf("grid: token mismatch")
 		}
 	} else {
-		gridState.tokenHash = append([]byte(nil), hash...)
+		st.member.tokenHash = append([]byte(nil), hash...)
 	}
-	gridState.server = srv
-	gridState.listener = ln
-	gridState.listenURL = "https://" + ln.Addr().String()
-	gridState.engine = eng
-	gridState.stopReap = stop
-	return gridState.listenURL, nil
+	st.member.server = srv
+	st.member.listener = ln
+	st.member.listenURL = "https://" + ln.Addr().String()
+	st.member.gate = gate
+	st.member.stopReap = stop
+	return st.member.listenURL, nil
 }
 
 // runGridReaper cancels expired flights on every tick until stop closes.
-func runGridReaper(stop <-chan struct{}, interval time.Duration) {
+func (st *gridState) runGridReaper(stop <-chan struct{}, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -489,49 +586,49 @@ func runGridReaper(stop <-chan struct{}, interval time.Duration) {
 		case <-stop:
 			return
 		case now := <-ticker.C:
-			reapExpiredFlights(now)
+			st.reapExpiredFlights(now)
 		}
 	}
 }
 
 // reapExpiredFlights cancels every live flight past its TTL, releases its
-// agent session, and forgets cancelled flights older than the retention.
-func reapExpiredFlights(now time.Time) {
-	gridMu.Lock()
-	if gridState == nil {
-		gridMu.Unlock()
+// agent session, and forgets canceled flights older than the retention.
+func (st *gridState) reapExpiredFlights(now time.Time) {
+	st.mu.Lock()
+	if st.member == nil {
+		st.mu.Unlock()
 		return
 	}
 	var released []string
-	for id, rec := range gridState.flights {
-		if rec.Status == "cancelled" {
+	for id, rec := range st.member.flights {
+		if rec.Status == flightStatusCanceled {
 			if now.Sub(rec.CancelledAt) > gridCancelledRetention {
-				delete(gridState.flights, id)
+				delete(st.member.flights, id)
 			}
 			continue
 		}
 		if !now.Before(rec.ExpiresAt) {
-			released = append(released, cancelFlightLocked(rec, "lease expired", now))
+			released = append(released, st.cancelFlightLocked(rec, "lease expired", now))
 		}
 	}
-	gridMu.Unlock()
+	st.mu.Unlock()
 	releaseAgentSessions(released)
 }
 
-// cancelFlightLocked marks rec cancelled and frees its agent and worktree
+// cancelFlightLocked marks rec canceled and frees its agent and worktree
 // ids. The caller holds gridMu and must release the returned session.
-func cancelFlightLocked(rec *flightRecord, reason string, now time.Time) string {
-	rec.Status = "cancelled"
+func (st *gridState) cancelFlightLocked(rec *flightRecord, reason string, now time.Time) string {
+	rec.Status = flightStatusCanceled
 	rec.Reason = reason
 	rec.CancelledAt = now
-	if gridState.agents[rec.AgentID] == rec.ID {
-		delete(gridState.agents, rec.AgentID)
+	if st.member.agents[rec.AgentID] == rec.ID {
+		delete(st.member.agents, rec.AgentID)
 	}
-	if gridState.worktrees[rec.WorktreeID] == rec.ID {
+	if st.member.worktrees[rec.WorktreeID] == rec.ID {
 		// The directory stays, so the id stays recorded and destroyable.
-		gridState.worktrees[rec.WorktreeID] = ""
+		st.member.worktrees[rec.WorktreeID] = ""
 	}
-	delete(gridState.sessions, rec.SessionID)
+	delete(st.member.sessions, rec.SessionID)
 	return rec.SessionID
 }
 
@@ -544,19 +641,21 @@ func releaseAgentSessions(ids []string) {
 	}
 }
 
-func resetGridState() {
-	gridMu.Lock()
+// resetGridState stops the listener, releases agent sessions, and restores
+// the default scratch root and gate. Tests use it between cases.
+func (st *gridState) resetGridState() {
+	st.mu.Lock()
 	var srv *http.Server
 	var ln net.Listener
-	if gridState != nil {
-		srv = gridState.server
-		ln = gridState.listener
-		if gridState.stopReap != nil {
-			close(gridState.stopReap)
-			gridState.stopReap = nil
+	if st.member != nil {
+		srv = st.member.server
+		ln = st.member.listener
+		if st.member.stopReap != nil {
+			close(st.member.stopReap)
+			st.member.stopReap = nil
 		}
 	}
-	gridMu.Unlock()
+	st.mu.Unlock()
 
 	if srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -567,21 +666,22 @@ func resetGridState() {
 		_ = ln.Close()
 	}
 
-	gridMu.Lock()
+	st.mu.Lock()
 	var sessionIDs []string
-	if gridState != nil {
-		for id := range gridState.sessions {
+	if st.member != nil {
+		for id := range st.member.sessions {
 			sessionIDs = append(sessionIDs, id)
 		}
 	}
-	gridState = nil
-	scratchRoot = defaultScratchRoot()
-	gridMu.Unlock()
+	st.member = nil
+	st.scratchRoot = defaultScratchRoot()
+	st.gate = defaultEngineGate{}
+	st.mu.Unlock()
 
 	releaseAgentSessions(sessionIDs)
 }
 
-func gridFlightHandler(w http.ResponseWriter, r *http.Request) {
+func (st *gridState) gridFlightHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/v1/flight" {
 		http.NotFound(w, r)
 		return
@@ -601,14 +701,18 @@ func gridFlightHandler(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(auth, bearerPrefix) {
 		bearer = strings.TrimPrefix(auth, bearerPrefix)
 	}
-	gridMu.Lock()
+	st.mu.Lock()
 	var stored []byte
-	var eng *Engine
-	if gridState != nil {
-		stored = append([]byte(nil), gridState.tokenHash...)
-		eng = gridState.engine
+	var gate Gate
+	if st.member != nil {
+		stored = append([]byte(nil), st.member.tokenHash...)
+		gate = st.member.gate
 	}
-	gridMu.Unlock()
+	if st.gate == nil {
+		// SetGate(nil) also refuses a listener installed before it.
+		gate = nil
+	}
+	st.mu.Unlock()
 	if !gridTokenMatches(stored, bearer) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -639,7 +743,7 @@ func gridFlightHandler(w http.ResponseWriter, r *http.Request) {
 			action = "place"
 		}
 	}
-	result, callErr := dispatchFlightAction(eng, action, wire, true)
+	result, callErr := st.dispatchFlightAction(gate, action, wire, true)
 	if callErr != nil {
 		writeGridHTTPError(w, callErr)
 		return
@@ -647,37 +751,37 @@ func gridFlightHandler(w http.ResponseWriter, r *http.Request) {
 	writeFlightResult(w, result)
 }
 
-func dispatchFlightAction(eng *Engine, action string, wire flightWire, remote bool) (flightResult, error) {
+func (st *gridState) dispatchFlightAction(gate Gate, action string, wire flightWire, remote bool) (flightResult, error) {
 	switch action {
 	case "place":
-		if eng == nil || !eng.PolicyLoaded() {
+		if !gateReady(gate) {
 			return flightResult{}, gridErr(http.StatusForbidden, "policy_required")
 		}
 		if wire.TTLSeconds < 1 || wire.TTLSeconds > 86400 {
 			return flightResult{}, gridErr(http.StatusBadRequest, "flight: ttl is invalid")
 		}
-		return placeFlight(placeOpts{
+		return st.placeFlight(placeOpts{
 			FlightID:   wire.FlightID,
 			AgentID:    wire.AgentID,
 			WorktreeID: wire.WorktreeID,
 			TTL:        time.Duration(wire.TTLSeconds) * time.Second,
 			User:       gridPeerUser,
 			Remote:     true,
-			Engine:     eng,
+			Gate:       gate,
 		})
 	case "rehearse", "rehearsal":
-		if eng == nil || !eng.PolicyLoaded() {
+		if !gateReady(gate) {
 			return flightResult{}, gridErr(http.StatusForbidden, "policy_required")
 		}
-		return rehearseFlight(eng, wire.FlightID, wire.Command, remote)
+		return st.rehearseFlight(gate, wire.FlightID, wire.Command, remote)
 	case "cancel", "status":
-		if eng == nil || !eng.PolicyLoaded() {
+		if !gateReady(gate) {
 			return flightResult{}, gridErr(http.StatusForbidden, "policy_required")
 		}
 		if action == "cancel" {
-			return cancelFlight(wire.FlightID, remote)
+			return st.cancelFlight(wire.FlightID, remote)
 		}
-		return flightStatus(wire.FlightID, remote)
+		return st.flightStatus(wire.FlightID, remote)
 	default:
 		return flightResult{}, gridErr(http.StatusBadRequest, "unknown action")
 	}
@@ -703,25 +807,25 @@ func writeFlightResult(w http.ResponseWriter, result flightResult) {
 	_, _ = w.Write(buf)
 }
 
-func placeFlight(opts placeOpts) (flightResult, error) {
+func (st *gridState) placeFlight(opts placeOpts) (flightResult, error) {
 	user, source, err := validatePlaceOpts(opts)
 	if err != nil {
 		return flightResult{}, err
 	}
-	gridMu.Lock()
-	if gridState == nil {
-		gridMu.Unlock()
+	st.mu.Lock()
+	if st.member == nil {
+		st.mu.Unlock()
 		return flightResult{}, fmt.Errorf("grid: not initialized")
 	}
-	drained := gridState.drained
-	gridMu.Unlock()
+	drained := st.member.drained
+	st.mu.Unlock()
 	if drained {
 		return flightResult{}, gridErr(http.StatusConflict, "drained")
 	}
 	now := time.Now().UTC()
-	reapExpiredFlights(now)
+	st.reapExpiredFlights(now)
 
-	dir, err := confinedWorktreePath(opts.WorktreeID)
+	dir, err := st.confinedWorktreePath(opts.WorktreeID)
 	if err != nil {
 		return flightResult{}, err
 	}
@@ -745,10 +849,10 @@ func placeFlight(opts placeOpts) (flightResult, error) {
 		ID:        opts.AgentID,
 		FlightID:  opts.FlightID,
 		Worktree:  opts.WorktreeID,
-		Allow:     agentAllowCopy(),
+		Allow:     security.AgentAllowlist(),
 		ExpiresAt: rec.ExpiresAt,
 	})
-	if err := registerFlight(rec, session, now); err != nil {
+	if err := st.registerFlight(rec, session, now); err != nil {
 		return flightResult{}, err
 	}
 	return flightResult{Status: "placed", SessionID: rec.SessionID, FlightID: opts.FlightID}, nil
@@ -769,7 +873,7 @@ func validatePlaceOpts(opts placeOpts) (string, string, error) {
 	if user == "" {
 		return "", "", gridErr(http.StatusBadRequest, "flight: user is required")
 	}
-	if opts.Engine == nil || !opts.Engine.PolicyLoaded() {
+	if !gateReady(opts.Gate) {
 		return "", "", gridErr(http.StatusForbidden, "policy_required")
 	}
 	source := ""
@@ -790,25 +894,25 @@ func validatePlaceOpts(opts placeOpts) (string, string, error) {
 
 // registerFlight records rec and registers its agent session, refusing
 // duplicate ids, a drained grid, and a full flight table.
-func registerFlight(rec *flightRecord, session *sys.Session, now time.Time) error {
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+func (st *gridState) registerFlight(rec *flightRecord, session *sys.Session, now time.Time) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return fmt.Errorf("grid: not initialized")
 	}
-	if gridState.drained {
+	if st.member.drained {
 		return gridErr(http.StatusConflict, "drained")
 	}
-	_, flightTaken := gridState.flights[rec.ID]
-	_, agentTaken := gridState.agents[rec.AgentID]
-	_, sessionTaken := gridState.sessions[rec.SessionID]
-	if flightTaken || agentTaken || sessionTaken || gridState.worktrees[rec.WorktreeID] != "" ||
+	_, flightTaken := st.member.flights[rec.ID]
+	_, agentTaken := st.member.agents[rec.AgentID]
+	_, sessionTaken := st.member.sessions[rec.SessionID]
+	if flightTaken || agentTaken || sessionTaken || st.member.worktrees[rec.WorktreeID] != "" ||
 		sys.GetSession(rec.SessionID) != nil {
 		return gridErr(http.StatusConflict, "flight: duplicate id")
 	}
 	live := 0
-	for _, flight := range gridState.flights {
-		if flight.Status != "cancelled" && now.Before(flight.ExpiresAt) {
+	for _, flight := range st.member.flights {
+		if flight.Status != flightStatusCanceled && now.Before(flight.ExpiresAt) {
 			live++
 		}
 	}
@@ -818,43 +922,43 @@ func registerFlight(rec *flightRecord, session *sys.Session, now time.Time) erro
 	if err := sys.RegisterSession(session); err != nil {
 		return err
 	}
-	gridState.flights[rec.ID] = rec
-	gridState.agents[rec.AgentID] = rec.ID
-	gridState.worktrees[rec.WorktreeID] = rec.ID
-	gridState.sessions[rec.SessionID] = rec.ID
+	st.member.flights[rec.ID] = rec
+	st.member.agents[rec.AgentID] = rec.ID
+	st.member.worktrees[rec.WorktreeID] = rec.ID
+	st.member.sessions[rec.SessionID] = rec.ID
 	return nil
 }
 
-func rehearseFlight(eng *Engine, flightID string, command []string, remote bool) (flightResult, error) {
+func (st *gridState) rehearseFlight(gate Gate, flightID string, command []string, remote bool) (flightResult, error) {
 	if !validGridID(flightID) {
 		return flightResult{}, gridErr(http.StatusBadRequest, "flight: invalid id")
 	}
 	if err := validateFlightCommand(command); err != nil {
 		return flightResult{}, err
 	}
-	if eng == nil || !eng.PolicyLoaded() {
+	if !gateReady(gate) {
 		return flightResult{}, gridErr(http.StatusForbidden, "policy_required")
 	}
-	gridMu.Lock()
-	if gridState == nil {
-		gridMu.Unlock()
+	st.mu.Lock()
+	if st.member == nil {
+		st.mu.Unlock()
 		return flightResult{}, fmt.Errorf("grid: not initialized")
 	}
-	rec := gridState.flights[flightID]
+	rec := st.member.flights[flightID]
 	if rec == nil {
-		gridMu.Unlock()
+		st.mu.Unlock()
 		return flightResult{}, gridErr(http.StatusNotFound, "flight: not found")
 	}
 	sessionID := rec.SessionID
 	status := rec.Status
-	gridMu.Unlock()
+	st.mu.Unlock()
 
-	if !AgentCommandAllowed(command[0]) {
+	if !security.AgentCommandAllowed(command[0]) {
 		reason := fmt.Sprintf("agent cannot run %q", command[0])
-		rememberFlightDenial(flightID, reason, status)
+		st.rememberFlightDenial(flightID, reason, status)
 		return flightResult{Status: "denied", Reason: reason, FlightID: flightID}, nil
 	}
-	if status == "cancelled" {
+	if status == flightStatusCanceled {
 		return flightResult{}, gridErr(http.StatusForbidden, "flight: agent lease expired")
 	}
 	session := sys.GetSession(sessionID)
@@ -866,13 +970,13 @@ func rehearseFlight(eng *Engine, flightID string, command []string, remote bool)
 		return flightResult{}, gridErr(http.StatusForbidden, "flight: agent lease expired")
 	}
 
-	pctx := eng.buildPolicyContext(command[0], command[1:], sessionID)
+	pctx := gate.BuildPolicyContext(command[0], command[1:], sessionID)
 	if remote {
 		pctx.User = gridPeerUser
 		pctx.Groups = nil
 		pctx.Elevation = nil
 	}
-	allowed, reason, err := eng.EvaluatePolicy(pctx)
+	allowed, reason, err := gate.EvaluatePolicy(pctx)
 	if err != nil {
 		return flightResult{}, gridErr(http.StatusForbidden, "flight: policy evaluation failed")
 	}
@@ -880,31 +984,31 @@ func rehearseFlight(eng *Engine, flightID string, command []string, remote bool)
 		if reason == "" {
 			reason = "denied"
 		}
-		rememberFlightDenial(flightID, reason, status)
+		st.rememberFlightDenial(flightID, reason, status)
 		return flightResult{Status: "denied", Reason: reason, FlightID: flightID}, nil
 	}
-	gridMu.Lock()
-	if gridState != nil {
-		if rec := gridState.flights[flightID]; rec != nil && rec.Status != "cancelled" {
+	st.mu.Lock()
+	if st.member != nil {
+		if rec := st.member.flights[flightID]; rec != nil && rec.Status != flightStatusCanceled {
 			rec.Status = "rehearsed"
 			rec.Reason = ""
 		}
 	}
-	gridMu.Unlock()
+	st.mu.Unlock()
 	return flightResult{Status: "rehearsed", FlightID: flightID}, nil
 }
 
-func rememberFlightDenial(flightID, reason, previousStatus string) {
-	if previousStatus == "cancelled" {
+func (st *gridState) rememberFlightDenial(flightID, reason, previousStatus string) {
+	if previousStatus == flightStatusCanceled {
 		return
 	}
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return
 	}
-	rec := gridState.flights[flightID]
-	if rec == nil || rec.Status == "cancelled" {
+	rec := st.member.flights[flightID]
+	if rec == nil || rec.Status == flightStatusCanceled {
 		return
 	}
 	rec.Status = "denied"
@@ -913,38 +1017,38 @@ func rememberFlightDenial(flightID, reason, previousStatus string) {
 
 // cancelFlight cancels a flight. remoteOnly is set for a grid peer, which
 // may cancel only flights a peer placed; a local flight reads as not found.
-func cancelFlight(id string, remoteOnly bool) (flightResult, error) {
+func (st *gridState) cancelFlight(id string, remoteOnly bool) (flightResult, error) {
 	if !validGridID(id) {
 		return flightResult{}, gridErr(http.StatusBadRequest, "flight: invalid id")
 	}
-	gridMu.Lock()
-	if gridState == nil {
-		gridMu.Unlock()
+	st.mu.Lock()
+	if st.member == nil {
+		st.mu.Unlock()
 		return flightResult{}, fmt.Errorf("grid: not initialized")
 	}
-	rec := gridState.flights[id]
+	rec := st.member.flights[id]
 	if rec == nil || (remoteOnly && !rec.Remote) {
-		gridMu.Unlock()
+		st.mu.Unlock()
 		return flightResult{}, gridErr(http.StatusNotFound, "flight: not found")
 	}
-	sessionID := cancelFlightLocked(rec, "", time.Now())
-	gridMu.Unlock()
+	sessionID := st.cancelFlightLocked(rec, "", time.Now())
+	st.mu.Unlock()
 
 	releaseAgentSessions([]string{sessionID})
-	return flightResult{Status: "cancelled", FlightID: id}, nil
+	return flightResult{Status: flightStatusCanceled, FlightID: id}, nil
 }
 
 // flightStatus reads a flight. remoteOnly hides local flights from a peer.
-func flightStatus(id string, remoteOnly bool) (flightResult, error) {
+func (st *gridState) flightStatus(id string, remoteOnly bool) (flightResult, error) {
 	if !validGridID(id) {
 		return flightResult{}, gridErr(http.StatusBadRequest, "flight: invalid id")
 	}
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return flightResult{}, fmt.Errorf("grid: not initialized")
 	}
-	rec := gridState.flights[id]
+	rec := st.member.flights[id]
 	if rec == nil || (remoteOnly && !rec.Remote) {
 		return flightResult{}, gridErr(http.StatusNotFound, "flight: not found")
 	}
@@ -968,15 +1072,15 @@ func validateFlightCommand(command []string) error {
 	return nil
 }
 
-func listAgents() []flightRecord {
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+func (st *gridState) listAgents() []flightRecord {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return nil
 	}
-	out := make([]flightRecord, 0, len(gridState.agents))
-	for agentID, flightID := range gridState.agents {
-		rec := gridState.flights[flightID]
+	out := make([]flightRecord, 0, len(st.member.agents))
+	for agentID, flightID := range st.member.agents {
+		rec := st.member.flights[flightID]
 		if rec == nil {
 			out = append(out, flightRecord{AgentID: agentID, ID: flightID})
 			continue
@@ -986,7 +1090,7 @@ func listAgents() []flightRecord {
 	return out
 }
 
-func postFlight(eng *Engine, opts flightClientOpts) (flightResult, error) {
+func postFlight(gate Gate, opts flightClientOpts) (flightResult, error) {
 	target, err := flightEndpoint(opts)
 	if err != nil {
 		return flightResult{}, err
@@ -996,7 +1100,7 @@ func postFlight(eng *Engine, opts flightClientOpts) (flightResult, error) {
 		action = opts.Wire.Action
 	}
 	if action == "place" || action == "rehearse" || action == "rehearsal" {
-		if eng == nil || !eng.PolicyLoaded() {
+		if !gateReady(gate) {
 			return flightResult{}, gridErr(http.StatusForbidden, "policy_required")
 		}
 	}
@@ -1096,25 +1200,20 @@ func decodeFlightResponse(resp *http.Response) (flightResult, error) {
 	return result, nil
 }
 
+// loadFlightCA reads the CA bundle through safefile: no symlink, no FIFO, and
+// no more than gridMaxCA bytes, all checked on the opened descriptor.
 func loadFlightCA(path string) (*x509.CertPool, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, fmt.Errorf("flight: ca file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 && info.Size() > gridMaxCA {
-		return nil, fmt.Errorf("flight: ca file is too large")
-	}
-	file, err := os.Open(path)
+	file, info, err := safefile.Open(nil, path)
 	if err != nil {
 		return nil, fmt.Errorf("flight: ca file: %w", err)
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, gridMaxCA+1))
+	data, err := safefile.ReadAll(file, info, gridMaxCA)
+	if errors.Is(err, safefile.ErrTooLarge) {
+		return nil, fmt.Errorf("flight: ca file is too large")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("flight: ca file: %w", err)
-	}
-	if int64(len(data)) > gridMaxCA {
-		return nil, fmt.Errorf("flight: ca file is too large")
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(data) {
@@ -1123,77 +1222,77 @@ func loadFlightCA(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-func createWorktree(id string) (string, error) {
+func (st *gridState) createWorktree(id string) (string, error) {
 	if !validGridID(id) {
 		return "", fmt.Errorf("worktree: invalid id")
 	}
-	path, err := confinedWorktreePath(id)
+	path, err := st.confinedWorktreePath(id)
 	if err != nil {
 		return "", err
 	}
-	gridMu.Lock()
-	if gridState == nil {
-		gridMu.Unlock()
+	st.mu.Lock()
+	if st.member == nil {
+		st.mu.Unlock()
 		return "", fmt.Errorf("grid: not initialized")
 	}
-	if _, ok := gridState.worktrees[id]; ok {
-		gridMu.Unlock()
+	if _, ok := st.member.worktrees[id]; ok {
+		st.mu.Unlock()
 		return "", fmt.Errorf("worktree: duplicate id")
 	}
-	gridMu.Unlock()
+	st.mu.Unlock()
 	if err := ensureWorktreeDir(path); err != nil {
 		return "", fmt.Errorf("worktree: directory: %w", err)
 	}
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	if gridState == nil {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.member == nil {
 		return "", fmt.Errorf("grid: not initialized")
 	}
-	if _, ok := gridState.worktrees[id]; ok {
+	if _, ok := st.member.worktrees[id]; ok {
 		return "", fmt.Errorf("worktree: duplicate id")
 	}
-	gridState.worktrees[id] = ""
+	st.member.worktrees[id] = ""
 	return path, nil
 }
 
 // destroyWorktree removes a worktree this grid recorded and that no live
 // flight holds. An unrecorded id is refused even if the directory exists.
-func destroyWorktree(id string) error {
+func (st *gridState) destroyWorktree(id string) error {
 	if !validGridID(id) {
 		return fmt.Errorf("worktree: invalid id")
 	}
-	gridMu.Lock()
-	if gridState == nil {
-		gridMu.Unlock()
+	st.mu.Lock()
+	if st.member == nil {
+		st.mu.Unlock()
 		return fmt.Errorf("grid: not initialized")
 	}
-	flightID, ok := gridState.worktrees[id]
+	flightID, ok := st.member.worktrees[id]
 	if !ok {
-		gridMu.Unlock()
+		st.mu.Unlock()
 		return fmt.Errorf("worktree: not found")
 	}
 	if flightID != "" {
-		gridMu.Unlock()
+		st.mu.Unlock()
 		return fmt.Errorf("worktree: in use")
 	}
-	gridState.worktrees[id] = worktreeDestroying
-	gridMu.Unlock()
+	st.member.worktrees[id] = worktreeDestroying
+	st.mu.Unlock()
 
-	err := removeWorktreeDir(id)
-	gridMu.Lock()
-	if gridState != nil && gridState.worktrees[id] == worktreeDestroying {
+	err := st.removeWorktreeDir(id)
+	st.mu.Lock()
+	if st.member != nil && st.member.worktrees[id] == worktreeDestroying {
 		if err == nil {
-			delete(gridState.worktrees, id)
+			delete(st.member.worktrees, id)
 		} else {
-			gridState.worktrees[id] = ""
+			st.member.worktrees[id] = ""
 		}
 	}
-	gridMu.Unlock()
+	st.mu.Unlock()
 	return err
 }
 
-func removeWorktreeDir(id string) error {
-	path, err := confinedWorktreePath(id)
+func (st *gridState) removeWorktreeDir(id string) error {
+	path, err := st.confinedWorktreePath(id)
 	if err != nil {
 		return err
 	}
@@ -1215,17 +1314,17 @@ func removeWorktreeDir(id string) error {
 
 // agentCheckoutSource returns the source bound to agent's flight. A from
 // value the agent supplies must name that same source.
-func agentCheckoutSource(agent *sys.ManagedAgent, from string) (string, error) {
-	gridMu.Lock()
+func (st *gridState) agentCheckoutSource(agent *sys.ManagedAgent, from string) (string, error) {
+	st.mu.Lock()
 	var rec *flightRecord
-	if gridState != nil {
-		rec = gridState.flights[agent.FlightID]
+	if st.member != nil {
+		rec = st.member.flights[agent.FlightID]
 	}
 	bound := ""
-	if rec != nil && rec.AgentID == agent.ID && rec.Status != "cancelled" {
+	if rec != nil && rec.AgentID == agent.ID && rec.Status != flightStatusCanceled {
 		bound = rec.Source
 	}
-	gridMu.Unlock()
+	st.mu.Unlock()
 	if bound == "" {
 		return "", fmt.Errorf("worktree: agent has no bound source")
 	}
@@ -1277,7 +1376,7 @@ func validateCheckoutSource(src string) (string, error) {
 	return src, nil
 }
 
-func checkoutWorktree(id, source, rev string) error {
+func (st *gridState) checkoutWorktree(id, source, rev string) error {
 	src, err := validateCheckoutSource(source)
 	if err != nil {
 		return err
@@ -1285,7 +1384,7 @@ func checkoutWorktree(id, source, rev string) error {
 	if !commitHashPattern.MatchString(rev) {
 		return fmt.Errorf("worktree: rev must be a 40-character commit hash")
 	}
-	dest, err := confinedWorktreePath(id)
+	dest, err := st.confinedWorktreePath(id)
 	if err != nil {
 		return err
 	}
@@ -1319,14 +1418,14 @@ func checkoutWorktree(id, source, rev string) error {
 	return nil
 }
 
-func repoCat(id, relPath string) ([]byte, error) {
+func (st *gridState) repoCat(id, relPath string) ([]byte, error) {
 	if !validGridID(id) {
 		return nil, fmt.Errorf("repo: invalid id")
 	}
 	if err := validateRepoPath(relPath); err != nil {
 		return nil, err
 	}
-	base, err := confinedWorktreePath(id)
+	base, err := st.confinedWorktreePath(id)
 	if err != nil {
 		return nil, err
 	}
@@ -1399,11 +1498,11 @@ func pathInside(base, target string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
 }
 
-func confinedWorktreePath(id string) (string, error) {
+func (st *gridState) confinedWorktreePath(id string) (string, error) {
 	if !validGridID(id) {
 		return "", fmt.Errorf("worktree: invalid id")
 	}
-	root, err := checkedScratchRoot()
+	root, err := st.checkedScratchRoot()
 	if err != nil {
 		return "", err
 	}
@@ -1417,8 +1516,8 @@ func confinedWorktreePath(id string) (string, error) {
 // checkedScratchRoot returns the scratch root, creating it 0700 if missing.
 // The root itself is never resolved through a symlink: it must be a real
 // directory owned by the euid with mode 0700.
-func checkedScratchRoot() (string, error) {
-	root := filepath.Clean(currentScratchRoot())
+func (st *gridState) checkedScratchRoot() (string, error) {
+	root := filepath.Clean(st.currentScratchRoot())
 	if !filepath.IsAbs(root) {
 		return "", fmt.Errorf("worktree: scratch root must be absolute")
 	}

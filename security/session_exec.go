@@ -23,7 +23,29 @@ import (
 // a smuggled earlier duplicate cannot hide a session overlay or a shell
 // export. An unset after an export drops the name. There is no fallback to
 // the listener uid.
+//
+// A run marked with WithProcessGroupKill starts each child in its own process
+// group. When the run context is done the whole group gets SIGKILL at once,
+// so a grandchild of a forking shell, or a background child that ignores
+// SIGINT, cannot outlive the deadline or hold the output pipe open. WaitDelay
+// bounds a descendant that left the group (setsid) and still holds the pipe.
+// The REPL does not mark its runs: a child there stays in the terminal's
+// foreground group for job control.
 const sessionKillTimeout = 2 * time.Second
+
+type processGroupKillKey struct{}
+
+// WithProcessGroupKill marks ctx so SessionExecHandler starts each child in a
+// new process group and kills that group when ctx is done. Use it only for
+// runs without a controlling terminal (captured output, nil stdin).
+func WithProcessGroupKill(ctx context.Context) context.Context {
+	return context.WithValue(ctx, processGroupKillKey{}, true)
+}
+
+func processGroupKill(ctx context.Context) bool {
+	on, _ := ctx.Value(processGroupKillKey{}).(bool)
+	return on
+}
 
 // SessionExecHandler runs an already-authorized external command. It does not
 // call next for a non-empty argv, so a failure cannot fall through to an
@@ -39,7 +61,7 @@ func SessionExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 			if hc.Stderr != nil {
 				fmt.Fprintln(hc.Stderr, err)
 			}
-			return interp.NewExitStatus(127)
+			return interp.ExitStatus(127)
 		}
 		cmd := exec.Cmd{
 			Path:   path,
@@ -56,8 +78,23 @@ func SessionExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 			}
 			return err
 		}
+		groupKill := processGroupKill(ctx)
+		if groupKill {
+			if cmd.SysProcAttr == nil {
+				cmd.SysProcAttr = &syscall.SysProcAttr{}
+			}
+			cmd.SysProcAttr.Setpgid = true
+			cmd.WaitDelay = sessionKillTimeout
+		}
 		err = cmd.Start()
-		if err == nil {
+		if err == nil && groupKill {
+			pgid := cmd.Process.Pid
+			stopf := context.AfterFunc(ctx, func() {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			})
+			defer stopf()
+			err = cmd.Wait()
+		} else if err == nil {
 			stopf := context.AfterFunc(ctx, func() {
 				if sessionKillTimeout <= 0 || runtime.GOOS == "windows" {
 					_ = cmd.Process.Signal(os.Kill)
@@ -76,14 +113,14 @@ func SessionExecHandler(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				return interp.NewExitStatus(uint8(128 + int(status.Signal())))
+				return interp.ExitStatus(uint8(128 + int(status.Signal())))
 			}
-			return interp.NewExitStatus(uint8(err.ExitCode()))
+			return interp.ExitStatus(uint8(err.ExitCode()))
 		case *exec.Error:
 			if hc.Stderr != nil {
 				fmt.Fprintf(hc.Stderr, "%v\n", err)
 			}
-			return interp.NewExitStatus(127)
+			return interp.ExitStatus(127)
 		default:
 			return err
 		}

@@ -67,6 +67,10 @@ func makeFSWrite(restricted, appendMode bool) *starlark.Builtin {
 		if len(content) > maxWriteBytes {
 			return nil, fmt.Errorf("fs.%s: content exceeds %d bytes", name, maxWriteBytes)
 		}
+		// Record before the file is touched; a failed write leaves it alone.
+		if err := security.LogEvent(fmt.Sprintf("STARLARK_FS: %s path=%q bytes=%d mode=%#o", name, path, len(content), mode)); err != nil {
+			return nil, fmt.Errorf("fs.%s: audit: %w", name, err)
+		}
 		flags := os.O_CREATE | os.O_WRONLY
 		if appendMode {
 			flags |= os.O_APPEND
@@ -85,7 +89,6 @@ func makeFSWrite(restricted, appendMode bool) *starlark.Builtin {
 		if cerr != nil {
 			return nil, fmt.Errorf("fs.%s: %v", name, cerr)
 		}
-		security.LogEvent(fmt.Sprintf("STARLARK_FS: %s path=%q bytes=%d mode=%#o", name, path, n, mode))
 		return starlark.MakeInt(n), nil
 	})
 }
@@ -104,10 +107,12 @@ func makeFSMkdir(restricted bool) *starlark.Builtin {
 		if path == "" {
 			return nil, fmt.Errorf("fs.mkdir: path is required")
 		}
+		if err := security.LogEvent(fmt.Sprintf("STARLARK_FS: mkdir path=%q mode=%#o", path, mode)); err != nil {
+			return nil, fmt.Errorf("fs.mkdir: audit: %w", err)
+		}
 		if err := os.MkdirAll(filepath.Clean(path), os.FileMode(mode)); err != nil {
 			return nil, fmt.Errorf("fs.mkdir: %v", err)
 		}
-		security.LogEvent(fmt.Sprintf("STARLARK_FS: mkdir path=%q mode=%#o", path, mode))
 		return starlark.None, nil
 	})
 }

@@ -1,12 +1,16 @@
-package security
+package grid
 
-// Threats: grid, flight, and agent commands, and worktree create, destroy,
-// and checkout, require a live gridops elevation; a managed agent cannot
-// mint that elevation. A managed agent may check out only into its own
-// worktree and only from the source bound to its flight, and may cat only
-// its own worktree. Membership tokens are never printed. Remote flights send
-// no caller user, no credentials, and no source. Checkout and cat stay
-// inside the scratch worktree.
+// Threats: these virtual binaries live in internal/grid and register with
+// security.Register; the security dispatcher authorizes them before Run.
+// Every Run refuses when the grid's injected gate is nil, and policy for a
+// flight is evaluated on the engine that dispatched the binary. grid, flight,
+// and agent commands, and worktree create, destroy, and checkout, require a
+// live gridops elevation; a managed agent cannot mint that elevation. A
+// managed agent may check out only into its own worktree and only from the
+// source bound to its flight, and may cat only its own worktree. Membership
+// tokens are never printed. Remote flights send no caller user, no
+// credentials, and no source. Checkout and cat stay inside the scratch
+// worktree.
 // Non-goals: this does not execute a rehearsed command, skip policy, or
 // change the process uid. repo cat by a non-agent session needs no
 // elevation; it reads only inside the 0700 scratch root.
@@ -19,6 +23,7 @@ import (
 	"time"
 
 	"github.com/afterdarksys/adssh/internal/sys"
+	"github.com/afterdarksys/adssh/security"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -74,26 +79,29 @@ func (repoBinary) Description() string {
 func (repoBinary) Usage() string { return "repo cat --id W --path REL" }
 
 func init() {
-	Register(gridBinary{})
-	Register(flightBinary{})
-	Register(agentBinary{})
-	Register(worktreeBinary{})
-	Register(repoBinary{})
+	security.Register(gridBinary{})
+	security.Register(flightBinary{})
+	security.Register(agentBinary{})
+	security.Register(worktreeBinary{})
+	security.Register(repoBinary{})
 }
 
 func requireGridOps(ctx context.Context, command string) (*sys.Session, error) {
-	session := sys.GetSession(SessionIDFromContext(ctx))
+	session := sys.GetSession(security.SessionIDFromContext(ctx))
 	if session == nil || session.ManagedAgent() != nil {
 		return nil, fmt.Errorf("%s: requires an active gridops elevation", command)
 	}
 	elevation := session.ActiveElevation()
-	if elevation == nil || elevation.Role != RoleGridOps {
+	if elevation == nil || elevation.Role != security.RoleGridOps {
 		return nil, fmt.Errorf("%s: requires an active gridops elevation", command)
 	}
 	return session, nil
 }
 
 func (gridBinary) Run(ctx context.Context, args []string) error {
+	if _, err := procGrid.gateFor(ctx); err != nil {
+		return err
+	}
 	if _, err := requireGridOps(ctx, "grid"); err != nil {
 		return err
 	}
@@ -109,13 +117,13 @@ func (gridBinary) Run(ctx context.Context, args []string) error {
 		if _, err := parseNamedFlags("grid", head, nil); err != nil {
 			return err
 		}
-		id, fingerprint, listen, drained, flights, err := gridStatus()
+		id, fingerprint, listen, drained, flights, err := procGrid.gridStatus()
 		if err != nil {
 			return err
 		}
 		hc := interp.HandlerCtx(ctx)
 		fmt.Fprintf(hc.Stdout, "grid: id=%s fingerprint=%s drained=%t flights=%d listening=%s\n",
-			id, fingerprint, drained, flights, emptyDash(listen))
+			id, fingerprint, drained, flights, dashIfEmpty(listen))
 		return nil
 	case "init":
 		flags, err := parseNamedFlags("grid", head, map[string]bool{
@@ -124,7 +132,7 @@ func (gridBinary) Run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		id, fingerprint, err := initGrid(flags["id"], flags["token-file"], flags["token-out"])
+		id, fingerprint, err := procGrid.initGrid(flags["id"], flags["token-file"], flags["token-out"])
 		if err != nil {
 			return err
 		}
@@ -137,7 +145,7 @@ func (gridBinary) Run(ctx context.Context, args []string) error {
 		if _, err := parseNamedFlags("grid", head, nil); err != nil {
 			return err
 		}
-		if err := drainGrid(); err != nil {
+		if err := procGrid.drainGrid(); err != nil {
 			return err
 		}
 		hc := interp.HandlerCtx(ctx)
@@ -163,7 +171,11 @@ func gridServe(ctx context.Context, args []string) error {
 		}
 		values = append(values, value)
 	}
-	url, err := listenGrid(values[0], values[1], values[2], values[3], engineFromContext(ctx))
+	gate, err := procGrid.gateFor(ctx)
+	if err != nil {
+		return err
+	}
+	url, err := procGrid.listenGrid(values[0], values[1], values[2], values[3], gate)
 	if err != nil {
 		return err
 	}
@@ -173,6 +185,9 @@ func gridServe(ctx context.Context, args []string) error {
 }
 
 func (flightBinary) Run(ctx context.Context, args []string) error {
+	if _, err := procGrid.gateFor(ctx); err != nil {
+		return err
+	}
 	session, err := requireGridOps(ctx, "flight")
 	if err != nil {
 		return err
@@ -239,9 +254,13 @@ func flightPlace(ctx context.Context, session *sys.Session, args []string) error
 	if err != nil {
 		return err
 	}
+	gate, err := procGrid.gateFor(ctx)
+	if err != nil {
+		return err
+	}
 	var result flightResult
 	if remote {
-		result, err = postFlight(engineFromContext(ctx), flightClientOpts{
+		result, err = postFlight(gate, flightClientOpts{
 			Host:       flags["host"],
 			CAFile:     flags["ca"],
 			ServerName: flags["server-name"],
@@ -256,14 +275,14 @@ func flightPlace(ctx context.Context, session *sys.Session, args []string) error
 			},
 		})
 	} else {
-		result, err = placeFlight(placeOpts{
+		result, err = procGrid.placeFlight(placeOpts{
 			FlightID:   id,
 			AgentID:    agent,
 			WorktreeID: worktree,
 			TTL:        ttl,
 			User:       session.User,
 			Remote:     false,
-			Engine:     engineFromContext(ctx),
+			Gate:       gate,
 			Source:     flags["source"],
 		})
 	}
@@ -289,9 +308,13 @@ func flightRehearse(ctx context.Context, args, command []string) error {
 	if err != nil {
 		return err
 	}
+	gate, err := procGrid.gateFor(ctx)
+	if err != nil {
+		return err
+	}
 	var result flightResult
 	if flags["host"] != "" {
-		result, err = postFlight(engineFromContext(ctx), flightClientOpts{
+		result, err = postFlight(gate, flightClientOpts{
 			Host:       flags["host"],
 			CAFile:     flags["ca"],
 			ServerName: flags["server-name"],
@@ -307,7 +330,7 @@ func flightRehearse(ctx context.Context, args, command []string) error {
 			return err
 		}
 	} else {
-		result, err = rehearseFlight(engineFromContext(ctx), id, command, false)
+		result, err = procGrid.rehearseFlight(gate, id, command, false)
 		if err != nil {
 			return err
 		}
@@ -329,12 +352,12 @@ func flightCancel(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := cancelFlight(id, false)
+	result, err := procGrid.cancelFlight(id, false)
 	if err != nil {
 		return err
 	}
 	hc := interp.HandlerCtx(ctx)
-	fmt.Fprintf(hc.Stdout, "flight: id=%s status=cancelled\n", result.FlightID)
+	fmt.Fprintf(hc.Stdout, "flight: id=%s status=%s\n", result.FlightID, flightStatusCanceled)
 	return nil
 }
 
@@ -347,7 +370,7 @@ func flightStatusCmd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := flightStatus(id, false)
+	result, err := procGrid.flightStatus(id, false)
 	if err != nil {
 		return err
 	}
@@ -361,6 +384,9 @@ func flightStatusCmd(ctx context.Context, args []string) error {
 }
 
 func (agentBinary) Run(ctx context.Context, args []string) error {
+	if _, err := procGrid.gateFor(ctx); err != nil {
+		return err
+	}
 	if _, err := requireGridOps(ctx, "agent"); err != nil {
 		return err
 	}
@@ -374,7 +400,7 @@ func (agentBinary) Run(ctx context.Context, args []string) error {
 	if _, err := parseNamedFlags("agent", head, nil); err != nil {
 		return err
 	}
-	records := listAgents()
+	records := procGrid.listAgents()
 	hc := interp.HandlerCtx(ctx)
 	if len(records) == 0 {
 		fmt.Fprintln(hc.Stdout, "agent: none")
@@ -389,6 +415,9 @@ func (agentBinary) Run(ctx context.Context, args []string) error {
 }
 
 func (worktreeBinary) Run(ctx context.Context, args []string) error {
+	if _, err := procGrid.gateFor(ctx); err != nil {
+		return err
+	}
 	if len(args) < 2 {
 		return fmt.Errorf("worktree: usage: %s", worktreeBinary{}.Usage())
 	}
@@ -427,13 +456,13 @@ func worktreeCreateOrDestroy(ctx context.Context, verb string, args []string) er
 	}
 	hc := interp.HandlerCtx(ctx)
 	if verb == "destroy" {
-		if err := destroyWorktree(id); err != nil {
+		if err := procGrid.destroyWorktree(id); err != nil {
 			return err
 		}
 		fmt.Fprintf(hc.Stdout, "worktree: id=%s destroyed\n", id)
 		return nil
 	}
-	path, err := createWorktree(id)
+	path, err := procGrid.createWorktree(id)
 	if err != nil {
 		return err
 	}
@@ -467,7 +496,7 @@ func worktreeCheckout(ctx context.Context, args []string) error {
 		if err := requireAgentWorktree(session, id, "worktree"); err != nil {
 			return err
 		}
-		if source, err = agentCheckoutSource(agent, flags["from"]); err != nil {
+		if source, err = procGrid.agentCheckoutSource(agent, flags["from"]); err != nil {
 			return err
 		}
 	} else {
@@ -478,7 +507,7 @@ func worktreeCheckout(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	if err := checkoutWorktree(id, source, rev); err != nil {
+	if err := procGrid.checkoutWorktree(id, source, rev); err != nil {
 		return err
 	}
 	hc := interp.HandlerCtx(ctx)
@@ -487,6 +516,9 @@ func worktreeCheckout(ctx context.Context, args []string) error {
 }
 
 func (repoBinary) Run(ctx context.Context, args []string) error {
+	if _, err := procGrid.gateFor(ctx); err != nil {
+		return err
+	}
 	if len(args) < 2 || args[1] != "cat" {
 		return fmt.Errorf("repo: usage: %s", repoBinary{}.Usage())
 	}
@@ -506,14 +538,14 @@ func (repoBinary) Run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	session := sys.GetSession(SessionIDFromContext(ctx))
+	session := sys.GetSession(security.SessionIDFromContext(ctx))
 	if session == nil {
 		return fmt.Errorf("repo: requires an active registered session")
 	}
 	if err := requireAgentWorktree(session, id, "repo"); err != nil {
 		return err
 	}
-	data, err := repoCat(id, rel)
+	data, err := procGrid.repoCat(id, rel)
 	if err != nil {
 		return err
 	}
@@ -523,7 +555,7 @@ func (repoBinary) Run(ctx context.Context, args []string) error {
 }
 
 func requireWorktreeSession(ctx context.Context) (*sys.Session, error) {
-	session := sys.GetSession(SessionIDFromContext(ctx))
+	session := sys.GetSession(security.SessionIDFromContext(ctx))
 	if session == nil {
 		return nil, fmt.Errorf("worktree: requires an active registered session")
 	}
@@ -608,4 +640,11 @@ func requiredFlag(command string, flags map[string]string, name string) (string,
 		return "", fmt.Errorf("%s: --%s is required", command, name)
 	}
 	return value, nil
+}
+
+func dashIfEmpty(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }

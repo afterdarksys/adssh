@@ -1,4 +1,4 @@
-package security
+package grid
 
 import (
 	"bytes"
@@ -27,16 +27,21 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/afterdarksys/adssh/internal/sys"
+	"github.com/afterdarksys/adssh/security"
 )
 
 const allowAllPolicy = "package adssh.authz\ndefault allow = true\n"
 
+type vbinTestError struct{ message string }
+
+func (e *vbinTestError) Error() string { return e.message }
+
 func withGrid(t *testing.T) string {
 	t.Helper()
-	resetGridState()
+	procGrid.resetGridState()
 	dir := scratchTestBase(t)
-	setScratchRoot(filepath.Join(dir, "worktrees"))
-	t.Cleanup(resetGridState)
+	procGrid.setScratchRoot(filepath.Join(dir, "worktrees"))
+	t.Cleanup(procGrid.resetGridState)
 	return dir
 }
 
@@ -49,9 +54,9 @@ func testID(t *testing.T, suffix string) string {
 	return id
 }
 
-func policyEngine(t *testing.T, source string) *Engine {
+func policyEngine(t *testing.T, source string) *security.Engine {
 	t.Helper()
-	eng, err := NewEngine(EngineConfig{PolicySource: []byte(source)})
+	eng, err := security.NewEngine(security.EngineConfig{PolicySource: []byte(source)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,9 +66,11 @@ func policyEngine(t *testing.T, source string) *Engine {
 func elevatedSession(t *testing.T, suffix, user string) *sys.Session {
 	t.Helper()
 	session := &sys.Session{ID: testID(t, suffix), User: user}
-	sys.RegisterSession(session)
-	session.SetOIDC(OIDCProviderAdmin, []string{RoleGridOps, RoleOSRoot, RoleAdsshAdmin})
-	session.ActivateElevation(RoleGridOps, "grid", time.Now().Add(time.Hour))
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
+	session.SetOIDC(security.OIDCProviderAdmin, []string{security.RoleGridOps, security.RoleOSRoot, security.RoleAdsshAdmin})
+	session.ActivateElevation(security.RoleGridOps, "grid", time.Now().Add(time.Hour))
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	return session
 }
@@ -73,11 +80,11 @@ func gridOpsSession(t *testing.T) *sys.Session {
 	return elevatedSession(t, "ops", "alice")
 }
 
-func runVBin(t *testing.T, eng *Engine, sessionID string, args []string) (string, error) {
+func runVBin(t *testing.T, eng *security.Engine, sessionID string, args []string) (string, error) {
 	t.Helper()
 	if eng == nil {
 		var err error
-		eng, err = NewEngine(EngineConfig{})
+		eng, err = security.NewEngine(security.EngineConfig{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -93,7 +100,7 @@ func runVBin(t *testing.T, eng *Engine, sessionID string, args []string) (string
 	runner, err := interp.New(
 		interp.StdIO(nil, &out, &errOut),
 		interp.ExecHandler(func(ctx context.Context, _ []string) error {
-			return eng.DispatchVBin(WithSessionID(ctx, sessionID), vb, args)
+			return eng.DispatchVBin(security.WithSessionID(ctx, sessionID), vb, args)
 		}),
 	)
 	if err != nil {
@@ -105,7 +112,7 @@ func runVBin(t *testing.T, eng *Engine, sessionID string, args []string) (string
 	}
 	runErr := runner.Run(context.Background(), file)
 	if runErr == nil && errOut.Len() > 0 {
-		runErr = &runbookTestError{message: strings.TrimSpace(errOut.String())}
+		runErr = &vbinTestError{message: strings.TrimSpace(errOut.String())}
 	}
 	return out.String(), runErr
 }
@@ -146,7 +153,7 @@ func readToken(t *testing.T, path string) string {
 func assertFingerprintHidden(t *testing.T, output, tokenPath string) {
 	t.Helper()
 	token := readToken(t, tokenPath)
-	fingerprint := fingerprintSecret(token)
+	fingerprint := fingerprintToken(token)
 	if token == fingerprint {
 		t.Fatal("token and fingerprint collided")
 	}
@@ -165,7 +172,7 @@ func assertFingerprintHidden(t *testing.T, output, tokenPath string) {
 func initTestGrid(t *testing.T, id string) string {
 	t.Helper()
 	tokenPath := filepath.Join(t.TempDir(), "token")
-	if _, _, err := initGrid(id, "", tokenPath); err != nil {
+	if _, _, err := procGrid.initGrid(id, "", tokenPath); err != nil {
 		t.Fatal(err)
 	}
 	return tokenPath
@@ -212,22 +219,22 @@ func writeGridCert(t *testing.T, dir string) (string, string) {
 	return certFile, keyFile
 }
 
-func serveGrid(t *testing.T, id string, eng *Engine) (string, string, string) {
+func serveGrid(t *testing.T, id string, eng *security.Engine) (string, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "token")
-	if _, _, err := initGrid(id, "", tokenPath); err != nil {
+	if _, _, err := procGrid.initGrid(id, "", tokenPath); err != nil {
 		t.Fatal(err)
 	}
 	certFile, keyFile := writeGridCert(t, dir)
-	listenURL, err := listenGrid("127.0.0.1:0", certFile, keyFile, tokenPath, eng)
+	listenURL, err := procGrid.listenGrid("127.0.0.1:0", certFile, keyFile, tokenPath, eng)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return listenURL, tokenPath, certFile
 }
 
-func postFlightRetry(t *testing.T, eng *Engine, opts flightClientOpts) (flightResult, error) {
+func postFlightRetry(t *testing.T, eng *security.Engine, opts flightClientOpts) (flightResult, error) {
 	t.Helper()
 	var result flightResult
 	var err error
@@ -313,8 +320,8 @@ func TestGridInitPrintsFingerprintAndHidesToken(t *testing.T) {
 		t.Fatal("second init wrote a token file")
 	}
 
-	resetGridState()
-	setScratchRoot(filepath.Join(dir, "worktrees"))
+	procGrid.resetGridState()
+	procGrid.setScratchRoot(filepath.Join(dir, "worktrees"))
 	tokenPath := filepath.Join(dir, "token-file")
 	writeTokenFile(t, tokenPath, strings.Repeat("ab", 32)+"\n", 0o600)
 	output, err = runVBin(t, eng, session.ID, []string{
@@ -329,14 +336,14 @@ func TestGridInitPrintsFingerprintAndHidesToken(t *testing.T) {
 func TestGridInitRejectsWorldAccessibleAndSymlinkToken(t *testing.T) {
 	dir := withGrid(t)
 
-	_, _, err := initGrid("", "", "")
+	_, _, err := procGrid.initGrid("", "", "")
 	equalErr(t, err, "grid: --token-file or --token-out is required")
 
-	_, _, err = initGrid(testID(t, "both"), filepath.Join(dir, "a"), filepath.Join(dir, "b"))
+	_, _, err = procGrid.initGrid(testID(t, "both"), filepath.Join(dir, "a"), filepath.Join(dir, "b"))
 	equalErr(t, err, "grid: --token-file and --token-out cannot be combined")
 
 	invalidOut := filepath.Join(dir, "invalid-out")
-	_, _, err = initGrid("../x", "", invalidOut)
+	_, _, err = procGrid.initGrid("../x", "", invalidOut)
 	equalErr(t, err, "grid: invalid id")
 	if _, statErr := os.Stat(invalidOut); !os.IsNotExist(statErr) {
 		t.Fatal("invalid id wrote a token file")
@@ -344,7 +351,7 @@ func TestGridInitRejectsWorldAccessibleAndSymlinkToken(t *testing.T) {
 
 	world := filepath.Join(dir, "world")
 	writeTokenFile(t, world, strings.Repeat("ab", 32)+"\n", 0o644)
-	_, _, err = initGrid(testID(t, "world"), world, "")
+	_, _, err = procGrid.initGrid(testID(t, "world"), world, "")
 	equalErr(t, err, "grid: token file is readable or writable by group or others")
 
 	target := filepath.Join(dir, "target")
@@ -353,21 +360,21 @@ func TestGridInitRejectsWorldAccessibleAndSymlinkToken(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = initGrid(testID(t, "sym"), link, "")
+	_, _, err = procGrid.initGrid(testID(t, "sym"), link, "")
 	equalErr(t, err, "grid: token file is a symlink")
 
 	group := filepath.Join(dir, "group")
 	writeTokenFile(t, group, strings.Repeat("ef", 32)+"\n", 0o640)
-	_, _, err = initGrid(testID(t, "group"), group, "")
+	_, _, err = procGrid.initGrid(testID(t, "group"), group, "")
 	equalErr(t, err, "grid: token file is readable or writable by group or others")
 
 	private := filepath.Join(dir, "private")
 	writeTokenFile(t, private, strings.Repeat("ef", 32)+"\n", 0o600)
-	_, fingerprint, err := initGrid(testID(t, "private"), private, "")
+	_, fingerprint, err := procGrid.initGrid(testID(t, "private"), private, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fingerprint != fingerprintSecret(readToken(t, private)) {
+	if fingerprint != fingerprintToken(readToken(t, private)) {
 		t.Fatal("private token fingerprint mismatch")
 	}
 }
@@ -378,7 +385,7 @@ func TestGridRequiresGridOps(t *testing.T) {
 	equalErr(t, err, "grid: requires an active gridops elevation")
 
 	session := gridOpsSession(t)
-	ctx := WithSessionID(context.Background(), session.ID)
+	ctx := security.WithSessionID(context.Background(), session.ID)
 	err = gridBinary{}.Run(ctx, []string{"grid", "status"})
 	equalErr(t, err, "grid: not initialized")
 
@@ -392,7 +399,7 @@ func TestGridServeLoopbackAndRejectsHostname(t *testing.T) {
 	eng := policyEngine(t, allowAllPolicy)
 	tokenPath := initTestGrid(t, testID(t, "grid"))
 	certFile, keyFile := writeGridCert(t, dir)
-	ctx := WithSessionID(context.Background(), session.ID)
+	ctx := security.WithSessionID(context.Background(), session.ID)
 
 	mismatch := filepath.Join(dir, "mismatch")
 	writeTokenFile(t, mismatch, strings.Repeat("zz", 32)+"\n", 0o600)
@@ -401,7 +408,7 @@ func TestGridServeLoopbackAndRejectsHostname(t *testing.T) {
 		"--cert", certFile, "--key", keyFile, "--token-file", mismatch,
 	})
 	equalErr(t, err, "grid: token mismatch")
-	_, _, listen, _, _, err := gridStatus()
+	_, _, listen, _, _, err := procGrid.gridStatus()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +447,7 @@ func TestFlightPlaceRehearseCancelLocal(t *testing.T) {
 	session := gridOpsSession(t)
 	eng := policyEngine(t, allowAllPolicy)
 	initTestGrid(t, testID(t, "grid"))
-	ctx := WithSessionID(context.Background(), session.ID)
+	ctx := security.WithSessionID(context.Background(), session.ID)
 
 	err := flightBinary{}.Run(ctx, []string{
 		"flight", "place", "--id", testID(t, "t0"), "--agent", testID(t, "a0"),
@@ -470,7 +477,7 @@ func TestFlightPlaceRehearseCancelLocal(t *testing.T) {
 	equalErr(t, err, "flight: ttl is invalid")
 
 	blank := elevatedSession(t, "blank", "")
-	err = flightBinary{}.Run(WithSessionID(context.Background(), blank.ID), []string{
+	err = flightBinary{}.Run(security.WithSessionID(context.Background(), blank.ID), []string{
 		"flight", "place", "--id", testID(t, "bf"), "--agent", testID(t, "ba"),
 		"--worktree", testID(t, "bw"), "--for", "10m",
 	})
@@ -509,7 +516,7 @@ func TestFlightPlaceRehearseCancelLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output, "status=cancelled") {
+	if !strings.Contains(output, "status="+flightStatusCanceled) {
 		t.Fatalf("cancel output = %q", output)
 	}
 	output, err = runVBin(t, eng, session.ID, []string{"agent", "status"})
@@ -541,57 +548,57 @@ func TestFlightCapReusesCancelledAgentNotFlightID(t *testing.T) {
 	eng := policyEngine(t, allowAllPolicy)
 	initTestGrid(t, testID(t, "grid"))
 	for i := 0; i < gridMaxFlights; i++ {
-		_, err := placeFlight(placeOpts{
+		_, err := procGrid.placeFlight(placeOpts{
 			FlightID:   testID(t, fmt.Sprintf("f%d", i)),
 			AgentID:    testID(t, fmt.Sprintf("a%d", i)),
 			WorktreeID: testID(t, fmt.Sprintf("w%d", i)),
 			TTL:        time.Minute,
 			User:       "alice",
-			Engine:     eng,
+			Gate:       eng,
 		})
 		if err != nil {
 			t.Fatalf("place %d: %v", i, err)
 		}
 	}
-	_, err := placeFlight(placeOpts{
+	_, err := procGrid.placeFlight(placeOpts{
 		FlightID:   testID(t, "f64"),
 		AgentID:    testID(t, "a64"),
 		WorktreeID: testID(t, "w64"),
 		TTL:        time.Minute,
 		User:       "alice",
-		Engine:     eng,
+		Gate:       eng,
 	})
 	equalErr(t, err, "flight: too many flights")
 
-	if _, err := cancelFlight(testID(t, "f0"), false); err != nil {
+	if _, err := procGrid.cancelFlight(testID(t, "f0"), false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := placeFlight(placeOpts{
+	if _, err := procGrid.placeFlight(placeOpts{
 		FlightID:   testID(t, "fnew"),
 		AgentID:    testID(t, "a0"),
 		WorktreeID: testID(t, "w0"),
 		TTL:        time.Minute,
 		User:       "alice",
-		Engine:     eng,
+		Gate:       eng,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = placeFlight(placeOpts{
+	_, err = procGrid.placeFlight(placeOpts{
 		FlightID:   testID(t, "f0"),
 		AgentID:    testID(t, "anew"),
 		WorktreeID: testID(t, "wnew"),
 		TTL:        time.Minute,
 		User:       "alice",
-		Engine:     eng,
+		Gate:       eng,
 	})
 	equalErr(t, err, "flight: duplicate id")
-	_, err = placeFlight(placeOpts{
+	_, err = procGrid.placeFlight(placeOpts{
 		FlightID:   testID(t, "extra"),
 		AgentID:    testID(t, "ax"),
 		WorktreeID: testID(t, "wx"),
 		TTL:        time.Minute,
 		User:       "alice",
-		Engine:     eng,
+		Gate:       eng,
 	})
 	equalErr(t, err, "flight: too many flights")
 }
@@ -603,41 +610,41 @@ func TestDrainedPlaceRejectsAndCancelStatusRehearseWork(t *testing.T) {
 	first := testID(t, "f1")
 	second := testID(t, "f2")
 	for _, id := range []string{first, second} {
-		_, err := placeFlight(placeOpts{
+		_, err := procGrid.placeFlight(placeOpts{
 			FlightID:   id,
 			AgentID:    testID(t, "a"+id[len(id)-1:]),
 			WorktreeID: testID(t, "w"+id[len(id)-1:]),
 			TTL:        time.Minute,
 			User:       "alice",
-			Engine:     eng,
+			Gate:       eng,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := drainGrid(); err != nil {
+	if err := procGrid.drainGrid(); err != nil {
 		t.Fatal(err)
 	}
-	_, err := placeFlight(placeOpts{
+	_, err := procGrid.placeFlight(placeOpts{
 		FlightID:   testID(t, "f3"),
 		AgentID:    testID(t, "a3"),
 		WorktreeID: testID(t, "w3"),
 		TTL:        time.Minute,
 		User:       "alice",
-		Engine:     eng,
+		Gate:       eng,
 	})
 	equalErr(t, err, "drained")
-	if _, err := cancelFlight(first, false); err != nil {
+	if _, err := procGrid.cancelFlight(first, false); err != nil {
 		t.Fatal(err)
 	}
-	status, err := flightStatus(second, false)
+	status, err := procGrid.flightStatus(second, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if status.Status != "placed" {
 		t.Fatalf("status = %s", status.Status)
 	}
-	result, err := rehearseFlight(eng, second, []string{"repo"}, false)
+	result, err := procGrid.rehearseFlight(eng, second, []string{"repo"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,34 +658,34 @@ func TestCancelledRehearsalAllowlistBeforeExpiry(t *testing.T) {
 	eng := policyEngine(t, allowAllPolicy)
 	initTestGrid(t, testID(t, "grid"))
 	flightID := testID(t, "f")
-	if _, err := placeFlight(placeOpts{
+	if _, err := procGrid.placeFlight(placeOpts{
 		FlightID:   flightID,
 		AgentID:    testID(t, "a"),
 		WorktreeID: testID(t, "w"),
 		TTL:        time.Minute,
 		User:       "alice",
-		Engine:     eng,
+		Gate:       eng,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cancelFlight(flightID, false); err != nil {
+	if _, err := procGrid.cancelFlight(flightID, false); err != nil {
 		t.Fatal(err)
 	}
-	result, err := rehearseFlight(eng, flightID, []string{"bash"}, false)
+	result, err := procGrid.rehearseFlight(eng, flightID, []string{"bash"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Status != "denied" || result.Reason != `agent cannot run "bash"` {
 		t.Fatalf("status=%s reason=%s", result.Status, result.Reason)
 	}
-	status, err := flightStatus(flightID, false)
+	status, err := procGrid.flightStatus(flightID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != "cancelled" {
+	if status.Status != flightStatusCanceled {
 		t.Fatalf("status = %s", status.Status)
 	}
-	_, err = rehearseFlight(eng, flightID, []string{"repo"}, false)
+	_, err = procGrid.rehearseFlight(eng, flightID, []string{"repo"}, false)
 	equalErr(t, err, "flight: agent lease expired")
 }
 
@@ -757,7 +764,7 @@ allow { input.user == "grid-peer"; input.agent.kind == "cloud"; input.command ==
 	}); err != nil {
 		t.Fatal(err)
 	}
-	worktreePath, err := confinedWorktreePath(worktreeID)
+	worktreePath, err := procGrid.confinedWorktreePath(worktreeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,7 +799,7 @@ allow { input.user == "grid-peer"; input.agent.kind == "cloud"; input.command ==
 	if _, err := os.Stat(filepath.Join(worktreePath, "sentinel")); !os.IsNotExist(err) {
 		t.Fatal("rehearsal created a sentinel")
 	}
-	status, err := flightStatus(flightID, false)
+	status, err := procGrid.flightStatus(flightID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,12 +842,12 @@ func TestFlightWrongCAFailsTLS(t *testing.T) {
 	dirA := t.TempDir()
 	dirB := t.TempDir()
 	tokenPath := filepath.Join(dirA, "token")
-	if _, _, err := initGrid(testID(t, "grid"), "", tokenPath); err != nil {
+	if _, _, err := procGrid.initGrid(testID(t, "grid"), "", tokenPath); err != nil {
 		t.Fatal(err)
 	}
 	certA, keyA := writeGridCert(t, dirA)
 	certB, _ := writeGridCert(t, dirB)
-	listenURL, err := listenGrid("127.0.0.1:0", certA, keyA, tokenPath, eng)
+	listenURL, err := procGrid.listenGrid("127.0.0.1:0", certA, keyA, tokenPath, eng)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -900,17 +907,17 @@ func TestFlightPeerAuthAndBodyLimit(t *testing.T) {
 
 func TestPlaceRequiresPolicy(t *testing.T) {
 	withGrid(t)
-	unloaded, err := NewEngine(EngineConfig{})
+	unloaded, err := security.NewEngine(security.EngineConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = placeFlight(placeOpts{
+	_, err = procGrid.placeFlight(placeOpts{
 		FlightID:   testID(t, "local"),
 		AgentID:    testID(t, "la"),
 		WorktreeID: testID(t, "lw"),
 		TTL:        10 * time.Second,
 		User:       "alice",
-		Engine:     unloaded,
+		Gate:       unloaded,
 	})
 	equalErr(t, err, "policy_required")
 
@@ -954,7 +961,7 @@ func TestCheckoutRejectsRemoteShortRevAndHooksDoNotRun(t *testing.T) {
 		{source, "abc", "worktree: rev must be a 40-character commit hash"},
 	}
 	for _, item := range cases {
-		err := checkoutWorktree("c1", item.source, item.rev)
+		err := procGrid.checkoutWorktree("c1", item.source, item.rev)
 		equalErr(t, err, item.want)
 	}
 
@@ -989,13 +996,13 @@ func TestCheckoutRejectsRemoteShortRevAndHooksDoNotRun(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(hookDir, "post-checkout"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkoutWorktree("hook1", source, hash.String()); err != nil {
+	if err := procGrid.checkoutWorktree("hook1", source, hash.String()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatal("post-checkout hook ran")
 	}
-	dest, err := confinedWorktreePath("hook1")
+	dest, err := procGrid.confinedWorktreePath("hook1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1012,14 +1019,14 @@ func TestRepoCatRejectsEscapeAndSymlink(t *testing.T) {
 	withGrid(t)
 	initTestGrid(t, testID(t, "grid"))
 	id := testID(t, "w")
-	path, err := createWorktree(id)
+	path, err := procGrid.createWorktree(id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(path, "ok.txt"), []byte("ok-bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	data, err := repoCat(id, "ok.txt")
+	data, err := procGrid.repoCat(id, "ok.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1034,7 +1041,7 @@ func TestRepoCatRejectsEscapeAndSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rel := range []string{"../secret", secret, "foo/../../secret", "leak"} {
-		_, err := repoCat(id, rel)
+		_, err := procGrid.repoCat(id, rel)
 		equalErr(t, err, "repo: path escapes worktree")
 	}
 }
@@ -1046,7 +1053,9 @@ func TestWorktreeAgentCannotCreateAndHumanCanCat(t *testing.T) {
 	source := t.TempDir()
 
 	expired := &sys.Session{ID: testID(t, "expired"), User: "agent"}
-	sys.RegisterSession(expired)
+	if err := sys.RegisterSession(expired); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(expired.ID) })
 	expired.BindManagedAgent(&sys.ManagedAgent{
 		ID:        "expired-agent",
@@ -1054,7 +1063,7 @@ func TestWorktreeAgentCannotCreateAndHumanCanCat(t *testing.T) {
 		Allow:     []string{"bash"},
 		ExpiresAt: time.Now().Add(-time.Hour),
 	})
-	expiredCtx := WithSessionID(context.Background(), expired.ID)
+	expiredCtx := security.WithSessionID(context.Background(), expired.ID)
 	err := worktreeBinary{}.Run(expiredCtx, []string{"worktree", "create", "--id", "wcreate"})
 	equalErr(t, err, "worktree: agents cannot create a worktree")
 	err = worktreeBinary{}.Run(expiredCtx, []string{"worktree", "destroy", "--id", "wdestroy"})
@@ -1067,14 +1076,16 @@ func TestWorktreeAgentCannotCreateAndHumanCanCat(t *testing.T) {
 	equalErr(t, err, "repo: agent lease expired")
 
 	live := &sys.Session{ID: testID(t, "live"), User: "agent"}
-	sys.RegisterSession(live)
+	if err := sys.RegisterSession(live); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(live.ID) })
 	live.BindManagedAgent(&sys.ManagedAgent{
 		ID:        "live-agent",
 		Worktree:  "bound",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	liveCtx := WithSessionID(context.Background(), live.ID)
+	liveCtx := security.WithSessionID(context.Background(), live.ID)
 	err = worktreeBinary{}.Run(liveCtx, []string{
 		"worktree", "checkout", "--id", "other", "--from", source, "--rev", rev,
 	})
@@ -1088,7 +1099,7 @@ func TestWorktreeAgentCannotCreateAndHumanCanCat(t *testing.T) {
 	if _, err := runVBin(t, eng, human.ID, []string{"worktree", "create", "--id", worktreeID}); err != nil {
 		t.Fatal(err)
 	}
-	worktreePath, err := confinedWorktreePath(worktreeID)
+	worktreePath, err := procGrid.confinedWorktreePath(worktreeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1107,7 +1118,7 @@ func TestWorktreeAgentCannotCreateAndHumanCanCat(t *testing.T) {
 func TestDestroyRefusesSymlink(t *testing.T) {
 	withGrid(t)
 	initTestGrid(t, testID(t, "grid"))
-	path, err := createWorktree("sym1")
+	path, err := procGrid.createWorktree("sym1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1122,7 +1133,7 @@ func TestDestroyRefusesSymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatal(err)
 	}
-	equalErr(t, destroyWorktree("sym1"), "worktree: destination is a symlink")
+	equalErr(t, procGrid.destroyWorktree("sym1"), "worktree: destination is a symlink")
 	assertFileContents(t, keep, "keep")
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -1134,7 +1145,7 @@ func TestDestroyRefusesSymlink(t *testing.T) {
 }
 
 func TestGridVBinsRegistered(t *testing.T) {
-	eng, err := NewEngine(EngineConfig{})
+	eng, err := security.NewEngine(security.EngineConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}

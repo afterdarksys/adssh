@@ -78,7 +78,9 @@ func AgentCommandAllowed(name string) bool {
 	return false
 }
 
-func agentAllowCopy() []string {
+// AgentAllowlist returns a copy of the cloud-agent allowlist, which the grid
+// binds to each managed agent it places.
+func AgentAllowlist() []string {
 	return append([]string(nil), agentAllow...)
 }
 

@@ -1,4 +1,4 @@
-package security
+package grid
 
 import (
 	"context"
@@ -15,6 +15,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/afterdarksys/adssh/internal/sys"
+	"github.com/afterdarksys/adssh/security"
 )
 
 // scratchTestBase returns a directory whose ancestors are not world-writable,
@@ -45,7 +46,9 @@ func scratchTestBase(t *testing.T) string {
 func plainSession(t *testing.T, suffix, user string) *sys.Session {
 	t.Helper()
 	session := &sys.Session{ID: testID(t, suffix), User: user}
-	sys.RegisterSession(session)
+	if err := sys.RegisterSession(session); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { sys.UnregisterSession(session.ID) })
 	return session
 }
@@ -87,8 +90,8 @@ func assertFileContents(t *testing.T, path, want string) {
 }
 
 func TestWorktreeDestroySymlinkedRootRefusedAndNothingDeleted(t *testing.T) {
-	resetGridState()
-	t.Cleanup(resetGridState)
+	procGrid.resetGridState()
+	t.Cleanup(procGrid.resetGridState)
 	base := scratchTestBase(t)
 	victim := filepath.Join(base, "victim")
 	if err := os.MkdirAll(filepath.Join(victim, "projects"), 0o700); err != nil {
@@ -102,7 +105,7 @@ func TestWorktreeDestroySymlinkedRootRefusedAndNothingDeleted(t *testing.T) {
 	if err := os.Symlink(victim, root); err != nil {
 		t.Fatal(err)
 	}
-	setScratchRoot(root)
+	procGrid.setScratchRoot(root)
 	initTestGrid(t, testID(t, "grid"))
 	session := gridOpsSession(t)
 	eng := policyEngine(t, allowAllPolicy)
@@ -113,17 +116,17 @@ func TestWorktreeDestroySymlinkedRootRefusedAndNothingDeleted(t *testing.T) {
 	equalErr(t, err, "worktree: scratch root is a symlink")
 
 	// Even a recorded id is refused when the root is a symlink.
-	gridMu.Lock()
-	gridState.worktrees["projects"] = ""
-	gridMu.Unlock()
-	equalErr(t, destroyWorktree("projects"), "worktree: scratch root is a symlink")
+	procGrid.mu.Lock()
+	procGrid.member.worktrees["projects"] = ""
+	procGrid.mu.Unlock()
+	equalErr(t, procGrid.destroyWorktree("projects"), "worktree: scratch root is a symlink")
 	assertFileContents(t, keep, "keep")
 }
 
 func TestWorktreeDestroyUnrecordedIDRefused(t *testing.T) {
 	withGrid(t)
 	initTestGrid(t, testID(t, "grid"))
-	path, err := confinedWorktreePath("other")
+	path, err := procGrid.confinedWorktreePath("other")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,29 +142,29 @@ func TestWorktreeDestroyUnrecordedIDRefused(t *testing.T) {
 	equalErr(t, err, "worktree: not found")
 	assertFileContents(t, keep, "keep")
 
-	created, err := createWorktree("made")
+	created, err := procGrid.createWorktree("made")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := destroyWorktree("made"); err != nil {
+	if err := procGrid.destroyWorktree("made"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(created); !os.IsNotExist(err) {
 		t.Fatal("recorded worktree was not removed")
 	}
-	equalErr(t, destroyWorktree("made"), "worktree: not found")
+	equalErr(t, procGrid.destroyWorktree("made"), "worktree: not found")
 }
 
 func TestWorktreeDestroyWithoutGridOpsOrGridRefused(t *testing.T) {
 	withGrid(t)
-	equalErr(t, destroyWorktree("nogrid"), "grid: not initialized")
+	equalErr(t, procGrid.destroyWorktree("nogrid"), "grid: not initialized")
 	initTestGrid(t, testID(t, "grid"))
-	path, err := createWorktree("held")
+	path, err := procGrid.createWorktree("held")
 	if err != nil {
 		t.Fatal(err)
 	}
 	plain := plainSession(t, "plain", "mallory")
-	ctx := WithSessionID(context.Background(), plain.ID)
+	ctx := security.WithSessionID(context.Background(), plain.ID)
 	rev := strings.Repeat("ab", 20)
 	for _, args := range [][]string{
 		{"worktree", "destroy", "--id", "held"},
@@ -176,15 +179,15 @@ func TestWorktreeDestroyWithoutGridOpsOrGridRefused(t *testing.T) {
 }
 
 func TestScratchRootUnderTmpRefused(t *testing.T) {
-	resetGridState()
-	t.Cleanup(resetGridState)
+	procGrid.resetGridState()
+	t.Cleanup(procGrid.resetGridState)
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join("/tmp", "adssh-worktrees-"+hex.EncodeToString(buf[:]))
-	setScratchRoot(root)
-	_, err := confinedWorktreePath("w1")
+	procGrid.setScratchRoot(root)
+	_, err := procGrid.confinedWorktreePath("w1")
 	equalErr(t, err, "worktree: scratch root is under a world-writable directory")
 	if _, statErr := os.Lstat(root); !os.IsNotExist(statErr) {
 		t.Fatal("refused root was created")
@@ -198,17 +201,17 @@ func TestScratchRootUnderTmpRefused(t *testing.T) {
 	if err := os.Chmod(loose, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	setScratchRoot(loose)
-	_, err = confinedWorktreePath("w1")
+	procGrid.setScratchRoot(loose)
+	_, err = procGrid.confinedWorktreePath("w1")
 	equalErr(t, err, "worktree: scratch root mode must be 0700")
 
-	setScratchRoot("relative/root")
-	_, err = confinedWorktreePath("w1")
+	procGrid.setScratchRoot("relative/root")
+	_, err = procGrid.confinedWorktreePath("w1")
 	equalErr(t, err, "worktree: scratch root must be absolute")
 
 	fresh := filepath.Join(base, "fresh", "worktrees")
-	setScratchRoot(fresh)
-	if _, err := confinedWorktreePath("w1"); err != nil {
+	procGrid.setScratchRoot(fresh)
+	if _, err := procGrid.confinedWorktreePath("w1"); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Lstat(fresh)
@@ -231,9 +234,9 @@ func TestRemoteCancelAndStatusOnlyRemoteFlights(t *testing.T) {
 	eng := policyEngine(t, allowAllPolicy)
 	listenURL, tokenPath, certFile := serveGrid(t, testID(t, "grid"), eng)
 	localID := testID(t, "local")
-	if _, err := placeFlight(placeOpts{
+	if _, err := procGrid.placeFlight(placeOpts{
 		FlightID: localID, AgentID: testID(t, "la"), WorktreeID: testID(t, "lw"),
-		TTL: time.Minute, User: "alice", Engine: eng,
+		TTL: time.Minute, User: "alice", Gate: eng,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +256,7 @@ func TestRemoteCancelAndStatusOnlyRemoteFlights(t *testing.T) {
 		_, err := postFlightRetry(t, eng, opts(action, localID))
 		equalErr(t, err, "flight: flight: not found")
 	}
-	status, err := flightStatus(localID, false)
+	status, err := procGrid.flightStatus(localID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,29 +272,29 @@ func TestRemoteCancelAndStatusOnlyRemoteFlights(t *testing.T) {
 		t.Fatalf("remote status = %v %v", result, err)
 	}
 	result, err = postFlightRetry(t, eng, opts("cancel", remoteID))
-	if err != nil || result.Status != "cancelled" {
+	if err != nil || result.Status != flightStatusCanceled {
 		t.Fatalf("remote cancel = %v %v", result, err)
 	}
 }
 
 func TestRemoteCancelStatusRequirePolicy(t *testing.T) {
 	withGrid(t)
-	unloaded, err := NewEngine(EngineConfig{})
+	unloaded, err := security.NewEngine(security.EngineConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	initTestGrid(t, testID(t, "grid"))
 	for _, action := range []string{"cancel", "status"} {
-		_, err := dispatchFlightAction(unloaded, action, flightWire{FlightID: "missing"}, true)
+		_, err := procGrid.dispatchFlightAction(unloaded, action, flightWire{FlightID: "missing"}, true)
 		equalErr(t, err, "policy_required")
 	}
 }
 
 func expireAllFlights(t *testing.T) {
 	t.Helper()
-	gridMu.Lock()
-	defer gridMu.Unlock()
-	for _, rec := range gridState.flights {
+	procGrid.mu.Lock()
+	defer procGrid.mu.Unlock()
+	for _, rec := range procGrid.member.flights {
 		rec.ExpiresAt = time.Now().Add(-time.Second)
 	}
 }
@@ -301,17 +304,17 @@ func TestExpiredFlightsDoNotBlockPlace(t *testing.T) {
 	eng := policyEngine(t, allowAllPolicy)
 	initTestGrid(t, testID(t, "grid"))
 	for i := 0; i < gridMaxFlights; i++ {
-		if _, err := placeFlight(placeOpts{
+		if _, err := procGrid.placeFlight(placeOpts{
 			FlightID: testID(t, "f"+strconv.Itoa(i)), AgentID: testID(t, "a"+strconv.Itoa(i)),
-			WorktreeID: testID(t, "w"+strconv.Itoa(i)), TTL: time.Minute, User: "alice", Engine: eng,
+			WorktreeID: testID(t, "w"+strconv.Itoa(i)), TTL: time.Minute, User: "alice", Gate: eng,
 		}); err != nil {
 			t.Fatalf("place %d: %v", i, err)
 		}
 	}
 	expireAllFlights(t)
-	if _, err := placeFlight(placeOpts{
+	if _, err := procGrid.placeFlight(placeOpts{
 		FlightID: testID(t, "fnew"), AgentID: testID(t, "a0"), WorktreeID: testID(t, "w0"),
-		TTL: time.Minute, User: "alice", Engine: eng,
+		TTL: time.Minute, User: "alice", Gate: eng,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -320,14 +323,14 @@ func TestExpiredFlightsDoNotBlockPlace(t *testing.T) {
 			t.Fatalf("expired agent %d is still registered", i)
 		}
 	}
-	status, err := flightStatus(testID(t, "f1"), false)
+	status, err := procGrid.flightStatus(testID(t, "f1"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != "cancelled" || status.Reason != "lease expired" {
+	if status.Status != flightStatusCanceled || status.Reason != "lease expired" {
 		t.Fatalf("expired status=%s reason=%s", status.Status, status.Reason)
 	}
-	_, _, _, _, live, err := gridStatus()
+	_, _, _, _, live, err := procGrid.gridStatus()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,40 +338,40 @@ func TestExpiredFlightsDoNotBlockPlace(t *testing.T) {
 		t.Fatalf("live flights = %d", live)
 	}
 
-	gridMu.Lock()
-	gridState.flights[testID(t, "f1")].CancelledAt = time.Now().Add(-2 * gridCancelledRetention)
-	gridMu.Unlock()
-	reapExpiredFlights(time.Now())
-	_, err = flightStatus(testID(t, "f1"), false)
+	procGrid.mu.Lock()
+	procGrid.member.flights[testID(t, "f1")].CancelledAt = time.Now().Add(-2 * gridCancelledRetention)
+	procGrid.mu.Unlock()
+	procGrid.reapExpiredFlights(time.Now())
+	_, err = procGrid.flightStatus(testID(t, "f1"), false)
 	equalErr(t, err, "flight: not found")
-	if _, err := flightStatus(testID(t, "f2"), false); err != nil {
-		t.Fatal("recently cancelled flight was pruned")
+	if _, err := procGrid.flightStatus(testID(t, "f2"), false); err != nil {
+		t.Fatal("recently canceled flight was pruned")
 	}
 }
 
 func TestGridReaperExpiresFlightsWhileListening(t *testing.T) {
 	withGrid(t)
-	previous := gridReapInterval
-	gridReapInterval = 20 * time.Millisecond
-	t.Cleanup(func() { gridReapInterval = previous })
+	previous := procGrid.reapInterval
+	procGrid.reapInterval = 20 * time.Millisecond
+	t.Cleanup(func() { procGrid.reapInterval = previous })
 	eng := policyEngine(t, allowAllPolicy)
 	serveGrid(t, testID(t, "grid"), eng)
 	flightID := testID(t, "f")
 	agentID := testID(t, "a")
-	if _, err := placeFlight(placeOpts{
+	if _, err := procGrid.placeFlight(placeOpts{
 		FlightID: flightID, AgentID: agentID, WorktreeID: testID(t, "w"),
-		TTL: time.Minute, User: "alice", Engine: eng,
+		TTL: time.Minute, User: "alice", Gate: eng,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	expireAllFlights(t)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		status, err := flightStatus(flightID, false)
+		status, err := procGrid.flightStatus(flightID, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if status.Status == "cancelled" {
+		if status.Status == flightStatusCanceled {
 			if sys.GetSession("agent-"+agentID) != nil {
 				t.Fatal("reaped agent session is still registered")
 			}
@@ -398,7 +401,7 @@ func TestAgentCheckoutUsesBoundSource(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	agentCtx := WithSessionID(context.Background(), "agent-"+agentID)
+	agentCtx := security.WithSessionID(context.Background(), "agent-"+agentID)
 	err := worktreeBinary{}.Run(agentCtx, []string{
 		"worktree", "checkout", "--id", worktreeID, "--from", other, "--rev", otherRev,
 	})
@@ -407,7 +410,7 @@ func TestAgentCheckoutUsesBoundSource(t *testing.T) {
 		"worktree", "checkout", "--id", worktreeID, "--from", "file://" + other, "--rev", otherRev,
 	})
 	equalErr(t, err, "worktree: source is not the flight's bound source")
-	dest, err := confinedWorktreePath(worktreeID)
+	dest, err := procGrid.confinedWorktreePath(worktreeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +432,7 @@ func TestAgentCheckoutUsesBoundSource(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	err = worktreeBinary{}.Run(WithSessionID(context.Background(), "agent-"+unbound), []string{
+	err = worktreeBinary{}.Run(security.WithSessionID(context.Background(), "agent-"+unbound), []string{
 		"worktree", "checkout", "--id", testID(t, "uw"), "--from", bound, "--rev", rev,
 	})
 	equalErr(t, err, "worktree: agent has no bound source")

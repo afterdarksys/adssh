@@ -120,7 +120,7 @@ func SetupExtensions(opts ExtensionOptions) {
 	SetupFilesystemAPI(env, restricted)
 	// Filesystem reads + metadata tests (content reads refused in restricted)
 	SetupFilesystemReadAPI(env, restricted)
-	// String helpers (pure; capability group "strings")
+	// String helpers incl. slugify/template (pure; capability group "strings")
 	SetupStringsAPI(env)
 	// Crypto
 	cryptoDict := starlark.NewDict(2)
@@ -135,6 +135,7 @@ func SetupExtensions(opts ExtensionOptions) {
 		_ = netDict.SetKey(starlark.String("http_get"), starlark.NewBuiltin("http_get", builtinHTTPGet))
 		_ = netDict.SetKey(starlark.String("dial"), starlark.NewBuiltin("dial", builtinDial))
 		_ = netDict.SetKey(starlark.String("dial_tls"), starlark.NewBuiltin("dial_tls", builtinDialTLS))
+		_ = netDict.SetKey(starlark.String("dial_udp"), starlark.NewBuiltin("dial_udp", builtinDialUDP))
 	}
 	env["net"] = netDict
 
@@ -181,7 +182,13 @@ func SetupExtensions(opts ExtensionOptions) {
 	_ = dataDict.SetKey(starlark.String("json_dump"), starlark.NewBuiltin("json_dump", builtinJSONDump))
 	_ = dataDict.SetKey(starlark.String("yaml_parse"), starlark.NewBuiltin("yaml_parse", builtinYAMLParse))
 	_ = dataDict.SetKey(starlark.String("yaml_dump"), starlark.NewBuiltin("yaml_dump", builtinYAMLDump))
+	// Pure schema/type checks (configdata.go); kept in restricted sessions.
+	_ = dataDict.SetKey(starlark.String("assert_type"), starlark.NewBuiltin("assert_type", dataAssertType))
+	_ = dataDict.SetKey(starlark.String("validate"), starlark.NewBuiltin("validate", dataValidate))
 	env["data"] = dataDict
+
+	// Structured logging to the audit stream (log.go); empty when restricted.
+	SetupLogAPI(env, opts)
 
 	// i18n
 	i18nDict := starlark.NewDict(3)
@@ -197,10 +204,10 @@ func SetupExtensions(opts ExtensionOptions) {
 	env["cloud"] = cloudDict
 
 	// Expand cloud namespaces with additional APIs
-	ExpandGCPAPI(env)
+	ExpandGCPAPI(env, restricted)
 	SetupTemplateAPI(env)
-	ExpandAWSAPIExtra(env)
-	ExpandNotifyAPI(env)
+	ExpandAWSAPIExtra(env, restricted)
+	ExpandNotifyAPI(env, restricted)
 
 	if opts.SessionID != "" {
 		env["SESSION_ID"] = starlark.String(opts.SessionID)

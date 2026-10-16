@@ -27,7 +27,9 @@ func builtinSecAudit(thread *starlark.Thread, b *starlark.Builtin, args starlark
 	if err := starlark.UnpackArgs(b.Name(), args, kwargs, "msg", &msg); err != nil {
 		return nil, err
 	}
-	security.LogEvent("STARLARK_AUDIT: " + msg)
+	if err := security.LogEvent("STARLARK_AUDIT: " + msg); err != nil {
+		return nil, fmt.Errorf("sec.audit: %w", err)
+	}
 	return starlark.None, nil
 }
 

@@ -3,6 +3,7 @@ package starlarkext
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -156,7 +157,7 @@ func TestParallelRejectsBadInputBeforeRun(t *testing.T) {
 
 	var b strings.Builder
 	b.WriteString("sys[\"parallel\"]([\n")
-	b.WriteString(fmt.Sprintf("%q,\n", touch))
+	fmt.Fprintf(&b, "%q,\n", touch)
 	for i := 0; i < maxParallelCommands; i++ {
 		b.WriteString("\"true\",\n")
 	}
@@ -244,7 +245,10 @@ func TestParallelIsolatedDropsCustomCommands(t *testing.T) {
 		"__custom_commands__": commands,
 		"X":                   starlark.String("y"),
 	}}}
-	iso := p.isolated()
+	iso, err := p.isolated()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := iso.session.Globals["__custom_commands__"]; ok {
 		t.Fatal("isolated globals still carry __custom_commands__")
 	}
@@ -277,7 +281,7 @@ func TestParallelFailureCancelsRunning(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatalf("batch took %s after a failure, want the sleep cancelled", elapsed)
+		t.Fatalf("batch took %s after a failure, want the sleep canceled", elapsed)
 	}
 }
 
@@ -312,11 +316,11 @@ func TestParallelThreadCancelStopsBatch(t *testing.T) {
 	defer timer.Stop()
 	start := time.Now()
 	_, err := starlark.ExecFile(thread, "t.star", `sys["parallel"](["sleep 5", "sleep 5"], jobs=2, timeout=10)`, env)
-	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+	if err == nil || !strings.Contains(err.Error(), "canceled") {
 		t.Fatalf("error = %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatalf("cancelled batch took %s", elapsed)
+		t.Fatalf("canceled batch took %s", elapsed)
 	}
 }
 
@@ -336,5 +340,135 @@ func TestParallelDeadline(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "deadline must be") {
 			t.Fatalf("deadline=%s error = %v", bad, err)
 		}
+	}
+}
+
+// A deadline must kill the whole process group of a command. A shell that
+// forks its children (Debian dash) leaves a grandchild that holds the output
+// pipe and outlives the shell when only the shell is signaled. A background
+// child of sh ignores SIGINT, so only a group SIGKILL ends it promptly.
+func TestParallelDeadlineKillsProcessGroup(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep not available")
+	}
+	env := execEnv(t, allowAllEngine(t), false)
+	marker := fmt.Sprintf("30.%d", 100000+time.Now().UnixNano()%800000)
+	t.Cleanup(func() { _ = exec.Command("pkill", "-KILL", "-f", "sleep "+marker).Run() })
+	start := time.Now()
+	_, err := evalExec(t, env, `sys["parallel"](["sh -c 'sleep `+marker+` & sleep `+marker+`'"], timeout=60, deadline=1)`)
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "deadline") {
+		t.Fatalf("error = %v", err)
+	}
+	if elapsed > 1300*time.Millisecond {
+		t.Fatalf("deadline batch took %s, want <= 1.3s", elapsed)
+	}
+	var left []byte
+	for i := 0; i < 20; i++ {
+		left, _ = exec.Command("pgrep", "-f", "sleep "+marker).Output()
+		if len(strings.TrimSpace(string(left))) == 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("sleep children survived the deadline: pids %q", strings.TrimSpace(string(left)))
+}
+
+// Each worker gets its own __aliases__ and __shopts__ dicts: a worker's
+// `alias` or `set -x` must not write the caller's dicts or a sibling's.
+func TestParallelIsolatedCopiesAliasesAndShopts(t *testing.T) {
+	aliases := starlark.NewDict(1)
+	if err := aliases.SetKey(starlark.String("ll"), starlark.String("ls -l")); err != nil {
+		t.Fatal(err)
+	}
+	shopts := starlark.NewDict(1)
+	if err := shopts.SetKey(starlark.String("errexit"), starlark.True); err != nil {
+		t.Fatal(err)
+	}
+	p := execParams{session: &security.SessionState{Globals: starlark.StringDict{
+		"__aliases__": aliases,
+		"__shopts__":  shopts,
+	}}}
+	a, err := p.isolated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := p.isolated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"__aliases__", "__shopts__"} {
+		da, okA := a.session.Globals[name].(*starlark.Dict)
+		db, okB := b.session.Globals[name].(*starlark.Dict)
+		if !okA || !okB {
+			t.Fatalf("%s is not a dict in the isolated copy", name)
+		}
+		src := p.session.Globals[name].(*starlark.Dict)
+		if da == src || db == src || da == db {
+			t.Fatalf("%s is shared between the caller and workers", name)
+		}
+		if da.Len() != src.Len() {
+			t.Fatalf("%s copy has %d entries, want %d", name, da.Len(), src.Len())
+		}
+	}
+	if err := a.session.Globals["__aliases__"].(*starlark.Dict).SetKey(starlark.String("x"), starlark.String("y")); err != nil {
+		t.Fatal(err)
+	}
+	if aliases.Len() != 1 {
+		t.Fatalf("worker alias leaked into the caller: %v", aliases)
+	}
+}
+
+// End to end under -race: concurrent `alias` and `set -x` in workers must not
+// race on, or write, the caller's dicts.
+func TestParallelAliasAndShoptDoNotLeak(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	aliases := starlark.NewDict(1)
+	shopts := starlark.NewDict(1)
+	env["__aliases__"] = aliases
+	env["__shopts__"] = shopts
+	cmds := make([]string, 0, 8)
+	for i := 0; i < 4; i++ {
+		cmds = append(cmds, fmt.Sprintf(`"alias a%d=echo"`, i), `"set -x"`)
+	}
+	_, err := evalExec(t, env, `out = sys["parallel"]([`+strings.Join(cmds, ",")+`], jobs=8, timeout=10)`)
+	if err != nil {
+		t.Fatalf("parallel: %v", err)
+	}
+	if aliases.Len() != 0 {
+		t.Fatalf("worker aliases leaked into the caller: %v", aliases)
+	}
+	if shopts.Len() != 0 {
+		t.Fatalf("worker shopts leaked into the caller: %v", shopts)
+	}
+}
+
+// SIGINT in the REPL calls thread.Cancel. A running batch must return soon
+// after, with its child processes killed rather than left to finish.
+func TestParallelThreadCancelKillsChildrenPromptly(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	thread := &starlark.Thread{Name: "cancel-kill-test"}
+	const marker = "sleep 5.4321"
+	canceled := make(chan time.Time, 1)
+	timer := time.AfterFunc(200*time.Millisecond, func() {
+		canceled <- time.Now()
+		thread.Cancel("interrupted")
+	})
+	defer timer.Stop()
+	start := time.Now()
+	_, err := starlark.ExecFile(thread, "t.star", `sys["parallel"](["`+marker+`"] * 2, jobs=2, timeout=10)`, env)
+	returned := time.Now()
+	if err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("error = %v", err)
+	}
+	cancelAt := <-canceled
+	if lag := returned.Sub(cancelAt); lag > 500*time.Millisecond {
+		t.Fatalf("returned %s after Cancel (total %s), want under 500ms", lag, returned.Sub(start))
+	}
+	t.Logf("returned %s after Cancel, total %s", returned.Sub(cancelAt), returned.Sub(start))
+	time.Sleep(100 * time.Millisecond)
+	out, _ := exec.Command("pgrep", "-f", marker).Output()
+	if pids := strings.TrimSpace(string(out)); pids != "" {
+		t.Fatalf("child processes still running after cancel: %s", pids)
 	}
 }

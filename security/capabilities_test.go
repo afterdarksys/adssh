@@ -32,6 +32,10 @@ func TestClassifyCapabilities(t *testing.T) {
 		{"azure", "starlark.azure.vm", []string{CapCloud}},
 		{"oci", "starlark.oci.instance", []string{CapCloud}},
 		{"cloud", "starlark.cloud.gen", []string{CapCloud}},
+		{"route53 read", "starlark.aws.route53.list_records", []string{CapCloud}},
+		{"route53 upsert adds dns", "starlark.aws.route53.upsert_record", []string{CapCloud, CapDNS}},
+		{"route53 delete adds dns", "starlark.aws.route53.delete_record", []string{CapCloud, CapDNS}},
+		{"gcp not dns", "starlark.gcp.route53.upsert_record", []string{CapCloud}},
 
 		// sys is refined per function.
 		{"sys read_file", "starlark.sys.read_file", []string{CapFileops}},

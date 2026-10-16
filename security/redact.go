@@ -1,9 +1,6 @@
 package security
 
-import (
-	"regexp"
-	"strings"
-)
+import "regexp"
 
 const redactedSecret = "[REDACTED]"
 
@@ -15,7 +12,12 @@ var sensitiveTextPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`),
 }
 
-var sensitiveAssignmentPattern = regexp.MustCompile(`(?i)\b(password|passwd|token|secret|api[_-]?key|access[_-]?key)\s*=\s*("[^"]*"|'[^']*'|[^\s]+)`)
+// sensitiveAssignmentPattern matches key=value where the key, optionally
+// quoted, is a credential word on its own or as the last _/- separated part
+// of a longer key (db_password, API_TOKEN, aws_secret_access_key). Group 1 is
+// the character before the key, kept so the match can start mid-line; group 2
+// is the key with its quotes. tokenizer, secretary and token_count do not match.
+var sensitiveAssignmentPattern = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_-])(["']?(?:[A-Za-z0-9]+[_-])*(?:password|passwd|token|secret|api[_-]?key|access[_-]?key)["']?)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s]+)`)
 
 // RedactSensitiveText removes common credential-shaped values from text before
 // it is displayed or persisted to non-secret-specific logs. It is intentionally
@@ -28,7 +30,7 @@ func RedactSensitiveText(text string) string {
 	for _, pattern := range sensitiveTextPatterns {
 		redacted = pattern.ReplaceAllString(redacted, redactedSecret)
 	}
-	redacted = sensitiveAssignmentPattern.ReplaceAllStringFunc(redacted, redactSensitiveAssignment)
+	redacted = sensitiveAssignmentPattern.ReplaceAllString(redacted, "${1}${2}="+redactedSecret)
 	return redacted
 }
 
@@ -41,12 +43,4 @@ func redactSensitiveBytes(data []byte) []byte {
 		return data
 	}
 	return []byte(redacted)
-}
-
-func redactSensitiveAssignment(match string) string {
-	index := strings.Index(match, "=")
-	if index < 0 {
-		return redactedSecret
-	}
-	return strings.TrimRight(match[:index], " \t") + "=" + redactedSecret
 }

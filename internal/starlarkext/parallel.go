@@ -33,9 +33,10 @@ package starlarkext
 //     and the batch deadline (default 10 minutes, at most 1 hour) cancel the
 //     batch the same way.
 //   - Shared session mutation. Each command gets its own top-level globals
-//     map, copied before it starts, so one command's `set` does not write
-//     the caller's map. Nested dicts that were already in the map are still
-//     shared. This is not a transaction: a command that already finished is
+//     map, copied before any worker starts, so one command's `set` does not
+//     write the caller's map. __aliases__ and __shopts__ are copied too, so
+//     no two goroutines write one dict. Other nested dicts that were already
+//     in the map are still shared. This is not a transaction: a command that already finished is
 //     not rolled back when a later command fails.
 // It does not decide which programs are allowed. That stays on the engine.
 
@@ -125,6 +126,16 @@ func runParallel(thread *starlark.Thread, params execParams, cmds []string, work
 		})
 	}
 
+	// Copies are taken here, before any worker starts, so the caller's
+	// dicts are only read on this goroutine.
+	isolated := make([]execParams, len(cmds))
+	for index := range cmds {
+		copied, err := params.isolated()
+		if err != nil {
+			return nil, fmt.Errorf("parallel: command %d: %w", index, err)
+		}
+		isolated[index] = copied
+	}
 	results := make([]parallelResult, len(cmds))
 	indices := make(chan int)
 	var wg sync.WaitGroup
@@ -136,7 +147,7 @@ func runParallel(thread *starlark.Thread, params execParams, cmds []string, work
 				if ctx.Err() != nil {
 					continue
 				}
-				out, runErr := runGatedShell(ctx, params.isolated(), cmds[index])
+				out, runErr := runGatedShell(ctx, isolated[index], cmds[index])
 				results[index] = parallelResult{out: out, err: runErr}
 				// A command killed by the batch context is not the cause.
 				if runErr != nil && ctx.Err() == nil {
@@ -172,7 +183,7 @@ wait:
 		case <-ticker.C:
 			if cancelErr == nil {
 				if err := threadCancelled(thread); err != nil {
-					cancelErr = fmt.Errorf("parallel: cancelled: %v", err)
+					cancelErr = fmt.Errorf("parallel: canceled: %v", err)
 					cancel()
 				}
 			}
@@ -434,9 +445,10 @@ func parallelWorkerCount(requested, commands int) (int, error) {
 
 // isolated returns params whose session globals map is a private copy
 // without the custom-command table, so no worker can call into Starlark.
-// Other nested values are shared. The caller must not mutate the source map
+// __aliases__ and __shopts__ are copied one level deep; other nested values
+// are shared. The caller must not mutate the source map
 // while copies are taken.
-func (p execParams) isolated() execParams {
+func (p execParams) isolated() (execParams, error) {
 	restricted := false
 	sessionID := ""
 	var globals starlark.StringDict
@@ -447,11 +459,34 @@ func (p execParams) isolated() execParams {
 	}
 	copied := make(starlark.StringDict, len(globals))
 	for key, value := range globals {
-		if key == "__custom_commands__" {
+		switch key {
+		case "__custom_commands__":
 			continue
+		case "__aliases__", "__shopts__":
+			// The shell builtins write these dicts in place; each worker
+			// gets its own so workers never share one across goroutines.
+			if dict, ok := value.(*starlark.Dict); ok {
+				copiedDict, err := copyStarlarkDict(dict)
+				if err != nil {
+					return execParams{}, fmt.Errorf("copy %s: %w", key, err)
+				}
+				value = copiedDict
+			}
 		}
 		copied[key] = value
 	}
 	p.session = &security.SessionState{Restricted: restricted, SessionID: sessionID, Globals: copied}
-	return p
+	return p, nil
+}
+
+// copyStarlarkDict returns a new unfrozen dict with dict's entries. Entries
+// are not copied; alias and shopt values are immutable strings and bools.
+func copyStarlarkDict(dict *starlark.Dict) (*starlark.Dict, error) {
+	out := starlark.NewDict(dict.Len())
+	for _, item := range dict.Items() {
+		if err := out.SetKey(item[0], item[1]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }

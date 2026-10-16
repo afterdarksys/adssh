@@ -82,6 +82,9 @@ func TestChildEnvironLastWinsAndUnset(t *testing.T) {
 			key: {Set: true, Exported: true, Kind: expand.String, Str: "second"},
 		},
 	})
+	if val, n := envValue(got, key); n != 1 || val != "second" {
+		t.Fatalf("repeated export %q x%d, want one %q", val, n, "second")
+	}
 	// The scripted Each emits the same variable twice; the second walk still
 	// appends, and LastEnvWins keeps one value. Build an env that appends
 	// two different exports by using layered order entries with a custom Each.

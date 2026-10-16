@@ -31,6 +31,10 @@ const (
 	CapVCS        = "vcs"
 	CapNotify     = "notify"
 	CapTemplate   = "template"
+	// CapDNS tags operations that change DNS records (aws.route53 upsert and
+	// delete). It is added on top of the namespace group so a policy can deny
+	// DNS mutation while still allowing cloud reads.
+	CapDNS = "dns"
 
 	// CapUnclassified tags a starlark.* builtin path that no rule below matches.
 	// It is a FAIL-CLOSED hook: a strict policy can deny
@@ -74,6 +78,7 @@ var nsCapabilities = map[string][]string{
 	"i18n":       {CapTemplate},
 	"str":        {CapStrings},
 	"expect":     {CapProc, CapStdio},
+	"log":        {"audit"}, // starlark.log.*: writes the audit stream
 }
 
 // netDeviceCapabilities classifies the pseudo-commands the shell OPEN handler
@@ -118,6 +123,9 @@ func ClassifyCapabilities(command string) []string {
 	}
 
 	if caps, ok := nsCapabilities[ns]; ok {
+		if dnsMutation(parts) {
+			caps = append(append([]string(nil), caps...), CapDNS)
+		}
 		return dedupeSorted(caps)
 	}
 	return []string{CapUnclassified}
@@ -125,7 +133,7 @@ func ClassifyCapabilities(command string) []string {
 
 // sysCapabilities classifies the "sys" namespace, whose functions span several
 // classes: process execution/plugin loading (proc/stdio), environment access
-// (stdio), and file I/O (fileops). An unrecognised sys.* function is stdio
+// (stdio), and file I/O (fileops). An unrecognized sys.* function is stdio
 // (the least-privileged of the namespace) rather than unclassified, since every
 // sys builtin is at minimum a session-I/O operation.
 func sysCapabilities(fn string) []string {
@@ -141,6 +149,14 @@ func sysCapabilities(fn string) []string {
 	default:
 		return []string{CapStdio}
 	}
+}
+
+// dnsMutation reports the builtins that change DNS records.
+func dnsMutation(parts []string) bool {
+	if len(parts) < 3 || parts[0] != "aws" || parts[1] != "route53" {
+		return false
+	}
+	return parts[2] == "upsert_record" || parts[2] == "delete_record"
 }
 
 func dedupeSorted(in []string) []string {

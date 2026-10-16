@@ -65,7 +65,7 @@ const (
 // so an unbounded producer cannot keep the process alive, then DISCARDS the
 // overflow while still reporting a successful Write. Discarding-with-success
 // (rather than returning a Write error) is deliberate: an io.Copy that sees a
-// short/errored write busy-loops retrying, pinning a core, whereas cancelling the
+// short/errored write busy-loops retrying, pinning a core, whereas canceling the
 // command stops production at the source. The caller turns exceeded into an
 // explicit error after the run (see runGatedShell), so nothing is silently
 // truncated from the caller's point of view — per SECURITY-RULES rule 10 (bound
@@ -176,7 +176,9 @@ func runGatedShell(ctx context.Context, p execParams, cmdStr string) (string, er
 		return out.String(), fmt.Errorf("exec denied: %v", err)
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	// The run has no terminal, so each child gets its own process group and
+	// a timeout or batch deadline kills the whole group.
+	runCtx, cancel := context.WithTimeout(security.WithProcessGroupKill(ctx), p.timeout)
 	defer cancel()
 	// Let an output overrun cancel the run, so an unbounded producer is killed
 	// at the source instead of spinning the output copier.
@@ -185,7 +187,7 @@ func runGatedShell(ctx context.Context, p execParams, cmdStr string) (string, er
 	runErr := runner.Run(runCtx, prog)
 
 	// Overrun and timeout are reported explicitly and take precedence over the
-	// generic run error they may have induced (a capped Write or a cancelled
+	// generic run error they may have induced (a capped Write or a canceled
 	// context surfaces as a runner error too).
 	if out.exceeded {
 		return out.String(), fmt.Errorf("exec output exceeded %d bytes (fail-closed)", p.outputCap)
