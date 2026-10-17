@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.starlark.net/starlark"
@@ -40,5 +41,32 @@ func TestProfileSetKeymapRejectsUnknownMode(t *testing.T) {
 	}
 	if _, err := LoadProfiles(&starlark.Thread{Name: "test"}, starlark.StringDict{}, false, "", rc); err == nil {
 		t.Fatal("unknown keymap accepted")
+	}
+}
+
+// A broken profile is reported with its file and line, and the startup files
+// after it still load.
+func TestLoadProfilesContinuesAfterError(t *testing.T) {
+	dir := t.TempDir()
+	profile := filepath.Join(dir, ".adsshprofile")
+	rc := filepath.Join(dir, ".adsshrc")
+	if err := os.WriteFile(profile, []byte("early = 1\n\nfail(\"bad profile\")\nlate = 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rc, []byte("from_rc = 3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadProfiles(&starlark.Thread{Name: "test"}, starlark.StringDict{}, false, profile, rc)
+	if err == nil {
+		t.Fatal("profile error was swallowed")
+	}
+	if !strings.Contains(err.Error(), profile+":3:") {
+		t.Fatalf("error %q does not name %s line 3", err, profile)
+	}
+	if got["from_rc"] != starlark.MakeInt(3) {
+		t.Fatalf("rc after the broken profile did not load: %v", got["from_rc"])
+	}
+	if got["early"] != starlark.MakeInt(1) {
+		t.Fatalf("bindings before the error were dropped: %v", got["early"])
 	}
 }

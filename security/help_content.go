@@ -214,9 +214,9 @@ commands are allowed.
 The policy context includes: user, command, args, hostname, session_id,
 principals (roles), and environment variables.
 
-Policy files are loaded at startup via ADSSH_POLICY or by calling
-LoadPolicy() from Starlark. Decisions are recorded in the audit log.`,
-			Usage: "ADSSH_POLICY_FILE=/path/to/policy.rego adssh",
+The policy file is loaded at startup from ADSSH_POLICY or --policy
+(default ~/.adssh/policy.rego). Decisions are recorded in the audit log.`,
+			Usage: "ADSSH_POLICY=/path/to/policy.rego adssh\nadssh --policy /path/to/policy.rego",
 			Examples: []HelpExample{
 				{Command: `package adssh.authz
 default allow = false
@@ -230,13 +230,21 @@ allow { input.command != "rm" }`, Description: "deny the rm command"},
 			Name:     "restricted",
 			Category: "security",
 			Summary:  "Restricted shell mode — limits command execution",
-			Description: `Restricted mode prevents certain operations that could compromise security:
-  • cd to directories outside the allowed set
-  • Setting or unsetting PATH, SHELL, ENV, BASH_ENV
-  • Executing commands with / in the name
-  • Redirecting output
+			Description: `Restricted mode refuses these operations:
+  • cd (any directory)
+  • export
+  • commands with / in the name, such as /bin/echo or ./run.sh
+  • redirection to /dev/tcp and /dev/udp
+  • Starlark file, network and exec builtins, which are left out of the
+    session: sys.read_file, sys.write_file, sys.exec_cmd, sys.exec_async,
+    sys.exec_json, sys.parallel, sys.register_command, sys.load_plugin,
+    sys.load_plugins, and every net function
+  • plugin loads and governed fs writes
 
-Enable restricted mode with the -r flag or ADSSH_RESTRICTED=1 env var.
+Restricted mode does NOT block file redirection (echo hi > file works) or
+assignments such as PATH=/somewhere. Use the Rego policy for those.
+
+Enable restricted mode with the -r flag or ADSSH_RESTRICTED=1.
 Check the current mode with sec.is_restricted() in Starlark.`,
 			Usage:   "adssh -r\nADSSH_RESTRICTED=1 adssh",
 			SeeAlso: []string{"policy", "audit"},
@@ -250,7 +258,7 @@ Check the current mode with sec.is_restricted() in Starlark.`,
 The log uses a cryptographic hash chain so that any tampering is detectable.
 
 Log location: ~/.adssh/audit.log (override with ADSSH_AUDIT_LOG).
-Chain file:   ~/.adssh/audit_chain.jsonl
+Chain file:   the log path plus .chain, e.g. ~/.adssh/audit.log.chain
 
 Remote SIEM forwarding is configured via ADSSH_AUDIT_URL and
 ADSSH_AUDIT_TOKEN environment variables.
@@ -260,7 +268,7 @@ Syslog forwarding is enabled via ADSSH_SYSLOG=auth|daemon|local0..7.
 Each chain entry contains: type, source, command, user, timestamp, prev_hash, hash.`,
 			Usage: "ADSSH_AUDIT_LOG=/var/log/adssh.log adssh\nADSSH_AUDIT_URL=https://siem/ ADSSH_AUDIT_TOKEN=xxx adssh",
 			Examples: []HelpExample{
-				{Command: "audit list", Description: "show recent audit entries (vbin)"},
+				{Command: "audit tail -n 20", Description: "show the last 20 audit entries"},
 				{Command: "audit verify", Description: "verify chain integrity"},
 				{Command: "sec.audit('custom event')", Description: "write audit entry from Starlark"},
 			},
@@ -308,11 +316,11 @@ changes can be traced back to approved work orders.
 
 Integrations: ServiceNow, Jira, GitHub Issues (via Starlark plugins).`,
 			Usage: `cm set <ticket-id>
-cm get
+cm status
 cm clear`,
 			Examples: []HelpExample{
 				{Command: "cm set CHG0012345", Description: "associate ticket with session"},
-				{Command: "cm get", Description: "show current ticket ID"},
+				{Command: "cm status", Description: "show the active ticket"},
 				{Command: "cm clear", Description: "remove ticket association"},
 			},
 			SeeAlso: []string{"4eyes", "audit", "policy"},
@@ -365,16 +373,24 @@ func registerStarlarkHelp() {
 			Category: "starlark",
 			Summary:  "System operations — env vars, files, processes, plugins",
 			Description: `The sys namespace provides system-level operations: environment variables,
-file I/O, process execution, plugin loading, and terminal control.`,
+file I/O, process execution, plugin loading, and terminal control.
+
+exec_cmd, exec_json and exec_async take ONE string, not a list. The string is
+run by the adssh shell, so every command in it passes the same policy check as
+a typed command. exec_cmd returns standard output and standard error together
+as one string. A command that exits non-zero raises an error with the exit
+status and the last 4 KiB of the output, which stops the Starlark code.
+exec_json parses whole numbers as ints. timeout= is in seconds (default 30).`,
 			Usage: "sys.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: "sys.getenv('HOME')", Description: "read HOME env var"},
 				{Command: "sys.setenv('DEBUG', '1')", Description: "set env var"},
 				{Command: "sys.read_file('/etc/hostname')", Description: "read file contents"},
 				{Command: "sys.write_file('/tmp/out.txt', 'hello')", Description: "write file"},
-				{Command: "sys.exec_cmd(['ls', '-la'])", Description: "execute command"},
-				{Command: "sys.exec_async(['tail', '-f', '/var/log/syslog'])", Description: "run async"},
-				{Command: "sys.exec_json(['jq', '.key', 'file.json'])", Description: "exec, parse JSON output"},
+				{Command: `sys.exec_cmd("ls -la")`, Description: "run one command string, return stdout and stderr"},
+				{Command: `sys.exec_cmd("make test", timeout=300)`, Description: "raise the 30 second default timeout"},
+				{Command: `j = sys.exec_async("sleep 5; echo done")`, Description: "start a job; j.wait(), j.output()"},
+				{Command: `sys.exec_json("cat file.json")`, Description: "run a command, parse its output as JSON"},
 				{Command: `sys.parallel(["echo a", "echo b"], jobs=2)`, Description: "run gated command strings together"},
 				{Command: "sys.load_plugin('/path/to/plugin.so')", Description: "load a plugin"},
 				{Command: `sys.load_plugins(names=["hello"])`, Description: "load checked Starlark plugins"},
@@ -387,13 +403,13 @@ file I/O, process execution, plugin loading, and terminal control.`,
 			Name:        "net",
 			Category:    "starlark",
 			Summary:     "Network — HTTP requests and TCP connections",
-			Description: "The net namespace provides HTTP GET and TCP send operations.",
+			Description: "The net namespace provides HTTP GET, TCP send, and TCP, TLS and UDP dial operations. It is empty in restricted mode.",
 			Usage:       "net.<method>(args...)",
 			Examples: []HelpExample{
 				{Command: "net.http_get('https://api.example.com/status')", Description: "HTTP GET"},
 				{Command: "net.tcp_send('localhost:9000', 'PING')", Description: "raw TCP send"},
 				{Command: "net.dial('tcp', 'localhost:22')", Description: "dial a TCP connection"},
-				{Command: "net.dial_tls('tcp', 'example.com:443')", Description: "dial with TLS"},
+				{Command: "net.dial_tls('example.com:443')", Description: "dial with TLS (certificate verified)"},
 			},
 			Tags: []string{"net", "network", "http", "tcp", "tls", "request"},
 		},
@@ -412,14 +428,14 @@ file I/O, process execution, plugin loading, and terminal control.`,
 		{
 			Name:        "data",
 			Category:    "starlark",
-			Summary:     "Data serialization — JSON and YAML parse/dump",
-			Description: "The data namespace converts between Starlark values and JSON/YAML strings.",
+			Summary:     "Data serialization — JSON and YAML parse",
+			Description: "The data namespace parses JSON and YAML strings into Starlark values. Whole JSON numbers parse as ints, the rest as floats. json_dump and yaml_dump encode a dict (string keys), list, tuple, str, int, float, bool or None with sorted keys; any other value is an error. Parsed dicts use index access, d[\"key\"], not d.key.",
 			Usage:       "data.<method>(value)",
 			Examples: []HelpExample{
 				{Command: `data.json_parse('{"key":"value"}')`, Description: "parse JSON string"},
-				{Command: "data.json_dump({'key': 'value'})", Description: "serialize to JSON"},
+				{Command: "data.json_dump({'key': 'value'})", Description: "encode as compact JSON with sorted keys"},
 				{Command: "data.yaml_parse('key: value')", Description: "parse YAML string"},
-				{Command: "data.yaml_dump({'key': 'value'})", Description: "serialize to YAML"},
+				{Command: "data.yaml_dump({'key': 'value'})", Description: "encode as YAML with sorted keys"},
 			},
 			// nolint:misspell // "serialise" kept intentionally alongside "serialize" so
 			// help search matches either British or American spelling.
@@ -660,28 +676,276 @@ func registerConceptHelp() {
 		{
 			Name:     "starlark",
 			Category: "concept",
-			Summary:  "Embedded Starlark scripting — when lines are Starlark vs shell",
-			Description: `adssh embeds Starlark (a Python-like scripting language designed for
-configuration) as a first-class citizen alongside traditional shell commands.
+			Summary:  "Starlark primer — variables, blocks, data, namespaces, errors",
+			Description: `Starlark is a small dialect of Python. At the adssh prompt a line runs as
+Starlark when it is an assignment (x = 5), starts with def, for, print( or
+"if ...:", or starts with a known name (a variable, a namespace such as sys,
+or a builtin such as len) and reads as an expression. Everything else is a
+shell command. Start a line with ! to force the shell. help adssh-starlark
+has the exact rules.
 
-HOW THE PARSER DECIDES:
-  A line is parsed as Starlark when:
-    • it contains = outside of shell assignment context (e.g. x = 1 + 2)
-    • it starts with a known Starlark keyword (def, for, if, load, ...)
-    • it references a known namespace (sys., aws., k8s., ...)
+VARIABLES
+Variables last for the whole session: set x = 5 on one line and use x on the
+next. Assigning again replaces the value. A line that starts with a number,
+such as 1 + 2, goes to the shell; type print(1 + 2) instead.
 
-  Otherwise the line is executed as a shell command.
+BLOCKS
+A line that ends in a colon (def, for, if) opens a block. The prompt changes
+to "...   " and you type the body indented by four spaces. An empty line ends
+the block and runs it. Ctrl-C at the "..." prompt also ends the block, and
+what you typed so far still runs.
 
-WHY STARLARK:
-  Starlark is deterministic, has no network/disk side-effects by default,
-  and has a well-defined evaluation model making it safe for untrusted scripts.
-  It also has first-class support for functions, loops, and data structures.
+DATA
+Lists: [1, 2, 3]. Dicts: {"name": "web", "port": 80}. Sets: set([1, 2]).
+Comprehensions: [n * n for n in range(5)]. Index with xs[0] and d["name"].
+Format with "%s has %d items" % (name, len(xs)).
 
-MULTI-LINE MODE:
-  Enter multi-line Starlark with a line ending in ':' or '\'. Exit with a
-  blank line or Ctrl-D.`,
-			SeeAlso: []string{"sys", "net", "aws", "vbin", "hooks"},
-			Tags:    []string{"starlark", "scripting", "language", "python", "mode", "eval"},
+NAMESPACES
+adssh adds namespaces such as sys, str, data, fs, re, crypto and net. Call a
+function with a dot: sys.getenv("HOME"). Each namespace has its own help
+topic, for example help sys. str is a namespace in adssh (str.upper("a")),
+and calling it is still the str() builtin: str(5) is "5".
+
+RUNNING COMMANDS
+sys.exec_cmd("uname -a") runs one command string through the adssh shell
+and returns its standard output and standard error together as a string.
+Assign the result to keep it: out = sys.exec_cmd("uname -a"). It takes one
+string, not a list. A command that exits non-zero raises an error that ends
+with the command's output.
+
+ERRORS
+An error prints "starlark error:" and the message, and stops that line or
+block. Starlark has no try or except, so check values before you use them.
+fail("message") raises an error of your own.
+
+STOPPING
+Ctrl-C stops a Starlark line that is running.`,
+			Examples: []HelpExample{
+				{Command: `x = 5`, Description: "set a variable"},
+				{Command: `print(x * 2)`, Description: "use it on a later line"},
+				{Command: `names = ["web", "db"]`, Description: "a list"},
+				{Command: `for n in names:`, Description: "opens a block; the prompt becomes ..."},
+				{Command: `    print(n)`, Description: "the indented body"},
+				{Command: `(empty line)`, Description: "ends the block and runs it"},
+				{Command: `def double(n):`, Description: "define a function"},
+				{Command: `    return n * 2`, Description: "its body; then an empty line"},
+				{Command: `print(double(21))`, Description: "call it"},
+				{Command: `out = sys.exec_cmd("uname -a")`, Description: "capture a command's output"},
+				{Command: `cfg = data.json_parse('{"port": 80}')`, Description: "parse JSON"},
+				{Command: `print(cfg["port"])`, Description: "index a dict"},
+			},
+			SeeAlso: []string{"adssh-starlark", "sys", "data", "start", "hooks"},
+			Tags:    []string{"starlark", "scripting", "language", "python", "mode", "eval", "primer", "variables", "def", "for"},
+		},
+		{
+			Name:     "adssh-starlark",
+			Category: "concept",
+			Summary:  "What adssh adds to stock Starlark: options, namespaces, policy, routing",
+			Description: `LANGUAGE OPTIONS
+adssh turns on three go.starlark.net options. AllowSet adds the set()
+builtin. AllowGlobalReassign lets a top-level name be assigned again and
+allows while loops and if, for and while at the top level. AllowRecursion
+lets a function call itself.
+
+NAMESPACES
+sys str data fs re crypto net log sec template cloud aws gcp az oci k8s
+secrets db notify git github docker containers i18n expect.
+A namespace is read-only. Reach a member with a dot, sys.getenv, or with an
+index, sys["getenv"]. Dicts that functions return are ordinary dicts: use
+d["key"], not d.key. In restricted mode the file, network and exec members
+are missing (help restricted).
+
+GOVERNANCE
+Every namespace function call is checked by the Rego policy, as the command
+starlark.<namespace>.<function> (for example starlark.sys.exec_cmd) with
+its arguments, and audited before it runs. A command string given to
+sys.exec_cmd, sys.exec_json, sys.exec_async or sys.parallel is then run by
+the adssh shell, and each command inside it is checked again.
+
+ROUTING
+The first rule that matches decides:
+1. A line starting with ! or "$ " goes to the shell.
+2. "if ...:" is Starlark; a POSIX "if ...; then" is shell.
+3. A line starting with def, for or print( is Starlark.
+4. A line starting with [ or export, or of the form NAME=value command, is shell.
+5. A line with = that parses as a Starlark assignment is Starlark, so x = 5 is
+Starlark and ls --color=auto is shell.
+6. A line whose first word is a Starlark name and which parses as an
+expression is Starlark, unless it is also valid shell and that word is an
+alias, a registered command, a vbin, a shell builtin or a program on PATH.
+7. Everything else is shell.
+
+NOT SUPPORTED
+load() is not available. A line starting with load( runs as Starlark and
+fails with "load not implemented by this application".
+sys.exec_cmd, sys.exec_json and sys.exec_async take one string, not a list.
+Starlark has no set literal: s = {1, 2} is not Starlark and runs as a shell
+command named s. Write s = set([1, 2]).
+
+EXTRAS
+sys.exec_async("cmd") returns a job: j.wait() returns True or an error
+string, j.output() waits and returns standard output, and j.stop(),
+j.resume() and j.kill() control it. sys.parallel(["cmd a", "cmd b"],
+jobs=2) runs command strings together and returns a list of outputs.
+sys.register_command(name, fn) adds a shell command; fn receives the argv
+list. __preexec__ and __postcmd__ hooks can be set only in a profile
+(help hooks).`,
+			Examples: []HelpExample{
+				{Command: `s = set([1, 2])`, Description: "AllowSet"},
+				{Command: `print(sys["getenv"]("HOME"))`, Description: "index access to a namespace"},
+				{Command: `j = sys.exec_async("sleep 2; echo done")`, Description: "start a job"},
+				{Command: `print(j.output())`, Description: "wait for it and print its output"},
+				{Command: `print(sys.parallel(["echo a", "echo b"], jobs=2))`, Description: "run two commands together"},
+				{Command: `! ls`, Description: "force the shell"},
+			},
+			SeeAlso: []string{"starlark", "sys", "policy", "restricted", "hooks"},
+			Tags:    []string{"starlark", "adssh", "routing", "namespaces", "governance", "load", "AllowSet", "AllowRecursion", "AllowGlobalReassign"},
+		},
+		{
+			Name:     "start",
+			Category: "concept",
+			Summary:  "Start here — a short tour of adssh",
+			Description: `adssh is a shell that understands two languages at the same prompt:
+ordinary shell commands, and Starlark, a small dialect of Python.
+
+RUN A COMMAND
+Type a command as in any shell, for example ls -la or git status. Pipes,
+redirection and globs work (help shell).
+
+RUN STARLARK
+A line that looks like Starlark runs as Starlark: an assignment such as
+x = 5, a def, for or if block, print(...), or a call such as
+sys.getenv("HOME"). Variables stay set for the whole session (help starlark).
+
+FORCE THE SHELL
+Start a line with ! or with $ and a space to send it to the shell whatever it
+looks like.
+
+SECURITY
+Every command, and every Starlark namespace call, is checked against the Rego
+policy and written to the audit log before it runs (help policy).
+
+MORE HELP
+help shell: pipes, redirection, globs, and known limits.
+help keys: line editing keys.
+help starlark: a Starlark primer.
+help adssh-starlark: what adssh adds to Starlark.
+help search followed by a word: search every topic.
+A command followed by --help: usage of a built-in command.
+vbins: list the built-in commands.
+
+LEAVE
+Type exit, or press Ctrl-D on an empty line.`,
+			Examples: []HelpExample{
+				{Command: `ls -la`, Description: "a shell command"},
+				{Command: `x = 5`, Description: "a Starlark assignment"},
+				{Command: `print(x * 2)`, Description: "Starlark; prints 10"},
+				{Command: `! echo forced`, Description: "always the shell"},
+				{Command: `help keys`, Description: "line editing keys"},
+				{Command: `exit`, Description: "leave adssh"},
+			},
+			SeeAlso: []string{"shell", "keys", "starlark", "adssh-starlark", "policy"},
+			Tags:    []string{"start", "tour", "intro", "introduction", "getting started", "begin", "new"},
+		},
+		{
+			Name:     "shell",
+			Category: "concept",
+			Summary:  "Shell lines — pipes, redirection, globs, and known limits",
+			Description: `Shell lines run in an embedded POSIX shell with bash extensions. Every
+simple command is checked by the policy before it runs.
+
+WHAT WORKS
+Pipelines: cmd1 | cmd2
+Lists: cmd1 && cmd2, cmd1 || cmd2, cmd1 ; cmd2
+Output to a file: > file, and >> file to append
+Input from a file: < file
+Here-documents: << EOF, and <<- EOF, which removes leading tabs
+Here-strings: <<< "text"
+Standard error: 2> file, >&2, and 2>&1
+Globs: *, ? and [abc]
+Home directory: ~ and ~/dir
+Command substitution: $(command)
+Process substitution: <(command)
+Background: cmd & and wait. There is no job table, so background jobs are
+not listed.
+
+KNOWN LIMITS
+File descriptors 3 and above are not supported. A line with a redirection
+such as 3> file, 4< file or exec 3> file is refused before any of it runs,
+with "unsupported redirect fd 3". Opening /dev/fd/3 or higher is refused
+with an error.
+adssh -c exits with the command's own status, as sh -c does: exit 3 exits 3.
+exit N at the prompt ends the session with status N.
+In restricted mode cd, export, and command names that contain / are refused
+(help restricted).`,
+			Examples: []HelpExample{
+				{Command: `ls -la | grep go`, Description: "a pipeline"},
+				{Command: `make && echo built || echo failed`, Description: "and, or"},
+				{Command: `date > now.txt`, Description: "write a file"},
+				{Command: `date >> log.txt`, Description: "append to a file"},
+				{Command: `sort < names.txt`, Description: "read a file"},
+				{Command: `grep x <<< "a x b"`, Description: "here-string"},
+				{Command: `ls missing 2>&1 | grep -i no`, Description: "errors into the pipe"},
+				{Command: `echo $(hostname) ~`, Description: "substitution and home"},
+				{Command: `diff <(ls a) <(ls b)`, Description: "process substitution"},
+			},
+			SeeAlso: []string{"start", "keys", "restricted", "starlark"},
+			Tags:    []string{"shell", "pipe", "pipeline", "redirect", "redirection", "glob", "heredoc", "fd", "descriptor"},
+		},
+		{
+			Name:     "keys",
+			Category: "concept",
+			Summary:  "Line editing keys — emacs and vi, history search, suggestions",
+			Description: `adssh uses emacs keys unless you choose vi. Choose with set_keymap("vi")
+or set_keymap("emacs"), at the prompt or in ~/.adsshrc.
+
+IN BOTH KEYMAPS
+Enter: run the line.
+Tab: complete command names, file names, and Starlark names, for example
+sys.ge to sys.getenv.
+Ctrl-R: search history backward. Ctrl-S searches forward.
+Up and Down arrows: previous and next history line.
+Right arrow or Ctrl-F at the end of the line: accept the dimmed history
+suggestion.
+Ctrl-L: clear the screen.
+Ctrl-C: at the prompt, discard the line. While Starlark runs, stop it.
+Ctrl-D: on an empty line, leave adssh. Otherwise delete the character
+under the cursor.
+
+EMACS KEYS
+Ctrl-A: start of line. Ctrl-E: end of line.
+Ctrl-B and Ctrl-F: back and forward one character.
+Alt-B and Alt-F: back and forward one word.
+Ctrl-P and Ctrl-N: previous and next history line.
+Ctrl-K: delete to the end of the line. Ctrl-U: delete to the start.
+Ctrl-W or Alt-Backspace: delete the word before the cursor.
+Alt-D: delete the word after the cursor.
+Ctrl-T: swap two characters. Ctrl-Y: paste the last deleted text.
+
+VI KEYS
+Esc enters command mode. i, a, I and A return to insert mode.
+In command mode: h and l move, w, b and e move by word, 0, ^ and $ go to the
+start or end of the line, j and k walk history, x deletes a character, dd
+deletes the line, dw deletes a word, cw and cc change, r replaces one
+character, f and t find a character, p pastes.
+In insert mode the keys listed under IN BOTH KEYMAPS still work.
+
+SUGGESTIONS
+As you type, adssh can show the rest of a matching history line, dimmed,
+after the cursor. Turn it on or off with set suggest on and set suggest off.
+ADSSH_SUGGEST=on or off sets the starting state. The default is on in a
+local session and off in an SSH session, where a screen reader would read
+the dimmed text aloud.
+set highlight on colors dangerous commands before you press Enter. It needs
+a terminal and is off by default; ADSSH_HIGHLIGHT=1 turns it on at start.`,
+			Examples: []HelpExample{
+				{Command: `set_keymap("vi")`, Description: "vi keys"},
+				{Command: `set_keymap("emacs")`, Description: "emacs keys (the default)"},
+				{Command: `set suggest off`, Description: "no dimmed history suggestions"},
+				{Command: `set highlight on`, Description: "color dangerous commands"},
+			},
+			SeeAlso: []string{"start", "history", "prompt"},
+			Tags:    []string{"keys", "keyboard", "emacs", "vi", "vim", "readline", "ctrl", "shortcut", "suggest", "completion", "tab"},
 		},
 		{
 			Name:     "vbin",
@@ -714,22 +978,30 @@ The --help flag is handled automatically by DispatchVBin.`,
 		{
 			Name:     "hooks",
 			Category: "concept",
-			Summary:  "Pre-exec and post-command hooks",
-			Description: `adssh supports hooks that fire before and after each command:
+			Summary:  "Pre-exec and post-command hooks (__preexec__, __postcmd__)",
+			Description: `Two Starlark functions run around every line typed at the interactive
+prompt, shell or Starlark:
+__preexec__(cmd) runs before the line, with the line as typed.
+__postcmd__(cmd, code) runs after it, with its exit code.
 
-  preexec  — called before a command is executed
-  postcmd  — called after a command completes
+Define them with def in a profile: /etc/adssh_profile (login shells),
+~/.adsshprofile, or ~/.adsshrc. The prompt refuses to assign any name that
+starts with __ and prints "adssh: not assigned (reserved)", so a hook
+cannot be added or replaced from the prompt.
 
-Hooks are registered from Starlark using sys.register_command or by setting
-the __preexec__ and __postcmd__ globals.
+Hooks run only in the interactive shell, not for adssh -c or script files.
+An error inside a hook is ignored.
 
-The 4eyes and CM systems are implemented as preexec hooks.`,
+The 4eyes and cm gates are not hooks. They are part of the command gate and
+always run.`,
 			Examples: []HelpExample{
-				{Command: `def preexec(cmd): print("about to run:", cmd)`, Description: "define a preexec hook"},
-				{Command: `__preexec__ = preexec`, Description: "register the hook"},
+				{Command: `def __preexec__(cmd):`, Description: "in ~/.adsshrc"},
+				{Command: `    print("about to run:", cmd)`, Description: "body; end with an empty line"},
+				{Command: `def __postcmd__(cmd, code):`, Description: "in ~/.adsshrc"},
+				{Command: `    if code != 0: print("exit", code)`, Description: "report failures"},
 			},
-			SeeAlso: []string{"4eyes", "cm", "vbin", "starlark"},
-			Tags:    []string{"hooks", "preexec", "postcmd", "callback", "event"},
+			SeeAlso: []string{"4eyes", "cm", "starlark", "adssh-starlark"},
+			Tags:    []string{"hooks", "preexec", "postcmd", "callback", "event", "profile", "adsshrc"},
 		},
 		{
 			Name:     "plugins",
@@ -767,8 +1039,9 @@ Starlark plugins live in ~/.adssh/plugins/<name>/ as manifest.yaml and plugin.st
   !prefix    — repeat last command starting with prefix
   ^old^new   — replace first occurrence of old with new in last command
 
-History is stored in ~/.adssh/history (override with ADSSH_HISTORY_FILE).
-The history vbin and fc vbin provide history management.`,
+The REPL saves history in ~/.adssh/history (override with ADSSH_HISTORY).
+The history and fc vbins read ADSSH_HISTORY_FILE instead, falling back to
+~/.adssh/history, so set both if you move the file.`,
 			Examples: []HelpExample{
 				{Command: "!!", Description: "re-run last command"},
 				{Command: "!-2", Description: "re-run 2nd most-recent command"},
@@ -783,30 +1056,39 @@ The history vbin and fc vbin provide history management.`,
 		{
 			Name:     "prompt",
 			Category: "concept",
-			Summary:  "Prompt customization — PROMPT variable and escape sequences",
-			Description: `The shell prompt is controlled by the PROMPT environment variable.
-Escape sequences are expanded at each prompt display:
+			Summary:  "Prompt customization — the PROMPT Starlark variable and escapes",
+			Description: `PROMPT is a Starlark variable, not an environment variable, so export does
+not change it. Assign it in ~/.adsshrc or at the prompt. It is read before
+every prompt. RPROMPT, if set, is drawn at the right edge of the line.
 
-  \\u   current username
-  \\h   hostname (short)
-  \\H   hostname (FQDN)
-  \\w   current working directory (~ for home)
-  \\W   basename of current working directory
-  \\$   $ for regular user, # for root
-  \\t   current time HH:MM:SS
-  \\d   current date
-  \\n   newline
-  \\[   begin non-printing sequence (for ANSI codes)
-  \\]   end non-printing sequence
+Escapes. Inside a normal Starlark string write each backslash twice, as in
+the examples.
+\u: user name
+\h: host name up to the first dot
+\H: full host name
+\w: working directory, with ~ for home
+\W: last part of the working directory
+\$: # for root, otherwise $
+\t: time as HH:MM:SS
+\d: date, such as Mon Jan 02
+\n: new line
+\e: the escape character, for colors
+\g: git branch, when set gitprompt on or ADSSH_GIT_PROMPT=1
+%~: same as \w
+$(expr): the value of a Starlark expression
+\[ and \] are accepted and removed.
 
-ANSI color codes work inside \\[...\\] sequences.`,
+Colors: put ANSI codes in the string, for example "\x1b[32m" for green and
+"\x1b[0m" to reset.`,
 			Examples: []HelpExample{
-				{Command: `export PROMPT='\u@\h:\w\$ '`, Description: "user@host:dir$ prompt"},
-				{Command: `export PROMPT='\[\033[1;32m\]\u@\h\[\033[0m\]:\w\$ '`, Description: "green user@host"},
+				{Command: `PROMPT = "\\u@\\h:\\w\\$ "`, Description: "user@host:dir$"},
+				{Command: `PROMPT = "\x1b[32m\\u@\\h\x1b[0m:\\w\\$ "`, Description: "green user@host"},
+				{Command: `RPROMPT = "\\t"`, Description: "time at the right edge"},
 			},
+			SeeAlso: []string{"keys", "start"},
 			// nolint:misspell // "customise"/"colour" kept intentionally alongside their
 			// American spellings so help search matches either variant.
-			Tags: []string{"prompt", "PS1", "PROMPT", "terminal", "customise", "customize", "colour", "color"},
+			Tags: []string{"prompt", "PS1", "PROMPT", "RPROMPT", "terminal", "customise", "customize", "colour", "color"},
 		},
 	}
 

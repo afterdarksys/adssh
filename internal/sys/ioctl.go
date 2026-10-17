@@ -6,15 +6,23 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 var ShellPgid int
 
 func InitTerminal() error {
+	// With no terminal on stdin (adssh -c from a script, stdin a pipe or
+	// /dev/null) there is no terminal to take: that is not an error.
+	tty := term.IsTerminal(int(os.Stdin.Fd()))
+
 	// Put shell in its own process group
 	ShellPgid = os.Getpid()
-	if err := syscall.Setpgid(ShellPgid, ShellPgid); err != nil {
+	if err := syscall.Setpgid(ShellPgid, ShellPgid); err != nil && tty {
 		return err
+	}
+	if !tty {
+		return nil
 	}
 
 	// Grab control of the terminal

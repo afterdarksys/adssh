@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +42,9 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 		})
 	}
 
+	// A broken startup file does not stop the ones after it, as in bash: each
+	// error is reported with its file and line and the rest still load.
+	var errs []error
 	for _, path := range paths {
 		if path == "" {
 			continue
@@ -50,24 +54,39 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 			// Auto-create the RC file with a starter template
 			if strings.HasSuffix(path, ".adsshrc") || path == rcPath {
 				if err := os.WriteFile(path, []byte(defaultRC), 0600); err != nil {
-					return env, fmt.Errorf("create profile %s: %w", path, err)
+					errs = append(errs, fmt.Errorf("create profile %s: %w", path, err))
+					continue
 				}
 			} else {
 				continue
 			}
 		} else if err != nil {
-			return env, fmt.Errorf("stat profile %s: %w", path, err)
+			errs = append(errs, fmt.Errorf("stat profile %s: %w", path, err))
+			continue
 		}
 
+		// On a runtime error ExecFile still returns what the file bound
+		// before the failing line; keep it.
 		globals, err := starlark.ExecFile(thread, path, nil, env)
-		if err != nil {
-			return env, fmt.Errorf("load profile %s: %w", path, err)
-		}
 		for k, v := range globals {
 			env[k] = v
 		}
+		if err != nil {
+			// EvalError's text has no position: name the innermost frame in
+			// this file, the profile line that failed.
+			var evalErr *starlark.EvalError
+			if errors.As(err, &evalErr) {
+				for i := range evalErr.CallStack {
+					if frame := evalErr.CallStack.At(i); frame.Pos.Filename() == path {
+						err = fmt.Errorf("%s: %s", frame.Pos, evalErr.Msg)
+						break
+					}
+				}
+			}
+			errs = append(errs, fmt.Errorf("load profile %w", err))
+		}
 	}
-	return env, nil
+	return env, errors.Join(errs...)
 }
 
 // sourceShellProfiles sources /etc/profile and ~/.profile by running them

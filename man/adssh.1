@@ -1,293 +1,839 @@
-.TH ADSSH 1 "2026" "adssh" "User Commands"
-.\" ─────────────────────────────────────────────────────────────────────────
+.TH ADSSH 1 2026-10-17 "adssh" "User Commands"
 .SH NAME
-adssh \- programmable DevOps shell (Starlark + POSIX shell hybrid)
-.\" ─────────────────────────────────────────────────────────────────────────
+adssh \- programmable DevOps shell that runs POSIX shell and Starlark under one policy
 .SH SYNOPSIS
 .B adssh
-[\fIOPTIONS\fR]
-[\fIscript.star|script.adssh\fR]
-.\" ─────────────────────────────────────────────────────────────────────────
+.RI [ options ]
+.PP
+.B adssh
+.RI [ options ]
+.B \-c
+.I line
+.PP
+.B adssh
+.RI [ options ]
+.I script.star
+.PP
+.B adssh
+.RI [ options ]
+.I script.adssh
+.PP
+.B adssh \-\-serve
+.I addr
+.RI [ options ]
+.PP
+.B adssh \-\-init
+.PP
+.B adssh \-\-doctor
 .SH DESCRIPTION
 .B adssh
-is a security-first programmable shell that blends a Starlark (safe Python
-dialect) REPL with a full POSIX shell interpreter.
-It provides RBAC entitlements, OPA/Rego policy enforcement, structured
-audit logging, a built-in SSH server, and a suite of virtual binaries
-(\fBjq\fR, \fByq\fR, \fBhttp\fR, \fBcmdgen\fR, and more) — all without
-installing external tools.
+is an interactive shell with two languages at one prompt: an embedded POSIX
+shell with bash extensions, and Starlark, a small dialect of Python.
+Every shell command and every Starlark namespace call is checked by an
+OPA/Rego policy and written to an audit log before it runs.
 .PP
-When invoked interactively,
-.B adssh
-presents a dual-mode REPL.
-Lines that look like Starlark are evaluated as Starlark; lines that look
-like shell commands are routed to the embedded POSIX shell interpreter.
-Use
+Each line typed at the prompt is routed to Starlark or to the shell.
+The first rule that matches decides:
+.IP 1. 4
+A line that starts with
 .B !
-or
+or with
 .B $
-as a prefix to force shell mode.
+and a space goes to the shell.
+The prefix is removed before the line runs.
+.IP 2. 4
+A line of the form
+.B if
+.IR expr :
+is Starlark.
+A POSIX
+.B if
+.IR cmd ;
+.B then
+is shell.
+.IP 3. 4
+A line that starts with
+.BR def ,
+.B for
+or
+.B print(
+is Starlark.
+.IP 4. 4
+A line that starts with
+.B [
+or
+.BR export ,
+or has the form
+.I NAME=value command
+is shell.
+.IP 5. 4
+A line that contains = and parses as a Starlark assignment is Starlark.
+So
+.B x = 5
+is Starlark and
+.B ls \-\-color=auto
+is shell.
+.IP 6. 4
+A line whose first word is a Starlark global or builtin, and which parses as a
+Starlark expression, is Starlark.
+It stays shell when it is also valid shell and that word is an alias, a
+command registered with
+.BR sys.register_command ,
+a virtual binary, a shell builtin, or a program on PATH.
+.IP 7. 4
+Everything else is shell.
 .PP
-When a
-.I script.star
-argument is supplied, the file is evaluated as Starlark non-interactively and
-adssh exits.
-When a
-.I script.adssh
-argument is supplied, the file is evaluated line-by-line through the same
-shell, policy, audit, elevation, lease, gateway, and recording path used by
-interactive commands.
-Prefix a
-.I script.adssh
-line with
-.B -
-to mark an expected failure and continue to the next line.
-Shebang lines (\fB#!\fR) are stripped automatically.
-.\" ─────────────────────────────────────────────────────────────────────────
+A line that starts with a number, such as
+.BR "1 + 2" ,
+goes to the shell.
+Write
+.B print(1 + 2)
+instead.
+.PP
+Starlark variables persist for the whole session.
+A line that ends in a colon opens a block; the prompt changes to
+.B "...   "
+and an empty line ends the block and runs it.
+.PP
+Type
+.B help start
+at the prompt for a short tour, and
+.B help
+for the list of topics.
+Type
+.B exit
+or press Ctrl-D on an empty line to leave.
 .SH OPTIONS
+Options may appear in any order.
+An option that is not recognized, or one that needs a value and has none,
+prints
+.B "adssh: unknown option:"
+(or
+.BR "option requires an argument:" )
+and a usage hint, and exits 2.
+Arguments after a script name belong to the script.
 .TP
 .BR \-h ", " \-\-help
 Print a usage summary and exit.
 .TP
+.BI \-c " line"
+Run
+.I line
+once and exit.
+The line is routed with the same rules as the prompt.
+A Starlark expression's value is printed when it is not None.
+Profiles are loaded first.
+.TP
 .BR \-l ", " \-\-login
-Treat this session as a login shell.
-Causes
-.B ~/.adsshprofile
-(or the path in \fBADSSH_PROFILE\fR) to be sourced before the RC file.
-This flag is also set automatically when
-.B argv[0]
-starts with
-.BR \- .
+Run as a login shell: source
+.B /etc/profile
+and
+.B ~/.profile
+for environment variables, and load
+.B /etc/adssh_profile
+before the user profiles.
+This is also set when argv[0] starts with a dash.
 .TP
 .BR \-r ", " \-\-restricted
-Enable restricted (sandboxed) mode.
-In restricted mode path traversal, \fBcd\fR, \fBexport\fR, and other
-privileged shell operations are blocked by the security layer.
+Restricted mode.
+See SECURITY.
 .TP
-.BI \-c " cmd"
-Evaluate
-.I cmd
-as a single expression or command and exit.
-The string is parsed with the same mode-detection heuristic used in the
-REPL (Starlark first, then POSIX shell).
-.BI \-\-serve " :PORT"
-Start the built-in SSH server listening on
-.I :PORT
-(e.g.
-.BR \-\-serve\ :2222 ).
-The server reads host keys from
-.B ~/.adssh/host_key
-and authorised keys from
-.B ~/.adssh/authorized_keys
-(overridable via environment variables).
-The process remains in the foreground; combine with
-.BR \-\-login / \-\-restricted
-to control the session policy for remote users.
-The server also authorizes SSH
-.B direct-tcpip
-channels, so it can act as a policy-gated jump host.
+.BI \-\-policy " path"
+Load the Rego policy from
+.IR path .
+Overrides
+.BR ADSSH_POLICY .
 .TP
-.BI \-\-entitlements " PATH"
+.BI \-\-entitlements " path"
 Load RBAC entitlements from the YAML file at
-.IR PATH .
-Entitlements control which roles and capabilities are available to
-authenticated users.
+.IR path .
+Overrides
+.BR ADSSH_ENTITLEMENTS .
 .TP
-.BI \-\-policy " PATH"
-Load an OPA/Rego policy file from
-.IR PATH .
-The policy is evaluated for every command before execution; a deny decision
-terminates the command with an error.
+.BI \-\-serve " addr"
+Start the SSH server on
+.IR addr ,
+for example
+.BR :2222 .
+See SSH SERVER.
+.TP
+.BI \-\-serve\-agent " addr"
+Start the instrumentation-agent HTTP listener on
+.IR addr .
+It needs
+.B ADSSH_AGENT_TOKEN
+and runs only the tasks in the allowlist named by
+.BR ADSSH_AGENT_TASKS .
+Startup fails if either is missing or invalid.
 .TP
 .B \-\-init
 Create
-.B ~/.adssh/
-with a starter
-.BR authorized_keys ,
-.BR default.rego ,
+.B ~/.adssh/authorized_keys
 and
-.B .adsshrc
-file, then exit.
-Existing files are not overwritten.
-.\" ─────────────────────────────────────────────────────────────────────────
-.SH IDENTITY AND ADMIN COMMANDS
-.B identity
-imports externally verified OIDC claims into the current session, maps group
-claims into policy principals, and can create a local SSH CA or issue
-short-lived SSH user certificates.
+.B ~/.adssh/policy.rego
+and
+.BR ~/.adsshrc ,
+then exit.
+Files that already exist are left alone and listed as skipped.
+.TP
+.B \-\-doctor
+Check the local configuration and print one line per check.
+Exits non-zero when a check fails.
+.TP
+.I script.star
+Run the file as Starlark and exit.
+A first line starting with
+.B #!
+is skipped.
+.TP
+.I script.adssh
+Run the file line by line through the same routing, policy and audit path as
+the prompt.
+A line that starts with
+.B \-
+may fail without stopping the script.
+.TP
+.B sah
+Speak the sah/1 stdio protocol.
+Off unless
+.B ADSSH_SAH
+is 1, true or yes; when off it prints one error frame and exits.
+.SH STARTUP FILES
+At startup adssh runs these Starlark files in this order, into one shared set
+of globals:
+.TP
+.B /etc/adssh_profile
+Login shells only.
+Skipped when it does not exist.
+.TP
+.B ~/.adsshprofile
+Every session.
+Skipped when it does not exist.
+.B ADSSH_PROFILE
+changes the path.
+.TP
+.B ~/.adsshrc
+Every session.
+Created from a short default when it does not exist.
+.B ADSSH_RC
+changes the path.
 .PP
-.B admin
-exposes a governed local API for sessions, gateways, pending approvals,
-explanations, and evidence export.
-.\" ─────────────────────────────────────────────────────────────────────────
+The files are Starlark, not shell.
+They can assign
+.B PROMPT
+and
+.BR RPROMPT ,
+call
+.BR set_keymap ,
+call
+.B sys.setenv
+and
+.BR sys.register_command ,
+and define the hooks
+.B __preexec__
+and
+.BR __postcmd__ .
+An error in one file prints
+.B "Error loading profiles"
+with the file name and line; the names that file bound before the error are
+kept, the files after it still load, and the session starts.
+The adssh source tree has a commented example in
+.BR examples/adsshrc .
+.SH LINE EDITING
+The editor uses emacs keys by default.
+.B set_keymap("vi")
+switches to vi keys and
+.B set_keymap("emacs")
+switches back, at the prompt or in a startup file.
+.PP
+Keys in both keymaps:
+.TP
+.B Enter
+Run the line.
+.TP
+.B Tab
+Complete command names, file names, and Starlark names, for example
+.B sys.ge
+to
+.BR sys.getenv .
+.TP
+.B Ctrl-R
+Search history backward.
+.B Ctrl-S
+searches forward.
+.TP
+.B "Up and Down arrows"
+Previous and next history line.
+.TP
+.B "Right arrow or Ctrl-F"
+At the end of the line, accept the history suggestion.
+.TP
+.B Ctrl-L
+Clear the screen.
+.TP
+.B Ctrl-C
+At the prompt, discard the line.
+While a Starlark line runs, stop it.
+At the
+.B ...
+prompt, end the block; what was typed so far still runs.
+.TP
+.B Ctrl-D
+On an empty line, exit.
+Otherwise delete the character under the cursor.
+.PP
+Emacs keys: Ctrl-A start of line, Ctrl-E end of line, Ctrl-B and Ctrl-F one
+character back and forward, Alt-B and Alt-F one word back and forward, Ctrl-P
+and Ctrl-N previous and next history line, Ctrl-K delete to the end of the
+line, Ctrl-U delete to the start, Ctrl-W or Alt-Backspace delete the word
+before the cursor, Alt-D delete the word after it, Ctrl-T swap two characters,
+Ctrl-Y paste the last deleted text.
+.PP
+Vi keys: Esc enters command mode, and i, a, I or A return to insert mode.
+In command mode h and l move, w, b and e move by word, 0, ^ and $ go to the
+start or end of the line, j and k walk history, x deletes a character, dd the
+line, dw a word, cw and cc change, r replaces a character, f and t find a
+character, p pastes.
+.PP
+History suggestions show the rest of a matching history line, dimmed, after
+the cursor.
+.B set suggest on
+and
+.B set suggest off
+turn them on and off.
+.B ADSSH_SUGGEST
+sets the starting state; the default is on in a local session and off in an
+SSH session, where a screen reader would read the dimmed text aloud.
+.PP
+.B set highlight on
+colors dangerous commands before Enter is pressed.
+It needs a terminal, the policy must allow the command
+.BR "set highlight on" ,
+and it is off by default.
+.B ADSSH_HIGHLIGHT
+turns it on at startup.
+.PP
+.B set gitprompt on
+enables the
+.B \eg
+git branch escape in
+.BR PROMPT .
+Type
+.B help prompt
+for the prompt escapes.
+.SH SHELL
+Shell lines run in an embedded POSIX shell (mvdan.cc/sh) with bash
+extensions.
+These work:
+.IP \(bu 2
+Pipelines:
+.B cmd1 | cmd2
+.IP \(bu 2
+Lists:
+.BR "cmd1 && cmd2" ,
+.BR "cmd1 || cmd2" ,
+.B "cmd1 ; cmd2"
+.IP \(bu 2
+Redirections:
+.BR ">" ,
+.BR ">>" ,
+.BR "<" ,
+.BR "2>" ,
+.BR ">&2" ,
+.B "2>&1"
+.IP \(bu 2
+Here-documents
+.BR "<< EOF" ,
+.B "<<\- EOF"
+(leading tabs removed), and here-strings
+.B "<<< text"
+.IP \(bu 2
+Globs
+.BR * ,
+.B ?
+and
+.BR [abc] ,
+and
+.B ~
+for the home directory
+.IP \(bu 2
+Command substitution
+.B $(cmd)
+and process substitution
+.B <(cmd)
+.IP \(bu 2
+Background
+.B cmd &
+and
+.BR wait .
+There is no job table; background jobs are not listed.
+.PP
+Known limit: file descriptors 3 and above are not supported.
+A line with a redirection such as
+.BR "3> file" ,
+.B "4< file"
+or
+.B "exec 3> file"
+is refused before any of it runs, with
+.BR "unsupported redirect fd 3" .
+Opening
+.B /dev/fd/3
+or higher is refused with an error.
+.PP
+adssh implements some shell verbs itself, including
+.BR set ,
+.BR alias ,
+.BR pushd ,
+.BR popd ,
+.BR dirs ,
+.BR read ,
+.BR time ,
+.B type
+and
+.BR trap ,
+and ships virtual binaries (built-in commands such as
+.BR jq ,
+.BR yq ,
+.B http
+and
+.BR audit ).
+Type
+.B vbins
+for the list and
+.I name
+.B \-\-help
+for one of them.
+.SH STARLARK
+adssh adds these namespaces to the Starlark globals:
+sys, str, data, fs, re, crypto, net, log, sec, template, cloud, aws, gcp, az,
+oci, k8s, secrets, db, notify, git, github, docker, containers, i18n and
+expect.
+.PP
+A namespace is read-only.
+Reach a member with a dot,
+.BR sys.getenv ,
+or with an index,
+.BR sys["getenv"] .
+Dicts returned by functions are ordinary dicts and take index access only:
+.BR d["key"] .
+.PP
+Language options AllowSet, AllowGlobalReassign and AllowRecursion are on, so
+.B set()
+exists, top-level names can be reassigned, while loops and top-level if and
+for work, and functions may recurse.
+.PP
+.B sys.exec_cmd
+takes ONE string, not a list.
+It runs the string through the adssh shell, so each command in it passes the
+policy, and returns standard output and standard error together as one
+string.
+A command that exits non-zero raises an error with the exit status and the
+last 4 KiB of the output.
+.B timeout=
+is in seconds, default 30.
+.B sys.exec_json
+does the same and parses the output as JSON; whole numbers become ints and
+the rest floats, as in
+.BR data.json_parse .
+.PP
+.B str
+is a namespace of string helpers
+.RB ( str.split ,
+.BR str.upper ,
+\&...) and is still the
+.B str()
+conversion when called:
+.B str(5)
+is "5".
+.PP
+.B data.json_dump
+and
+.B data.yaml_dump
+encode a dict (string keys), list, tuple, str, int, float, bool or None;
+keys are sorted, so the same value gives the same text.
+Any other value, such as a function, is an error.
+.PP
+.B sys.exec_async
+takes one string and returns a job.
+.B j.wait()
+returns True or an error string;
+.B j.output()
+waits and returns the output;
+.BR j.stop() ,
+.B j.resume()
+and
+.B j.kill()
+control it.
+.PP
+.B sys.parallel
+takes a list of command strings and
+.BR jobs= ,
+runs them together, and returns a list of outputs.
+.PP
+.BI sys.register_command( name ", " fn )
+adds a shell command;
+.I fn
+receives the argv list, argv[0] being the name.
+.PP
+The hooks
+.BI __preexec__( cmd )
+and
+.BI __postcmd__( cmd ", " code )
+run around every line typed at the interactive prompt.
+They can be defined only in a startup file: the prompt refuses to assign any
+name that starts with two underscores.
+Hooks do not run for
+.B \-c
+or script files.
+.PP
+.B load()
+is not supported; a line starting with
+.B load(
+runs as Starlark and fails with "load not implemented by this application".
+Use
+.B sys.load_plugins
+or a startup file.
+.SH SECURITY
+Every shell command, including each command inside an
+.B sys.exec_cmd
+string, is checked by the Rego policy, then by the change-management and
+four-eyes gates, before it runs.
+Every Starlark namespace function call is checked by the same policy as the
+command
+.BI starlark. namespace . function
+with its arguments, for example
+.BR starlark.sys.exec_cmd .
+A malformed policy or unreadable entitlements file stops startup; a missing
+policy file allows everything.
+.PP
+Restricted mode
+.RB ( \-r
+or
+.BR ADSSH_RESTRICTED )
+refuses
+.BR cd ,
+.BR export ,
+command names that contain a slash, and redirection to
+.B /dev/tcp
+and
+.BR /dev/udp .
+It leaves out the Starlark file, network and exec functions: sys.read_file,
+sys.write_file, sys.exec_cmd, sys.exec_async, sys.exec_json, sys.parallel,
+sys.register_command, sys.load_plugin, sys.load_plugins, and all of net.
+It refuses plugin loads and fs writes.
+It does not block file redirection or assignments such as PATH=/x; use the
+policy for those.
+.PP
+Every command and policy decision is written to the audit log, and each entry
+is added to an HMAC hash chain stored next to the log with the suffix
+.BR .chain .
+.B audit verify
+checks the chain.
+.SH SSH SERVER
+.B \-\-serve
+.I addr
+or
+.B ADSSH_SERVE
+starts an SSH server that gives each login an adssh session.
+Only public-key and certificate logins are accepted.
+.PP
+Each key line in
+.B ~/.adssh/authorized_keys
+must name its logins with a quoted
+.B user=
+option, for example
+.BR "user=\(dqalice,bob\(dq ssh-ed25519 AAAA..." .
+A key line without
+.B user=
+stops the server from loading the file.
+A line marked
+.B cert-authority
+trusts a certificate authority; a certificate then logs in only as one of its
+principals, and a certificate with no principals is refused.
+.B ADSSH_REVOKED_KEYS
+names a revocation file.
+Root, and any name with uid 0, is refused unless
+.B ADSSH_SSH_PERMIT_ROOT
+is set.
+.PP
+Only an interactive shell is offered.
+exec requests (ssh host command), sftp, other subsystems, and unknown requests
+are refused.
+The client's terminal modes from the pty request are applied to the session
+terminal, and LANG and LC_* variables sent by the client replace the server's
+before the shell starts.
+.PP
+The server also authorizes direct-tcpip channels, so it can serve as a
+policy-gated jump host.
+Without a terminal (for example under systemd) it serves until SIGTERM.
+SIGHUP stops new logins and leaves running sessions alone.
 .SH ENVIRONMENT
-.TP
-.B ADSSH_AUDIT_LOG
-Path to the append-only audit log file.
-Default:
-.BR ~/.adssh/audit.log .
-.TP
-.B ADSSH_AUDIT_URL
-Webhook URL for streaming audit events to a remote SIEM.
-When set, every audit event is also POSTed to this endpoint.
-.TP
-.B ADSSH_AUDIT_TOKEN
-Bearer token sent in the
-.B Authorization
-header when
-.B ADSSH_AUDIT_URL
-is configured.
-.TP
-.B ADSSH_POLICY
-Path to the OPA/Rego policy file.
-Default:
-.BR ~/.adssh/policy.rego .
-Equivalent to
-.BR \-\-policy .
-.TP
-.B ADSSH_ENTITLEMENTS
-Path to the RBAC entitlements YAML file.
-Equivalent to
-.BR \-\-entitlements .
+Values 1, true and yes turn a switch on unless noted.
 .TP
 .B ADSSH_RESTRICTED
-Set to
-.BR 1 ,
-.BR true ,
-or
-.B yes
-to enable restricted mode at startup.
-Equivalent to
-.BR \-r .
+Restricted mode.
 .TP
 .B ADSSH_SERVE
-SSH server listen address (e.g.
-.BR :2222 ).
-Equivalent to
-.BR \-\-serve .
+SSH server address, such as :2222.
 .TP
-.B ADSSH_MODEL
-Name of the AI model used by Starlark AI builtins (e.g.
-.BR claude-3-5-sonnet-20241022 ).
+.B ADSSH_SSH_PERMIT_ROOT
+Allow SSH logins as root or any uid-0 name. Default off.
 .TP
-.B ANTHROPIC_API_KEY
-API key for the Anthropic Claude API, used by AI-powered virtual binaries
-and Starlark extensions.
+.B ADSSH_ENTITLEMENTS
+RBAC entitlements YAML file.
 .TP
-.B ADSSH_PROFILE
-Path to the login profile script (Starlark).
-Default:
-.BR ~/.adsshprofile .
-Loaded only in login shells.
+.B ADSSH_POLICY
+Rego policy file. Default ~/.adssh/policy.rego.
 .TP
-.B ADSSH_RC
-Path to the interactive RC script (Starlark).
-Default:
-.BR ~/.adsshrc .
-Loaded for every interactive session.
+.B ADSSH_AUDIT_LOG
+Audit log. Default ~/.adssh/audit.log.
+.TP
+.B ADSSH_AUDIT_URL
+https webhook for remote audit events. Needs ADSSH_AUDIT_LOG. Private hosts need ADSSH_CALLBACK_ALLOW_PRIVATE.
+.TP
+.B ADSSH_AUDIT_TOKEN
+Bearer token for ADSSH_AUDIT_URL.
 .TP
 .B ADSSH_HISTORY
-Path to the readline history file.
-Default:
-.BR ~/.adssh/history .
+Interactive history file. Default ~/.adssh/history.
+.TP
+.B ADSSH_HOST_KEY
+SSH host key. Default ~/.adssh/host_key.
+.TP
+.B ADSSH_AUTHORIZED_KEYS
+SSH authorized_keys. Default ~/.adssh/authorized_keys.
+.TP
+.B ADSSH_REVOKED_KEYS
+SSH revocation file, one SHA256:fingerprint, serial:n or keyid:id per line.
+.TP
+.B ADSSH_PROFILE
+Profile path. Default ~/.adsshprofile.
+.TP
+.B ADSSH_RC
+RC path. Default ~/.adsshrc.
+.TP
+.B ADSSH_LOG_LEVEL
+Listener log level on standard error: error, warn, info or debug. Default info. Any other value stops startup.
+.TP
+.B ADSSH_LOG_FORMAT
+Listener log format: text or json. Default text.
+.TP
+.B ADSSH_GIT_PROMPT
+Show the git branch for \eg in the prompt. Also accepts on. Ignored in restricted mode and SSH sessions.
+.TP
+.B ADSSH_SUGGEST
+Starting state of history suggestions: on, off, 1, 0, true, false, yes or no.
+.TP
+.B ADSSH_HIGHLIGHT
+Turn on danger highlighting at startup, when allowed.
+.TP
+.B ADSSH_CONTROLPLANE_URL
+Control-plane origin for identity device login, https://host[:port]. Unset fails closed.
+.TP
+.B ADSSH_OIDC_ISSUER
+Issuer for identity oidc import. Unset fails closed.
+.TP
+.B ADSSH_OIDC_JWKS_URL
+https JWKS URL for that issuer.
+.TP
+.B ADSSH_OIDC_LOGIN_AUDIENCE
+Required audience for identity oidc import. Unset fails closed.
+.TP
+.B ADSSH_OIDC_ADMIN_ISSUER
+Issuer for identity oidc import \-\-provider admin.
+.TP
+.B ADSSH_OIDC_ADMIN_JWKS_URL
+https JWKS URL for the admin provider.
+.TP
+.B ADSSH_OIDC_ADMIN_AUDIENCE
+Required audience for the admin provider. Must differ from the login audience.
+.TP
+.B ADSSH_CALLBACK_ALLOW_PRIVATE
+Allow private address ranges for control-plane, JWKS, webhook and approval URLs. Metadata addresses stay blocked.
+.TP
+.B ADSSH_AGENT_SERVE
+Instrumentation-agent listen address, such as 127.0.0.1:7777.
+.TP
+.B ADSSH_AGENT_TOKEN
+Bearer token the agent requires. Without it the agent does not start.
+.TP
+.B ADSSH_AGENT_TASKS
+Agent task allowlist. Default ~/.adssh/instrument-tasks.yaml.
+.TP
+.B ADSSH_SAH
+Enable the sah subcommand. Only 1, true or yes; anything else stays off.
+.TP
+.B ADSSH_GUARD
+SSH listener jail: off or on. Unset follows guard.yaml. Any other value fails closed.
+.TP
+.B ADSSH_GUARD_CONFIG
+Jail configuration. Default ~/.adssh/guard.yaml.
+.TP
+.B ADSSH_GUARD_STATE
+Ban file. Default ~/.adssh/guard-state.json.
+.TP
+.B ADSSH_ADMIN_KEYS
+Mode 0600 name=key file for admin serve. A named key can approve, deny and unban as that name.
+.TP
+.B ADSSH_ADMIN_LISTEN
+Enterprise build: start the admin API with the SSH server, on unix:/path or a loopback address.
+.TP
+.B ADSSH_SNOOP_NOTIFY
+Default for the notice shown when support attaches to a session: on or off. Default on.
+.TP
+.B ADSSH_SNOOP_NOTIFY_LOCK
+on forces that notice; no policy rule can silence it.
 .TP
 .B ADSSH_RECORD_DIR
-Directory for JSONL session recordings.
-Default:
-.BR ~/.adssh/recordings .
+Session recording directory. Default ~/.adssh/recordings.
 .TP
 .B XDG_CONFIG_HOME
-Base directory for user configuration files.
-.B adssh
-respects the XDG Base Directory Specification; configuration is stored
-under
-.BR $XDG_CONFIG_HOME/adssh/
-when this variable is set.
+When set, the configuration directory is $XDG_CONFIG_HOME/adssh instead of ~/.adssh.
 .TP
 .B XDG_DATA_HOME
-Base directory for user data files
-(default:
-.BR ~/.local/share ).
-.TP
-.B XDG_CACHE_HOME
-Base directory for user cache files
-(default:
-.BR ~/.cache ).
-.\" ─────────────────────────────────────────────────────────────────────────
+When set, the audit chain key lives in $XDG_DATA_HOME/adssh instead of ~/.adssh.
 .SH FILES
 .TP
-.B ~/.config/adssh/profile
-XDG-preferred path for the login profile script (Starlark).
-Loaded before the RC file when running as a login shell.
+.B /etc/adssh_profile
+System profile, login shells only.
 .TP
-.B ~/.config/adssh/rc
-XDG-preferred path for the interactive RC script (Starlark).
-Evaluated at the start of every interactive session.
-.TP
-.B ~/.adssh/
-Legacy configuration directory.
 .B ~/.adsshprofile
-and
+User profile.
+.TP
 .B ~/.adsshrc
-are the default RC paths when the XDG equivalents are absent.
-The directory also holds
-.BR audit.log ,
-.BR history ,
-.BR host_key ,
-.BR authorized_keys ,
-and
-.BR policy.rego .
-.\" ─────────────────────────────────────────────────────────────────────────
+User RC file, created when missing.
+.TP
+.B ~/.adssh/policy.rego
+Default Rego policy.
+.TP
+.B ~/.adssh/audit.log
+Audit log.
+.TP
+.B ~/.adssh/audit.log.chain
+Audit hash chain.
+.TP
+.B ~/.adssh/audit.key
+Audit chain HMAC key.
+.TP
+.B ~/.adssh/history
+Interactive history.
+.TP
+.B ~/.adssh/host_key
+SSH host key.
+.TP
+.B ~/.adssh/authorized_keys
+SSH keys and certificate authorities.
+.TP
+.B ~/.adssh/guard.yaml
+SSH listener jail configuration.
+.TP
+.B ~/.adssh/recordings/
+Session recordings.
+.SH EXIT STATUS
+With
+.BR \-c ,
+adssh exits with the status of the shell command, as
+.B sh \-c
+does
+.RB ( "exit 3"
+exits 3,
+.B false
+exits 1), and 1 on a Starlark, parse or policy error.
+A script exits 0 on success and 1 on the first error.
+The interactive shell exits with the status given to
+.BI exit " n" ,
+or with the status of the last command on a plain
+.B exit
+or Ctrl-D, as bash does; this holds when standard input is a pipe too.
+An unknown option, or an option missing its value, exits 2.
+A bad ADSSH_LOG_LEVEL or ADSSH_LOG_FORMAT exits 2.
+Other startup failures exit 1.
 .SH EXAMPLES
-.TP
-.B Run an interactive shell session:
+Run one shell command:
+.PP
 .nf
-exec adssh
+adssh \-c 'ls \-la | grep go'
 .fi
-.TP
-.B Start the built-in SSH server on port 2222:
+.PP
+Run one Starlark line:
+.PP
 .nf
-adssh --serve :2222
+adssh \-c 'print(sys.exec_cmd("uname \-s"))'
 .fi
-.TP
-.B Use adssh as a policy-gated SSH jump gateway:
+.PP
+Force the shell for a line that would be Starlark:
+.PP
 .nf
-ssh -J operator@adssh-gateway:2222 user@bastion.internal
+! echo a=b
 .fi
-.TP
-.B Open a governed local TCP gateway:
+.PP
+Capture command output in a variable at the prompt:
+.PP
 .nf
-gateway start --listen 127.0.0.1:0 --target bastion.internal:22 --name prod
-gateway list
-gateway stop gw-1
+out = sys.exec_cmd("date")
 .fi
-.TP
-.B Lease a vault-backed secret into one command:
+.PP
+Switch to vi keys:
+.PP
 .nf
-lease --from vault:secret/data/prod/deploy?field=token --as TOKEN -- deploy
+set_keymap("vi")
 .fi
-.TP
-.B Request break-glass elevation and explain a denial:
+.PP
+Turn history suggestions off:
+.PP
 .nf
-elevate request prod-admin --for 10m --reason "incident INC-1042"
-??
+set suggest off
 .fi
-.TP
-.B Run a one-off command and exit (Starlark or shell auto-detected):
+.PP
+Create the starter configuration:
+.PP
 .nf
-adssh -c 'ls -la | jq .'
-adssh -c 'aws.ec2.list_instances(region="us-east-1")'
+adssh \-\-init
 .fi
-.TP
-.B Launch a restricted, login shell with a custom policy:
+.PP
+Start a restricted login shell with a policy:
+.PP
 .nf
-adssh --login --restricted --policy /etc/adssh/policy.rego
+adssh \-\-login \-\-restricted \-\-policy /etc/adssh/policy.rego
 .fi
-.\" ─────────────────────────────────────────────────────────────────────────
+.PP
+Start the SSH server on port 2222:
+.PP
+.nf
+adssh \-\-serve :2222
+.fi
 .SH SEE ALSO
 .BR sh (1),
 .BR bash (1),
-.BR ssh (1)
-.\" ─────────────────────────────────────────────────────────────────────────
-.SH AUTHORS
-The adssh contributors.
+.BR ssh (1),
+.BR sshd (8)
+.PP
+In adssh:
+.BR "help start" ,
+.BR "help shell" ,
+.BR "help keys" ,
+.BR "help starlark" ,
+.BR "help adssh-starlark" .
+.SH BUGS
+File descriptors 3 and above are not supported in redirections; such a line
+is refused with
+.BR "unsupported redirect fd" .
+.PP
+.B load()
+is not supported; a
+.B load(
+line fails with Starlark's "load not implemented by this application".
+.PP
+Starlark has no set literal.
+A line such as
+.B "s = {1, 2}"
+is not Starlark, so it runs as a shell command named
+.B s
+and fails with "executable file not found"; write
+.BR "s = set([1, 2])" .
+.PP
+The history and fc commands read
+.B ADSSH_HISTORY_FILE
+while the interactive shell writes
+.BR ADSSH_HISTORY .
+

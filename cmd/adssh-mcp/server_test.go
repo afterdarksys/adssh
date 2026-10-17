@@ -254,8 +254,10 @@ authz := {"allow": allow}
 		t.Fatal("builtin extracted through a list/tuple bypassed operation policy")
 	}
 	denial := result.Content[0].(mcp.TextContent).Text
-	if !result.IsError || !strings.Contains(denial, "starlark.danger.items") || !strings.Contains(denial, ".run") {
-		t.Fatalf("container-extracted builtin was not denied: %#v", result)
+	// A member reached through items() is checked under its own path, the
+	// same as danger.run(), so a policy rule on starlark.danger.run holds.
+	if !result.IsError || !strings.Contains(denial, "starlark.danger.run") {
+		t.Fatalf("container-extracted builtin was not denied under its own path: %#v", result)
 	}
 }
 

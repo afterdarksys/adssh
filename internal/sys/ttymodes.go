@@ -317,12 +317,12 @@ func Stty(fd int, args []string, out io.Writer) error {
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		switch {
-		case a == "-a" || a == "--all":
+		switch a {
+		case "-a", "--all":
 			printAll = true
-		case a == "-g" || a == "--save":
+		case "-g", "--save":
 			printSave = true
-		case a == "size":
+		case "size":
 			printSize = true
 		default:
 			setting = true

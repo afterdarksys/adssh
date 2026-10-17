@@ -127,7 +127,7 @@ func runSSHSession(args []string) int {
 	if opts.menu != "" {
 		repl.StartMenu(opts.menu, globals, opts.restricted, opts.history, os.Stdin, os.Stdout, os.Stderr)
 	} else {
-		repl.Start(globals, opts.restricted, opts.history, os.Stdin, os.Stdout, os.Stderr)
+		return repl.Start(globals, opts.restricted, opts.history, os.Stdin, os.Stdout, os.Stderr)
 	}
 	return 0
 }

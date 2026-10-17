@@ -35,7 +35,6 @@ package starlarkext
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -211,11 +210,22 @@ func createExecCmd(opts ExtensionOptions) func(*starlark.Thread, *starlark.Built
 		}
 		out, err := runGatedShell(context.Background(), resolveExecParams(opts, timeoutSecs, maxOutput), cmdStr)
 		if err != nil {
+			// The exit status alone does not say why: add the end of the
+			// combined output, where the error message usually is.
+			if out = strings.TrimRight(out, "\n"); out != "" {
+				if len(out) > execErrorOutputTail {
+					out = "..." + strings.ToValidUTF8(out[len(out)-execErrorOutputTail:], "")
+				}
+				return nil, fmt.Errorf("%v; output:\n%s", err, out)
+			}
 			return nil, err
 		}
 		return starlark.String(out), nil
 	}
 }
+
+// execErrorOutputTail is how much of a failed exec_cmd's output its error keeps.
+const execErrorOutputTail = 4096
 
 // createExecJSON implements sys.exec_json(cmd, timeout=30, max_output=10MiB) and
 // parses the command's stdout as JSON into a Starlark value.
@@ -230,8 +240,8 @@ func createExecJSON(opts ExtensionOptions) func(*starlark.Thread, *starlark.Buil
 		if err != nil {
 			return nil, err
 		}
-		var parsed interface{}
-		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		parsed, err := decodeJSON([]byte(out))
+		if err != nil {
 			return nil, fmt.Errorf("json parse error: %v", err)
 		}
 		return GoToStarlark(parsed), nil

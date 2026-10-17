@@ -349,7 +349,7 @@ func handleTrap(line string, globals starlark.StringDict, thread *starlark.Threa
 	}
 }
 
-func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
+func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) int {
 	// 4d. $SHLVL
 	shlvl := 1
 	if s := os.Getenv("SHLVL"); s != "" {
@@ -430,7 +430,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing readline: %v\n", err)
-		return
+		return 1
 	}
 	defer rl.Close()
 	hl.refresh = rl.Refresh
@@ -554,7 +554,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating runner: %v\n", err)
-		return
+		return 1
 	}
 
 	// Initialize this session's dirstack with the runner's working directory
@@ -796,6 +796,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 					}
 				}
 			}
+			// exit N ends the session with status N ($? holds it).
+			if runner.Exited() {
+				break
+			}
 			if runErr != nil {
 				if runErr != context.Canceled && !strings.Contains(runErr.Error(), "context canceled") {
 					fmt.Fprintf(errOut, "Command error: %v\n", runErr)
@@ -906,6 +910,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 					}
 				}
 			}
+			// exit N ends the session with status N ($? holds it).
+			if runner.Exited() {
+				break
+			}
 			if runErr != nil {
 				if runErr != context.Canceled && !strings.Contains(runErr.Error(), "context canceled") {
 					fmt.Fprintf(errOut, "Command error: %v\n", runErr)
@@ -927,4 +935,13 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			}
 		}
 	}
+
+	// The session's status is that of exit N or, on plain exit or Ctrl-D,
+	// of the last command, as in bash.
+	if status, ok := globals["?"].(starlark.Int); ok {
+		if n, ok := status.Int64(); ok {
+			return int(n)
+		}
+	}
+	return 0
 }

@@ -442,6 +442,15 @@ func (e *Engine) gateProgram(restricted bool, node syntax.Node, sessionID string
 		if gateErr != nil {
 			return false
 		}
+		// mvdan fails a redirect of fd 3 and up without a message; say why.
+		if rd, ok := n.(*syntax.Redirect); ok && rd.N != nil {
+			switch rd.N.Value {
+			case "0", "1", "2":
+			default:
+				gateErr = fmt.Errorf("unsupported redirect fd %s: adssh redirects only fds 0, 1 and 2", rd.N.Value)
+				return false
+			}
+		}
 		decl, ok := n.(*syntax.DeclClause)
 		if !ok {
 			return true

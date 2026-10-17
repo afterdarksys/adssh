@@ -41,7 +41,9 @@ func DetermineMode(line string) EvalMode {
 	}
 
 	// Heuristics for Starlark
-	if strings.HasPrefix(trimmed, "def ") || strings.HasPrefix(trimmed, "for ") || strings.HasPrefix(trimmed, "print(") {
+	// load( is Starlark too: adssh has no load(), and Starlark says so,
+	// where the shell would look for a program named load.
+	if strings.HasPrefix(trimmed, "def ") || strings.HasPrefix(trimmed, "for ") || strings.HasPrefix(trimmed, "print(") || strings.HasPrefix(trimmed, "load(") {
 		return ModeStarlark
 	}
 

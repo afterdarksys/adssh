@@ -58,6 +58,15 @@ func GovernStarlarkGlobalsInPlace(sec *security.Engine, globals starlark.StringD
 // well as sys["exec_cmd"](...). Dicts that builtins return are data, not
 // namespaces, and keep plain dict attributes.
 func governGlobal(sec *security.Engine, name string, value starlark.Value) starlark.Value {
+	// Already governed: governing again would wrap the wrapper, authorize
+	// every call twice, and stop str(x) from being callable.
+	switch value.(type) {
+	case *GovernedStrNamespace, *GovernedStarlarkDict, *GovernedStarlarkAttrs:
+		return value
+	}
+	if ns, ok := value.(*StrNamespace); ok {
+		return &GovernedStrNamespace{GovernedStarlarkDict: &GovernedStarlarkDict{Sec: sec, Path: "starlark." + name, Dict: ns.Dict, Namespace: true}}
+	}
 	if dict, ok := value.(*starlark.Dict); ok {
 		return &GovernedStarlarkDict{Sec: sec, Path: "starlark." + name, Dict: dict, Namespace: true}
 	}
@@ -258,6 +267,19 @@ func (d *GovernedStarlarkDict) AttrNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// GovernedStrNamespace is the governed str namespace. Its members are
+// governed as starlark.str.<fn>; a call is the builtin str conversion, which
+// is pure and ungoverned like every other Universe builtin.
+type GovernedStrNamespace struct {
+	*GovernedStarlarkDict
+}
+
+func (n *GovernedStrNamespace) Name() string { return "str" }
+
+func (n *GovernedStrNamespace) CallInternal(thread *starlark.Thread, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return starlark.Call(thread, starlark.Universe["str"], args, kwargs)
 }
 
 type GovernedStarlarkAttrs struct {

@@ -114,6 +114,12 @@ func main() {
 			sahMode = true
 		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "" && !sahMode:
 			cfg.ScriptPath = arg
+		case arg == "--serve" || arg == "--serve-agent" || arg == "--entitlements" || arg == "--policy" || arg == "-c":
+			// The cases above take the value; here it is missing.
+			usageError("option requires an argument: " + arg)
+		case strings.HasPrefix(arg, "-") && arg != "-" && cfg.ScriptPath == "" && !sahMode:
+			// Arguments after a script or sah belong to it.
+			usageError("unknown option: " + arg)
 		}
 	}
 
@@ -334,6 +340,12 @@ func main() {
 	// 7a. -c flag: evaluate a single expression/command and exit
 	if cmdFlag != "" {
 		if err := evalOnce(sess, cmdFlag); err != nil {
+			// A command's own status (exit 3, false) is the exit status, as
+			// in sh -c; the command already said what went wrong.
+			var status interp.ExitStatus
+			if errors.As(err, &status) {
+				os.Exit(int(status))
+			}
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
@@ -406,8 +418,16 @@ func main() {
 			}
 		}
 	} else {
-		smartReplWrapper(eng, env, cfg.Restricted, cfg.HistoryFile, os.Stdin, outCast, os.Stderr)
+		if status := smartReplWrapper(eng, env, cfg.Restricted, cfg.HistoryFile, os.Stdin, outCast, os.Stderr); status != 0 {
+			os.Exit(status)
+		}
 	}
+}
+
+// usageError reports a bad command line the way sh does and exits 2.
+func usageError(msg string) {
+	fmt.Fprintf(os.Stderr, "adssh: %s\nTry 'adssh --help' for more information.\n", msg)
+	os.Exit(2)
 }
 
 // evalOnce evaluates a single expression or command (for -c flag) against the
@@ -480,6 +500,9 @@ func evalOnce(sess *engine.Session, src string) error {
 		return fmt.Errorf("command error: %v", err)
 	}
 	if err := sess.Runner.Run(context.Background(), f); err != nil {
+		if status, ok := err.(interp.ExitStatus); ok {
+			return status
+		}
 		return fmt.Errorf("command error: %v", err)
 	}
 	return nil
@@ -1021,7 +1044,9 @@ Next steps:
 	return nil
 }
 
-func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
+// smartReplWrapper runs the REPL (or the user's menu) and returns the
+// session's exit status.
+func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) int {
 	var sessionID string
 	if val, ok := globals["SESSION_ID"]; ok {
 		if strVal, ok := val.(starlark.String); ok {
@@ -1034,12 +1059,12 @@ func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricte
 			menuPath := eng.Security().GetMenuForUser(session.User, session.PrincipalList())
 			if menuPath != "" {
 				repl.StartMenu(menuPath, globals, restricted, historyFile, in, out, errOut)
-				return
+				return 0
 			}
 		}
 	}
 
-	repl.Start(globals, restricted, historyFile, in, out, errOut)
+	return repl.Start(globals, restricted, historyFile, in, out, errOut)
 }
 
 // directTCPIPPolicyRequest maps a listener direct-tcpip check to one gateway
