@@ -128,3 +128,13 @@ func TestCLIUnknownOptionExits2(t *testing.T) {
 		t.Errorf("--help: exit %d", code)
 	}
 }
+
+// main adds sys.enable_ssh and sys.disable_ssh to the governed sys namespace,
+// which refuses Starlark writes; the trusted setup must still install them.
+func TestCLISysHasSSHBuiltins(t *testing.T) {
+	stdout, stderr, code := runCLI(t, "", "-c", `print("enable_ssh" in sys.keys(), "disable_ssh" in sys.keys())`)
+	// Starlark print writes to standard error.
+	if code != 0 || strings.TrimSpace(stdout+stderr) != "True True" {
+		t.Fatalf("exit %d, stdout %q, stderr %q; want True True", code, stdout, stderr)
+	}
+}

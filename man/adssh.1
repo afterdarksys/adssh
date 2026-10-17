@@ -827,9 +827,7 @@ line fails with Starlark's "load not implemented by this application".
 Starlark has no set literal.
 A line such as
 .B "s = {1, 2}"
-is not Starlark, so it runs as a shell command named
-.B s
-and fails with "executable file not found"; write
+fails with a Starlark syntax error that names the fix; write
 .BR "s = set([1, 2])" .
 .PP
 The history and fc commands read

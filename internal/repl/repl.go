@@ -2,6 +2,7 @@ package repl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -115,46 +116,10 @@ func (h hybridEnv) Each(fn func(name string, vr expand.Variable) bool) {
 	}
 }
 
-// needsContinuation reports whether buf is an incomplete Starlark expression:
-// unclosed brackets/parens/braces, or last non-blank line ends with ':' or '\'.
+// needsContinuation reports whether buf is an incomplete Starlark construct,
+// by the same rule the mode router uses (parser.OpensBlock).
 func needsContinuation(buf string) bool {
-	depth := 0
-	inStr := rune(0) // current string delimiter; 0 = not in string
-	prev := rune(0)
-
-	for _, r := range buf {
-		if inStr != 0 {
-			if r == inStr && prev != '\\' {
-				inStr = 0
-			}
-			prev = r
-			continue
-		}
-		switch r {
-		case '"', '\'':
-			inStr = r
-		case '(', '[', '{':
-			depth++
-		case ')', ']', '}':
-			depth--
-		}
-		prev = r
-	}
-
-	if depth > 0 {
-		return true
-	}
-
-	// Check last non-blank line for block opener or explicit continuation
-	lines := strings.Split(buf, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		last := strings.TrimRight(lines[i], " \t")
-		if last == "" {
-			continue
-		}
-		return strings.HasSuffix(last, ":") || strings.HasSuffix(last, "\\")
-	}
-	return false
+	return parser.OpensBlock(buf)
 }
 
 // EvalStarlarkOnce runs src exactly once. The expression/statement choice is
@@ -169,7 +134,17 @@ func EvalStarlarkOnce(thread *starlark.Thread, name, src string, globals starlar
 		return val, true, nil, err
 	}
 	newBindings, err = starlark.ExecFile(thread, name, src, globals)
-	return nil, false, newBindings, err
+	return nil, false, newBindings, setLiteralHint(err)
+}
+
+// setLiteralHint names the fix when a parse failed on a set literal: {1, 2}
+// and {1} fail where a dict wants its ':'.
+func setLiteralHint(err error) error {
+	var serr starsyntax.Error
+	if errors.As(err, &serr) && (serr.Msg == "got ',', want ':'" || serr.Msg == "got '}', want ':'") {
+		return fmt.Errorf("%w (Starlark has no set literal; write set([1, 2]))", err)
+	}
+	return err
 }
 
 // evalStarlark executes src in the REPL context: expressions print a non-None

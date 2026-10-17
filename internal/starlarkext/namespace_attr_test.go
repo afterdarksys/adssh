@@ -149,3 +149,24 @@ allow { input.command != "starlark.sys.getenv" }
 		t.Fatalf("secrets.aws.get = %v, %v; want the builtin", v, err)
 	}
 }
+
+// Threats: sys["exec_cmd"] = f replaced a builtin in a namespace every session
+// and plugin shares, and sys["k"] = v added an ungoverned member.
+func TestNamespaceRefusesKeyAssignment(t *testing.T) {
+	globals := governedTestGlobals(t, allowAll)
+	for _, src := range []string{`sys["k"] = 5`, `sys["exec_cmd"] = print`, `aws["ec2"] = {}`, `aws.ec2["list_instances"] = print`} {
+		_, err := starlark.ExecFile(&starlark.Thread{Name: "test"}, "test.star", src, globals)
+		if err == nil || !strings.Contains(err.Error(), "read-only") {
+			t.Fatalf("%s: got %v, want read-only", src, err)
+		}
+	}
+	if v, err := evalStar(t, globals, `"k" in sys.keys()`); err != nil || v.String() != "False" {
+		t.Fatalf("refused assignment still added a key: %v %v", v, err)
+	}
+	// A dict a builtin returns is data and stays writable.
+	if _, err := starlark.ExecFile(&starlark.Thread{Name: "test"}, "test.star", `d = data.json_parse('{}')
+d["k"] = 1
+`, globals); err != nil {
+		t.Fatalf("returned dict assignment: %v", err)
+	}
+}

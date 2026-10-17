@@ -39,6 +39,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/afterdarksys/adssh/security"
 
@@ -212,7 +213,7 @@ func createExecCmd(opts ExtensionOptions) func(*starlark.Thread, *starlark.Built
 		if err != nil {
 			// The exit status alone does not say why: add the end of the
 			// combined output, where the error message usually is.
-			if out = strings.TrimRight(out, "\n"); out != "" {
+			if out = strings.TrimRight(stripTerminalControls(out), "\n"); out != "" {
 				if len(out) > execErrorOutputTail {
 					out = "..." + strings.ToValidUTF8(out[len(out)-execErrorOutputTail:], "")
 				}
@@ -226,6 +227,60 @@ func createExecCmd(opts ExtensionOptions) func(*starlark.Thread, *starlark.Built
 
 // execErrorOutputTail is how much of a failed exec_cmd's output its error keeps.
 const execErrorOutputTail = 4096
+
+// stripTerminalControls removes escape sequences (CSI such as colors, OSC such
+// as a window title), C1 controls (U+0080-U+009F, which terminals obey as
+// 8-bit CSI and OSC) and other control characters but newline and tab. An
+// unterminated sequence ends at the next ESC, and a string sequence also at a
+// newline, so it cannot hide the text after it. The result is valid UTF-8.
+// Threats: the error tail is printed to the user's terminal, so a command's
+// output could otherwise retitle the window, move the cursor or hide text.
+func stripTerminalControls(s string) string {
+	s = strings.ToValidUTF8(s, "")
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r != 0x1b {
+			if r == '\n' || r == '\t' || (r >= 0x20 && r != 0x7f && (r < 0x80 || r > 0x9f)) {
+				b.WriteString(s[i : i+size])
+			}
+			i += size
+			continue
+		}
+		i++
+		if i >= len(s) {
+			break
+		}
+		switch s[i] {
+		case '[': // CSI: parameters, then a final byte 0x40-0x7e
+			i++
+			for i < len(s) && s[i] < 0x80 && s[i] != 0x1b && (s[i] < 0x40 || s[i] > 0x7e) {
+				i++
+			}
+			if i < len(s) && s[i] < 0x80 && s[i] != 0x1b {
+				i++
+			}
+		case ']', 'P', '_', '^': // OSC, DCS, APC, PM: until BEL, ST, any ESC or a newline
+			i++
+			for i < len(s) && s[i] != 0x07 && s[i] != 0x1b && s[i] != '\n' {
+				i++
+			}
+			if i < len(s) && s[i] == 0x07 {
+				i++
+			} else if i+1 < len(s) && s[i+1] == '\\' {
+				i += 2
+			}
+		default: // ESC, intermediates 0x20-0x2f, then one final byte (ESC ( B)
+			for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+				i++
+			}
+			if i < len(s) && s[i] < 0x80 && s[i] != 0x1b {
+				i++
+			}
+		}
+	}
+	return b.String()
+}
 
 // createExecJSON implements sys.exec_json(cmd, timeout=30, max_output=10MiB) and
 // parses the command's stdout as JSON into a Starlark value.

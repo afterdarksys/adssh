@@ -315,3 +315,28 @@ func TestAccumulateScriptKeepsStarlarkBlock(t *testing.T) {
 		}
 	}
 }
+
+// A Starlark block whose first line opens a bracket stays one chunk: split
+// up, its body line "reboot" would run as a shell command.
+func TestAccumulateScriptKeepsTupleBlockWhole(t *testing.T) {
+	for _, src := range []string{
+		"host, cmd = (\n    \"web1\",\n    \"reboot\"\n)\n",
+		"d[k[0]] = [\n \"sync\",\n \"reboot\"\n]\n",
+		"doc = \"\"\"start\nreboot\n\"\"\"\n",
+		"doc = '''start\nreboot\n'''\n",
+		"cmds = (  # )\n\"reboot\"\n)\n",
+		"cfg = {  # }\n\"reboot\"\n}\n",
+	} {
+		var chunks []string
+		err := AccumulateScript(src, func(chunk string, line int, ignore bool) error {
+			chunks = append(chunks, chunk)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if len(chunks) != 1 {
+			t.Fatalf("%q split into %d chunks: %q", src, len(chunks), chunks)
+		}
+	}
+}

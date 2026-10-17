@@ -179,7 +179,13 @@ func (d *GovernedStarlarkDict) Get(key starlark.Value) (starlark.Value, bool, er
 	}
 	return d.child(childStarlarkPath(d.Path, key), value), true, nil
 }
+
+// SetKey refuses a namespace: sys["k"] = v would add an ungoverned member, or
+// replace a builtin, in a dict every session and plugin shares.
 func (d *GovernedStarlarkDict) SetKey(key, value starlark.Value) error {
+	if d.Namespace {
+		return fmt.Errorf("%s: namespace is read-only (cannot set %s)", strings.TrimPrefix(d.Path, "starlark."), key.String())
+	}
 	return d.Dict.SetKey(key, value)
 }
 func (d *GovernedStarlarkDict) Attr(name string) (starlark.Value, error) {

@@ -325,13 +325,21 @@ func main() {
 		})
 		enableSSHVal := starlarkext.GovernStarlarkValue(eng.Security(), "starlark.sys.enable_ssh", enableSSH)
 		disableSSHVal := starlarkext.GovernStarlarkValue(eng.Security(), "starlark.sys.disable_ssh", disableSSH)
+		// The governed sys refuses Starlark writes; this trusted setup writes
+		// the dict underneath it.
+		var raw *starlark.Dict
 		switch sysDict := sysVal.(type) {
 		case *starlark.Dict:
-			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSHVal)
-			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSHVal)
+			raw = sysDict
 		case *starlarkext.GovernedStarlarkDict:
-			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSHVal)
-			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSHVal)
+			raw = sysDict.Dict
+		}
+		if raw != nil {
+			for name, fn := range map[string]starlark.Value{"enable_ssh": enableSSHVal, "disable_ssh": disableSSHVal} {
+				if err := raw.SetKey(starlark.String(name), fn); err != nil {
+					fmt.Fprintf(os.Stderr, "adssh: sys.%s: %v\n", name, err)
+				}
+			}
 		}
 	}
 

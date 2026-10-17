@@ -779,8 +779,8 @@ NOT SUPPORTED
 load() is not available. A line starting with load( runs as Starlark and
 fails with "load not implemented by this application".
 sys.exec_cmd, sys.exec_json and sys.exec_async take one string, not a list.
-Starlark has no set literal: s = {1, 2} is not Starlark and runs as a shell
-command named s. Write s = set([1, 2]).
+Starlark has no set literal: s = {1, 2} fails with a Starlark syntax error
+that names the fix. Write s = set([1, 2]).
 
 EXTRAS
 sys.exec_async("cmd") returns a job: j.wait() returns True or an error

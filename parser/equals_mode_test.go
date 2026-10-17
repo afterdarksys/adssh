@@ -36,3 +36,39 @@ func TestEqualsInShellArgumentsStaysShell(t *testing.T) {
 		}
 	}
 }
+
+// A spaced assignment that does not parse is a Starlark mistake, not a
+// program named after its target: s = {1, 2} reports the Starlark error.
+func TestSpacedAssignmentThatFailsToParseIsStarlark(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want EvalMode
+	}{
+		{"s = {1, 2}", ModeStarlark},
+		{"s = {1}", ModeStarlark},
+		{"cfg.port = {8080, 8443}", ModeStarlark},
+		{`d["k"] = {1, 2}`, ModeStarlark},
+		{"test $x = 5", ModeShell},
+		{"find . -name a=b", ModeShell},
+		{"ls --color=auto /", ModeShell},
+		{"grep -c x= /dev/null /", ModeShell},
+		{"x={", ModeStarlark},
+		{"x += [1,", ModeStarlark},
+		{`aws.ec2.list_instances(region="us-east-1",`, ModeStarlark},
+		{"a, b = (", ModeStarlark},
+		{"a, b = [1,", ModeStarlark},
+		{"(a, b) = (1,", ModeStarlark},
+		{"d[x[0]] = {", ModeStarlark},
+		{`d["a]"] = {`, ModeStarlark},
+		{"while x == 1:", ModeStarlark},
+		{"f (a=1,", ModeStarlark},
+		{`"s".format(a=`, ModeStarlark},
+		{`doc = """start`, ModeStarlark},
+		{"cp a=b /", ModeShell},
+		{"ls --color=auto / # (", ModeShell},
+	} {
+		if got := DetermineMode(tc.line); got != tc.want {
+			t.Errorf("DetermineMode(%q) = %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}
