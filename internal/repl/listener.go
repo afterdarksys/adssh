@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/chzyer/readline"
 )
@@ -20,6 +21,8 @@ import (
 // adsshListener accepts a fish-style history suggestion.
 type adsshListener struct {
 	history *[]string
+	// enabled is shared with the suggestion painter; nil means always on.
+	enabled *atomic.Bool
 }
 
 func newAdsshListener(history *[]string) *adsshListener {
@@ -29,7 +32,7 @@ func newAdsshListener(history *[]string) *adsshListener {
 // OnChange is called by readline on every keystroke. It changes the line only
 // when → or Ctrl-F is pressed at the end of the line and a suggestion exists.
 func (l *adsshListener) OnChange(line []rune, pos int, key rune) ([]rune, int, bool) {
-	if key != readline.CharForward || pos != len(line) {
+	if key != readline.CharForward || pos != len(line) || (l.enabled != nil && !l.enabled.Load()) {
 		return nil, 0, false
 	}
 	rest := historySuggestion(*l.history, string(line))
@@ -81,6 +84,8 @@ type suggestionPainter struct {
 	inner   readline.Painter
 	history *[]string
 	width   func() int
+	// enabled turns suggestions on and off (set suggest); nil means on.
+	enabled *atomic.Bool
 
 	mu     sync.Mutex
 	prompt string
@@ -102,7 +107,7 @@ func (p *suggestionPainter) Paint(line []rune, pos int) []rune {
 	// An empty line is checked before history is read: the main loop appends
 	// to history after Enter, while a highlight refresh can still repaint the
 	// empty buffer.
-	if len(line) == 0 || pos != len(line) {
+	if len(line) == 0 || pos != len(line) || (p.enabled != nil && !p.enabled.Load()) {
 		return out
 	}
 	ghost := []rune(historySuggestion(*p.history, string(line)))

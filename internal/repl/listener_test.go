@@ -161,3 +161,45 @@ func TestPTYTypedLineRunsWithoutSuggestion(t *testing.T) {
 		t.Fatalf("want help printed twice (typed, then accepted with →):\n%q", got)
 	}
 }
+
+func TestSuggestSwitchTurnsSuggestionsOff(t *testing.T) {
+	hist := []string{"echo hello"}
+	var on atomic.Bool
+	p := &suggestionPainter{history: &hist, width: func() int { return 80 }, prompt: "adssh> ", enabled: &on}
+	l := &adsshListener{history: &hist, enabled: &on}
+	line := []rune("echo h")
+	if got := string(p.Paint(line, len(line))); got != "echo h" {
+		t.Fatalf("off: Paint = %q, want no suggestion", got)
+	}
+	if _, _, ok := l.OnChange(line, len(line), readline.CharForward); ok {
+		t.Fatal("off: → accepted a suggestion")
+	}
+	on.Store(true)
+	if got := string(p.Paint(line, len(line))); !strings.Contains(got, "ello") {
+		t.Fatalf("on: Paint = %q, want the suggestion", got)
+	}
+}
+
+func TestSuggestSettings(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		ssh  bool
+		want bool
+	}{
+		{"", false, true}, {"", true, false}, {"on", true, true}, {"off", false, false}, {"1", true, true}, {"no", false, false}, {"bogus", true, false},
+	} {
+		if got := suggestInitial(tc.env, tc.ssh); got != tc.want {
+			t.Errorf("suggestInitial(%q, ssh=%v) = %v, want %v", tc.env, tc.ssh, got, tc.want)
+		}
+	}
+	var out, errOut strings.Builder
+	if next, ok := handleSuggestLine("set suggest off", true, &out, &errOut); !ok || next || out.String() != "suggest off\n" {
+		t.Fatalf("set suggest off: next=%v ok=%v out=%q", next, ok, out.String())
+	}
+	if _, ok := handleSuggestLine("set suggestx", true, &out, &errOut); ok {
+		t.Fatal("set suggestx was handled")
+	}
+	if next, ok := handleSuggestLine("set suggest maybe", true, &out, &errOut); !ok || !next || !strings.Contains(errOut.String(), "usage") {
+		t.Fatalf("bad value: next=%v ok=%v err=%q", next, ok, errOut.String())
+	}
+}

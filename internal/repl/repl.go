@@ -369,7 +369,15 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	if v, ok := globals["SESSION_ID"].(starlark.String); ok {
 		sessionID = string(v)
 	}
+	// SetupExtensions installs fresh, ungoverned builtins over the globals the
+	// caller governed; govern what it replaced, or the prompt would run every
+	// starlark.* builtin without a policy check.
+	beforeSetup := make(starlark.StringDict, len(globals))
+	for k, v := range globals {
+		beforeSetup[k] = v
+	}
 	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted, SessionID: sessionID})
+	starlarkext.GovernReplacedGlobals(security.DefaultEngine(), globals, beforeSetup)
 
 	// Per-invocation directory stack: each Start (one per SSH session, one per
 	// single-user REPL) gets its own stack so concurrent sessions never share
@@ -378,15 +386,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 	thread := &starlark.Thread{Name: "repl"}
 
-	// Ensure history file exists with strict permissions
-	if err := os.MkdirAll(filepath.Dir(historyFile), 0700); err == nil {
-		if _, err := os.Stat(historyFile); os.IsNotExist(err) {
-			if err := os.WriteFile(historyFile, []byte(""), 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "adssh: warning: could not create history file %s: %v\n", historyFile, err)
-			}
-		} else if err := os.Chmod(historyFile, 0600); err != nil {
-			fmt.Fprintf(os.Stderr, "adssh: warning: could not set permissions on history file %s: %v\n", historyFile, err)
-		}
+	// History is kept only in a file this user owns: an unsafe path turns
+	// history off for the session instead of writing through it.
+	if err := prepareHistoryFile(historyFile); err != nil {
+		fmt.Fprintf(errOut, "adssh: history off for this session: %v\n", err)
+		historyFile = ""
 	}
 
 	// 4b. Shell history slice
@@ -405,7 +409,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// debounce, off the input path.
 	hlAllowed := highlightPermitted(pasteTTY != nil)
 	hl := &highlighter{denied: policyDenyFunc(sessionID), debounce: highlightDebounce}
-	suggest := &suggestionPainter{inner: hl, history: &shellHistory, width: readline.GetScreenWidth, prompt: "adssh> "}
+	// History suggestions: `set suggest on|off`; ADSSH_SUGGEST sets the start
+	// (default on locally, off in an SSH session).
+	suggestOn := &atomic.Bool{}
+	suggestOn.Store(suggestInitial(os.Getenv("ADSSH_SUGGEST"), security.RemoteGateProcess()))
+	suggest := &suggestionPainter{inner: hl, history: &shellHistory, width: readline.GetScreenWidth, prompt: "adssh> ", enabled: suggestOn}
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:            "adssh> ",
@@ -414,7 +422,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		EOFPrompt:         "exit",
 		HistorySearchFold: true,
 		AutoComplete:      &adsshCompleter{globals: globals},
-		Listener:          newAdsshListener(&shellHistory),
+		Listener:          &adsshListener{history: &shellHistory, enabled: suggestOn},
 		Painter:           suggest,
 		Stdin:             editorIn,
 		Stdout:            out,
@@ -721,6 +729,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			hl.enabled.Store(next)
 			continue
 		}
+		if next, ok := handleSuggestLine(line, suggestOn.Load(), out, errOut); ok {
+			suggestOn.Store(next)
+			continue
+		}
 
 		// 4n. trap builtin interception.
 		if strings.HasPrefix(line, "trap ") || line == "trap" {
@@ -795,7 +807,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		}
 		line = buf
 
-		mode := parser.DetermineMode(line)
+		mode := RefineMode(line, parser.DetermineMode(line), globals)
 
 		if mode == parser.ModeStarlark {
 			buf := line

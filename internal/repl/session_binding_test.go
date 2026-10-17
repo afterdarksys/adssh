@@ -141,7 +141,7 @@ func TestStartMenuGatesUnderBoundSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = in.Close() })
-	StartMenu(menuPath, globals, false, in, &out, &errOut)
+	StartMenu(menuPath, globals, false, "", in, &out, &errOut)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(gateIDs) == 0 {

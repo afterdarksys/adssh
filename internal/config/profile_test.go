@@ -28,8 +28,8 @@ func TestDefaultRCLoadsAndRecordsKeymap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("default rc failed to load: %v", err)
 	}
-	if v, ok := got["KEYMAP"].(starlark.String); !ok || string(v) != "vi" {
-		t.Fatalf("KEYMAP = %v, want \"vi\"", got["KEYMAP"])
+	if v, ok := got["KEYMAP"].(starlark.String); !ok || string(v) != "emacs" {
+		t.Fatalf("KEYMAP = %v, want \"emacs\"", got["KEYMAP"])
 	}
 }
 

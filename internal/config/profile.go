@@ -107,17 +107,13 @@ func sourceShellProfiles() {
 	}
 }
 
-const defaultRC = `# Welcome to Adssh!
-# This file is evaluated as Starlark (a Python dialect) on every interactive session.
+const defaultRC = `# Welcome to adssh. This file is Starlark (a small Python dialect) and runs at
+# the start of every interactive session. examples/adsshrc in the adssh repo
+# documents everything it can set. Type "help" at the prompt for more.
 
-# 1. Terminal prompt (ANSI colors supported)
+# Prompt (ANSI colors work).
 PROMPT = "\x1b[32madssh>\x1b[0m "
 
-# 2. Key bindings: "vi" or "emacs"
-set_keymap("vi")
-
-# 3. Namespaces available: sys, net, crypto, data, re, sec, i18n, cloud
-# Examples:
-#   sys.setenv("EDITOR", "vim")
-#   sys.load_plugin("~/.adssh/plugins/systemapi.so")
+# Line editing keys: "emacs" (the bash/zsh default) or "vi".
+set_keymap("emacs")
 `

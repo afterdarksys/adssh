@@ -66,6 +66,14 @@ func runSSHSession(args []string) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
+	// Non-dumpable before anything else runs: another process with this
+	// uid cannot read this process's environment or ptrace it to reach the
+	// monitor socket, which carries this session's policy identity. Not
+	// covered: the moment between exec and this call.
+	if err := sys.SetNonDumpable(); err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: ssh session: %v\n", err)
+		return 1
+	}
 	file, err := sys.OpenMonitorFD(3)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -117,7 +125,7 @@ func runSSHSession(args []string) int {
 		fmt.Fprintf(os.Stderr, "Error loading profiles: %v\n", err)
 	}
 	if opts.menu != "" {
-		repl.StartMenu(opts.menu, globals, opts.restricted, os.Stdin, os.Stdout, os.Stderr)
+		repl.StartMenu(opts.menu, globals, opts.restricted, opts.history, os.Stdin, os.Stdout, os.Stderr)
 	} else {
 		repl.Start(globals, opts.restricted, opts.history, os.Stdin, os.Stdout, os.Stderr)
 	}

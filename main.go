@@ -446,7 +446,7 @@ func evalOnce(sess *engine.Session, src string) error {
 		return errors.New("flow: not a block")
 	}
 
-	mode := parser.DetermineMode(src)
+	mode := repl.RefineMode(src, parser.DetermineMode(src), sess.Globals)
 
 	if mode == parser.ModeStarlark {
 		// Parse decides expression or statements, so src runs exactly once.
@@ -1033,7 +1033,7 @@ func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricte
 		if session := sys.GetSession(sessionID); session != nil {
 			menuPath := eng.Security().GetMenuForUser(session.User, session.PrincipalList())
 			if menuPath != "" {
-				repl.StartMenu(menuPath, globals, restricted, in, out, errOut)
+				repl.StartMenu(menuPath, globals, restricted, historyFile, in, out, errOut)
 				return
 			}
 		}
