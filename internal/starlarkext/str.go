@@ -16,6 +16,16 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// StrNamespace is the `str` global: the helper namespace, callable as the
+// builtin str it shadows, so str(5) is still "5" next to str.upper("a").
+type StrNamespace struct{ *starlark.Dict }
+
+func (n *StrNamespace) Name() string { return "str" }
+
+func (n *StrNamespace) CallInternal(thread *starlark.Thread, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return starlark.Call(thread, starlark.Universe["str"], args, kwargs)
+}
+
 // SetupStringsAPI injects the `str` namespace into env.
 func SetupStringsAPI(env starlark.StringDict) {
 	d := starlark.NewDict(16)
@@ -37,7 +47,7 @@ func SetupStringsAPI(env starlark.StringDict) {
 	set("sprintf", strSprintf)
 	set("slugify", strSlugify)   // strtext.go
 	set("template", strTemplate) // strtext.go
-	env["str"] = d
+	env["str"] = &StrNamespace{Dict: d}
 }
 
 // str.split(s, sep) -> list. With no sep (or ""), splits on whitespace runs

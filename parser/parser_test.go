@@ -137,3 +137,18 @@ func quirkSuffix(quirk string) string {
 	}
 	return " (quirk: " + quirk + ")"
 }
+
+// adssh has no load(): the line goes to Starlark, whose error says so,
+// instead of running a program named load.
+func TestLoadGoesToStarlark(t *testing.T) {
+	for _, line := range []string{`load("lib.star", "f")`, `load("lib.star", g = "f")`, ` load("x.star", "y")`} {
+		if got := DetermineMode(line); got != ModeStarlark {
+			t.Errorf("DetermineMode(%q) = %v, want Starlark", line, got)
+		}
+	}
+	for _, line := range []string{"loadkeys us", "load_avg", "load"} {
+		if got := DetermineMode(line); got != ModeShell {
+			t.Errorf("DetermineMode(%q) = %v, want shell", line, got)
+		}
+	}
+}

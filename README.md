@@ -389,6 +389,9 @@ adssh --doctor     # validates local readiness before using it as a primary shel
 | `ADSSH_AUDIT_LOG` | `~/.adssh/audit.log` | Audit log path |
 | `ADSSH_RECORD_DIR` | `~/.adssh/recordings` | JSONL session recording directory |
 | `ADSSH_GATEWAY_LOG` | `$ADSSH_RECORD_DIR/gateway_connections.jsonl` | Gateway connection evidence log |
+| `ADSSH_REVOKED_KEYS` | unset | SSH revocation file checked on every login and re-read when it changes. One entry per line: a key, certificate-key, or CA fingerprint (`SHA256:...`), `serial:N`, or `keyid:ID`. When set, a missing or malformed file refuses every login |
+| `ADSSH_LOG_LEVEL` | `info` | Listener log level on stderr: `error`, `warn`, `info`, or `debug`. Debug shows each auth attempt, channel request, and session spawn and exit. Logins and sessions are also recorded in the audit chain (`SSH_LOGIN_OK`, `SSH_LOGIN_FAIL`, `SSH_SESSION_START`, `SSH_SESSION_END`) |
+| `ADSSH_LOG_FORMAT` | `text` | `text` or `json` |
 | `ADSSH_ADMIN_API_KEY` | — | Read-only bearer / `X-ADSSH-API-Key` token for `admin serve` (enterprise build) |
 | `ADSSH_ADMIN_KEYS` | — | 0600 `name=key` file; a named key is required to approve, deny or unban, and the name is the audited approver |
 | `ADSSH_AGENT_ID` | process-specific MCP ID | MCP agent identity exposed as `input.agent.id` |

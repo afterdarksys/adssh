@@ -3,6 +3,7 @@ package security
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -139,6 +140,16 @@ func (e *Engine) gateCommandWithExtra(restricted bool, args []string, sessionID 
 func (e *Engine) gateCommandContext(ctx context.Context, restricted bool, args []string, sessionID string, extra PolicyContextExtra) error {
 	if len(args) == 0 {
 		return nil
+	}
+	// Fail closed on NUL. A shell word can carry one (read and mapfile keep
+	// it), and a name the policy does not recognize must not reach exec,
+	// where the NUL-prefixed internal name of a builtin-named vbin would be
+	// stripped back to a real command (a deny on sudo would miss
+	// "\x00adssh-vbin:sudo").
+	for _, a := range args {
+		if strings.IndexByte(a, 0) >= 0 {
+			return errors.New("adssh: refused: a NUL byte in a command or argument")
+		}
 	}
 	// The SSH session process installs this. The listener leaves it nil.
 	if fn := currentRemoteGate(); fn != nil {
@@ -337,13 +348,51 @@ func (e *Engine) callHandler(sess *SessionState) interp.CallHandlerFunc {
 		// here: the exec handler sends it as a Run, which the listener
 		// gates. Nothing runs locally under that name.
 		if RemoteGateProcess() && sshRunsInListener(args) {
-			return args, nil
+			return e.shadowBuiltinVBin(args), nil
 		}
 		if err := e.gateCommand(sess.Restricted, args, sess.gateSessionID()); err != nil {
 			return nil, err
 		}
-		return args, nil
+		return e.shadowBuiltinVBin(args), nil
 	}
+}
+
+// builtinNamedVBins are vbins whose names mvdan claims as bash builtins that
+// it does not implement: mvdan answers "unsupported builtin" before any exec
+// handler runs. TestVBinNamesClashingWithBuiltinsAreShadowed fails when a new
+// vbin takes a builtin's name, so each one is a decision.
+var builtinNamedVBins = map[string]bool{"fc": true, "help": true, "history": true}
+
+// shadowPrefix renames a builtin-named vbin between the call handler and the
+// exec handler, so mvdan treats it as an external command. The gate has run
+// on the real name first, and it refuses any argv containing NUL, so input
+// cannot spell the renamed form (read and mapfile can put a NUL in a word);
+// unshadowBuiltinVBin also strips only the names in builtinNamedVBins.
+const shadowPrefix = "\x00adssh-vbin:"
+
+// shadowBuiltinVBin renames args[0] when it is a builtin-named vbin. The call
+// handler applies it after the gate; unshadowBuiltinVBin undoes it at the
+// exec handler.
+func (e *Engine) shadowBuiltinVBin(args []string) []string {
+	if len(args) == 0 || !builtinNamedVBins[args[0]] {
+		return args
+	}
+	if _, ok := e.Lookup(args[0]); !ok {
+		return args
+	}
+	out := append([]string{shadowPrefix + args[0]}, args[1:]...)
+	return out
+}
+
+func unshadowBuiltinVBin(args []string) []string {
+	if len(args) == 0 || !strings.HasPrefix(args[0], shadowPrefix) {
+		return args
+	}
+	name := strings.TrimPrefix(args[0], shadowPrefix)
+	if !builtinNamedVBins[name] {
+		return args
+	}
+	return append([]string{name}, args[1:]...)
 }
 
 // GateProgram is the AUTHORIZATION GATE pre-scan for shell keywords that
@@ -392,6 +441,15 @@ func (e *Engine) gateProgram(restricted bool, node syntax.Node, sessionID string
 	syntax.Walk(node, func(n syntax.Node) bool {
 		if gateErr != nil {
 			return false
+		}
+		// mvdan fails a redirect of fd 3 and up without a message; say why.
+		if rd, ok := n.(*syntax.Redirect); ok && rd.N != nil {
+			switch rd.N.Value {
+			case "0", "1", "2":
+			default:
+				gateErr = fmt.Errorf("unsupported redirect fd %s: adssh redirects only fds 0, 1 and 2", rd.N.Value)
+				return false
+			}
 		}
 		decl, ok := n.(*syntax.DeclClause)
 		if !ok {
@@ -541,6 +599,7 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 			if len(args) == 0 {
 				return next(ctx, args)
 			}
+			args = unshadowBuiltinVBin(args)
 			// Assignment form of set returns before HandlerCtx. A direct call
 			// has no interpreter context, and a session assignment must not
 			// reach os.Setenv.

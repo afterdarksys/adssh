@@ -268,7 +268,7 @@ func TestApplyPTYRequestRejectsMalformedPayloads(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var got *pty.Winsize
-			ok := applyPTYRequest(func(ws *pty.Winsize) error { got = ws; return nil }, tc.payload)
+			ok := applyPTYRequest(func(ws *pty.Winsize) error { got = ws; return nil }, nil, tc.payload)
 			if ok != tc.ok {
 				t.Fatalf("ok=%v want %v", ok, tc.ok)
 			}
@@ -283,7 +283,7 @@ func TestApplyPTYRequestRejectsMalformedPayloads(t *testing.T) {
 			}
 		})
 	}
-	if applyPTYRequest(func(*pty.Winsize) error { return errors.New("no pty") }, valid) {
+	if applyPTYRequest(func(*pty.Winsize) error { return errors.New("no pty") }, nil, valid) {
 		t.Fatal("setter failure reported success")
 	}
 }

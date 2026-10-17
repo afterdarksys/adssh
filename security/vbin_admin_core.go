@@ -24,3 +24,8 @@ var errAdminEnterpriseOnly = errors.New("admin: the admin API is part of the ads
 func (adminCoreBinary) Run(context.Context, []string) error { return errAdminEnterpriseOnly }
 
 func init() { Register(adminCoreBinary{}) }
+
+// StartAdminAPI is enterprise-only (vbin_admin_ee.go).
+func (e *Engine) StartAdminAPI(listen, keysFile, apiKey string) error {
+	return errAdminEnterpriseOnly
+}

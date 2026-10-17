@@ -125,3 +125,45 @@ out = job.output()
 		t.Fatalf("output = %q, want async", got)
 	}
 }
+
+// A failed exec_cmd's error tail is printed to the terminal: colors, a window
+// title and other control bytes are removed, the text is kept.
+func TestExecCmdErrorTailHasNoTerminalControls(t *testing.T) {
+	env := execEnv(t, allowAllEngine(t), false)
+	_, err := evalExec(t, env, `sys.exec_cmd("printf '\\033[31mred\\033[0m \\033]0;owned\\007ok\\a\\r\\n'; exit 2")`)
+	if err == nil {
+		t.Fatal("exec_cmd of a failing command returned no error")
+	}
+	msg := err.Error()
+	if strings.ContainsAny(msg, "\x1b\x07\r") || strings.Contains(msg, "owned") {
+		t.Fatalf("error kept terminal controls: %q", msg)
+	}
+	if !strings.Contains(msg, "red ok") {
+		t.Fatalf("error lost the output text: %q", msg)
+	}
+}
+
+func TestStripTerminalControls(t *testing.T) {
+	for in, want := range map[string]string{
+		"plain\ttext\n":               "plain\ttext\n",
+		"\x1b[1;31mbold\x1b[0m":       "bold",
+		"\x1b]0;title\x1b\\after":     "after",
+		"\x1b]8;;http://x\x07link":    "link",
+		"a\x1b(Bb":                    "ab",
+		"cut\x1b[31":                  "cut",
+		"cut\x1b":                     "cut",
+		"bell\a nul\x00 del\x7f done": "bell nul del done",
+		"\u009b31mred\u009b0m":        "31mred0m",
+		"\u009d0;x\u009c":             "0;x",
+		"\x1b日x":                      "日x",
+		"\x1b]0;t\x1b[31merror":       "error",
+		"bad\xffbyte":                 "badbyte",
+		"\x1b]0;t\nERR: denied":       "\nERR: denied",
+		"\x1b[31\x1b[0mok":            "ok",
+		"\x1b\x1b[31mx":               "x",
+	} {
+		if got := stripTerminalControls(in); got != want {
+			t.Errorf("stripTerminalControls(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

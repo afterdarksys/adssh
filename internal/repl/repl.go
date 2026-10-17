@@ -2,6 +2,7 @@ package repl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -115,46 +116,10 @@ func (h hybridEnv) Each(fn func(name string, vr expand.Variable) bool) {
 	}
 }
 
-// needsContinuation reports whether buf is an incomplete Starlark expression:
-// unclosed brackets/parens/braces, or last non-blank line ends with ':' or '\'.
+// needsContinuation reports whether buf is an incomplete Starlark construct,
+// by the same rule the mode router uses (parser.OpensBlock).
 func needsContinuation(buf string) bool {
-	depth := 0
-	inStr := rune(0) // current string delimiter; 0 = not in string
-	prev := rune(0)
-
-	for _, r := range buf {
-		if inStr != 0 {
-			if r == inStr && prev != '\\' {
-				inStr = 0
-			}
-			prev = r
-			continue
-		}
-		switch r {
-		case '"', '\'':
-			inStr = r
-		case '(', '[', '{':
-			depth++
-		case ')', ']', '}':
-			depth--
-		}
-		prev = r
-	}
-
-	if depth > 0 {
-		return true
-	}
-
-	// Check last non-blank line for block opener or explicit continuation
-	lines := strings.Split(buf, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		last := strings.TrimRight(lines[i], " \t")
-		if last == "" {
-			continue
-		}
-		return strings.HasSuffix(last, ":") || strings.HasSuffix(last, "\\")
-	}
-	return false
+	return parser.OpensBlock(buf)
 }
 
 // EvalStarlarkOnce runs src exactly once. The expression/statement choice is
@@ -169,7 +134,17 @@ func EvalStarlarkOnce(thread *starlark.Thread, name, src string, globals starlar
 		return val, true, nil, err
 	}
 	newBindings, err = starlark.ExecFile(thread, name, src, globals)
-	return nil, false, newBindings, err
+	return nil, false, newBindings, setLiteralHint(err)
+}
+
+// setLiteralHint names the fix when a parse failed on a set literal: {1, 2}
+// and {1} fail where a dict wants its ':'.
+func setLiteralHint(err error) error {
+	var serr starsyntax.Error
+	if errors.As(err, &serr) && (serr.Msg == "got ',', want ':'" || serr.Msg == "got '}', want ':'") {
+		return fmt.Errorf("%w (Starlark has no set literal; write set([1, 2]))", err)
+	}
+	return err
 }
 
 // evalStarlark executes src in the REPL context: expressions print a non-None
@@ -349,7 +324,7 @@ func handleTrap(line string, globals starlark.StringDict, thread *starlark.Threa
 	}
 }
 
-func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
+func Start(globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) int {
 	// 4d. $SHLVL
 	shlvl := 1
 	if s := os.Getenv("SHLVL"); s != "" {
@@ -369,7 +344,15 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	if v, ok := globals["SESSION_ID"].(starlark.String); ok {
 		sessionID = string(v)
 	}
+	// SetupExtensions installs fresh, ungoverned builtins over the globals the
+	// caller governed; govern what it replaced, or the prompt would run every
+	// starlark.* builtin without a policy check.
+	beforeSetup := make(starlark.StringDict, len(globals))
+	for k, v := range globals {
+		beforeSetup[k] = v
+	}
 	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted, SessionID: sessionID})
+	starlarkext.GovernReplacedGlobals(security.DefaultEngine(), globals, beforeSetup)
 
 	// Per-invocation directory stack: each Start (one per SSH session, one per
 	// single-user REPL) gets its own stack so concurrent sessions never share
@@ -378,15 +361,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 	thread := &starlark.Thread{Name: "repl"}
 
-	// Ensure history file exists with strict permissions
-	if err := os.MkdirAll(filepath.Dir(historyFile), 0700); err == nil {
-		if _, err := os.Stat(historyFile); os.IsNotExist(err) {
-			if err := os.WriteFile(historyFile, []byte(""), 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "adssh: warning: could not create history file %s: %v\n", historyFile, err)
-			}
-		} else if err := os.Chmod(historyFile, 0600); err != nil {
-			fmt.Fprintf(os.Stderr, "adssh: warning: could not set permissions on history file %s: %v\n", historyFile, err)
-		}
+	// History is kept only in a file this user owns: an unsafe path turns
+	// history off for the session instead of writing through it.
+	if err := prepareHistoryFile(historyFile); err != nil {
+		fmt.Fprintf(errOut, "adssh: history off for this session: %v\n", err)
+		historyFile = ""
 	}
 
 	// 4b. Shell history slice
@@ -405,6 +384,11 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// debounce, off the input path.
 	hlAllowed := highlightPermitted(pasteTTY != nil)
 	hl := &highlighter{denied: policyDenyFunc(sessionID), debounce: highlightDebounce}
+	// History suggestions: `set suggest on|off`; ADSSH_SUGGEST sets the start
+	// (default on locally, off in an SSH session).
+	suggestOn := &atomic.Bool{}
+	suggestOn.Store(suggestInitial(os.Getenv("ADSSH_SUGGEST"), security.RemoteGateProcess()))
+	suggest := &suggestionPainter{inner: hl, history: &shellHistory, width: readline.GetScreenWidth, prompt: "adssh> ", enabled: suggestOn}
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:            "adssh> ",
@@ -413,18 +397,19 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		EOFPrompt:         "exit",
 		HistorySearchFold: true,
 		AutoComplete:      &adsshCompleter{globals: globals},
-		Listener:          newAdsshListener(&shellHistory),
-		Painter:           hl,
+		Listener:          &adsshListener{history: &shellHistory, enabled: suggestOn},
+		Painter:           suggest,
 		Stdin:             editorIn,
 		Stdout:            out,
 		Stderr:            errOut,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing readline: %v\n", err)
-		return
+		return 1
 	}
 	defer rl.Close()
 	hl.refresh = rl.Refresh
+	editor := &promptEditor{Instance: rl, painter: suggest}
 	if highlightInitial(os.Getenv("ADSSH_HIGHLIGHT"), hlAllowed) {
 		if err := security.DefaultEngine().AuthorizeCommand([]string{"set", "highlight", "on"}, sessionID); err != nil {
 			fmt.Fprintf(errOut, "adssh: ADSSH_HIGHLIGHT: %v\n", err)
@@ -475,9 +460,20 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				_ = sys.RestoreTermios(int(os.Stdin.Fd()), saved)
 			}
 			// Redraw the prompt so the user sees where they are.
-			rl.SetPrompt("adssh> ")
+			editor.SetPrompt("adssh> ")
 		}
 	}()
+
+	// A keymap chosen in a profile (set_keymap before the REPL existed, or
+	// KEYMAP = "vi") applies now.
+	if v, ok := globals["KEYMAP"].(starlark.String); ok {
+		switch string(v) {
+		case "vi":
+			rl.SetVimMode(true)
+		case "emacs":
+			rl.SetVimMode(false)
+		}
+	}
 
 	// Register set_keymap into Starlark globals
 	globals["set_keymap"] = starlark.NewBuiltin("set_keymap", func(thread *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
@@ -533,7 +529,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating runner: %v\n", err)
-		return
+		return 1
 	}
 
 	// Initialize this session's dirstack with the runner's working directory
@@ -592,7 +588,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			}
 		}
 
-		rl.SetPrompt(prompt)
+		editor.SetPrompt(prompt)
 
 		line, err := rl.Readline()
 		if err != nil {
@@ -708,6 +704,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			hl.enabled.Store(next)
 			continue
 		}
+		if next, ok := handleSuggestLine(line, suggestOn.Load(), out, errOut); ok {
+			suggestOn.Store(next)
+			continue
+		}
 
 		// 4n. trap builtin interception.
 		if strings.HasPrefix(line, "trap ") || line == "trap" {
@@ -717,7 +717,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 		// Brace if/try and an incomplete POSIX if keep reading. A finished
 		// Starlark line returns here so the block below can still continue it.
-		buf, abort, eof, synErr := readPending(rl, line, prompt, out)
+		buf, abort, eof, synErr := readPending(editor, line, prompt, out)
 		if synErr != nil {
 			fmt.Fprintf(errOut, "%v\n", synErr)
 			continue
@@ -771,6 +771,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 					}
 				}
 			}
+			// exit N ends the session with status N ($? holds it).
+			if runner.Exited() {
+				break
+			}
 			if runErr != nil {
 				if runErr != context.Canceled && !strings.Contains(runErr.Error(), "context canceled") {
 					fmt.Fprintf(errOut, "Command error: %v\n", runErr)
@@ -782,7 +786,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		}
 		line = buf
 
-		mode := parser.DetermineMode(line)
+		mode := RefineMode(line, parser.DetermineMode(line), globals)
 
 		if mode == parser.ModeStarlark {
 			buf := line
@@ -791,8 +795,8 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			callHook(globals, "__preexec__", starlark.Tuple{starlark.String(line)})
 
 			// Collect continuation lines for multi-line constructs
-			buf = readStarlarkBlock(rl, buf, out)
-			rl.SetPrompt(prompt)
+			buf = readStarlarkBlock(editor, buf, out)
+			editor.SetPrompt(prompt)
 
 			exitCode := evalStarlarkInterruptible(starInt, thread, buf, globals, errOut)
 			globals["?"] = starlark.MakeInt(exitCode)
@@ -881,6 +885,10 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 					}
 				}
 			}
+			// exit N ends the session with status N ($? holds it).
+			if runner.Exited() {
+				break
+			}
 			if runErr != nil {
 				if runErr != context.Canceled && !strings.Contains(runErr.Error(), "context canceled") {
 					fmt.Fprintf(errOut, "Command error: %v\n", runErr)
@@ -902,4 +910,13 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			}
 		}
 	}
+
+	// The session's status is that of exit N or, on plain exit or Ctrl-D,
+	// of the last command, as in bash.
+	if status, ok := globals["?"].(starlark.Int); ok {
+		if n, ok := status.Int64(); ok {
+			return int(n)
+		}
+	}
+	return 0
 }

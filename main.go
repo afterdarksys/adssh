@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	osuser "os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"go.starlark.net/resolve"
@@ -22,6 +25,8 @@ import (
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/agent"
 	"github.com/afterdarksys/adssh/internal/config"
+	"golang.org/x/term"
+
 	// grid registers the grid, flight, agent, worktree, and repo vbins.
 	_ "github.com/afterdarksys/adssh/internal/grid"
 	"github.com/afterdarksys/adssh/internal/guard"
@@ -57,6 +62,13 @@ func main() {
 
 	// 1. Load configuration from ADSSH_* environment variables (provides defaults)
 	cfg := config.LoadFromEnv()
+	logSettings, err := config.ParseLogSettings(os.Getenv("ADSSH_LOG_LEVEL"), os.Getenv("ADSSH_LOG_FORMAT"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+		os.Exit(2)
+	}
+	// The standard log package routes through this logger too.
+	slog.SetDefault(config.NewLogger(os.Stderr, logSettings))
 
 	// 2. Parse CLI flags — flags override env vars
 	cfg.IsLoginShell = strings.HasPrefix(os.Args[0], "-")
@@ -102,6 +114,12 @@ func main() {
 			sahMode = true
 		case !strings.HasPrefix(arg, "-") && cfg.ScriptPath == "" && !sahMode:
 			cfg.ScriptPath = arg
+		case arg == "--serve" || arg == "--serve-agent" || arg == "--entitlements" || arg == "--policy" || arg == "-c":
+			// The cases above take the value; here it is missing.
+			usageError("option requires an argument: " + arg)
+		case strings.HasPrefix(arg, "-") && arg != "-" && cfg.ScriptPath == "" && !sahMode:
+			// Arguments after a script or sah belong to it.
+			usageError("unknown option: " + arg)
 		}
 	}
 
@@ -249,17 +267,17 @@ func main() {
 	// sshStarter execs one session process per SSH login. The listener keeps
 	// the socket, host key, session table, and audit files. The child is the
 	// REPL. SSH sessions do not receive enable_ssh or disable_ssh.
-	sshStarter := func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) {
+	sshStarter := func(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) error {
 		slave, ok := in.(*os.File)
 		if !ok {
 			fmt.Fprintf(errOut, "adssh: ssh session: pty is not a file\n")
-			return
+			return errors.New("ssh session: pty is not a file")
 		}
 		// The certificate principals are the session's groups for its
 		// life; grant cannot add to them. Elevation still merges in.
 		if err := eng.Security().BindSessionIdentity(sessionID, user, principals); err != nil {
 			fmt.Fprintf(errOut, "adssh: %v\n", err)
-			return
+			return err
 		}
 		defer eng.Security().UnbindSessionIdentity(sessionID)
 		// History, profile, and rc paths come from the target user's home,
@@ -274,8 +292,12 @@ func main() {
 			PTY:        slave,
 		})
 		if err != nil {
-			fmt.Fprintf(errOut, "adssh: %v\n", err)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				fmt.Fprintf(errOut, "adssh: %v\n", err)
+			}
 		}
+		return err
 	}
 	gatewayAuthorizer := func(req sys.GatewayAuthRequest) error {
 		return eng.Security().AuthorizeGateway(directTCPIPPolicyRequest(req))
@@ -289,7 +311,7 @@ func main() {
 				return nil, err
 			}
 			if err := enableSSHWithHangup(func() error {
-				return sys.EnableSSHWithOptions(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot}, sshStarter, gatewayAuthorizer)
+				return sys.EnableSSHWithOptions(addr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, RevokedKeysPath: os.Getenv("ADSSH_REVOKED_KEYS"), Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer)
 			}); err != nil {
 				return nil, err
 			}
@@ -303,13 +325,21 @@ func main() {
 		})
 		enableSSHVal := starlarkext.GovernStarlarkValue(eng.Security(), "starlark.sys.enable_ssh", enableSSH)
 		disableSSHVal := starlarkext.GovernStarlarkValue(eng.Security(), "starlark.sys.disable_ssh", disableSSH)
+		// The governed sys refuses Starlark writes; this trusted setup writes
+		// the dict underneath it.
+		var raw *starlark.Dict
 		switch sysDict := sysVal.(type) {
 		case *starlark.Dict:
-			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSHVal)
-			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSHVal)
+			raw = sysDict
 		case *starlarkext.GovernedStarlarkDict:
-			_ = sysDict.SetKey(starlark.String("enable_ssh"), enableSSHVal)
-			_ = sysDict.SetKey(starlark.String("disable_ssh"), disableSSHVal)
+			raw = sysDict.Dict
+		}
+		if raw != nil {
+			for name, fn := range map[string]starlark.Value{"enable_ssh": enableSSHVal, "disable_ssh": disableSSHVal} {
+				if err := raw.SetKey(starlark.String(name), fn); err != nil {
+					fmt.Fprintf(os.Stderr, "adssh: sys.%s: %v\n", name, err)
+				}
+			}
 		}
 	}
 
@@ -318,6 +348,12 @@ func main() {
 	// 7a. -c flag: evaluate a single expression/command and exit
 	if cmdFlag != "" {
 		if err := evalOnce(sess, cmdFlag); err != nil {
+			// A command's own status (exit 3, false) is the exit status, as
+			// in sh -c; the command already said what went wrong.
+			var status interp.ExitStatus
+			if errors.As(err, &status) {
+				os.Exit(int(status))
+			}
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
@@ -325,13 +361,29 @@ func main() {
 	}
 
 	if cfg.ServeAddr != "" {
-		if err := sys.EnableSSHWithOptions(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot}, sshStarter, gatewayAuthorizer); err != nil {
+		if err := sys.EnableSSHWithOptions(cfg.ServeAddr, cfg.HostKeyPath, cfg.AuthorizedKeysPath, sys.SSHServerOptions{PermitRoot: cfg.SSHPermitRoot, RevokedKeysPath: os.Getenv("ADSSH_REVOKED_KEYS"), Audit: eng.Security().LogEvent}, sshStarter, gatewayAuthorizer); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start SSH server: %v\n", err)
 			os.Exit(1)
 		}
 		// SIGHUP on the listener stops new logins and leaves running SSH
 		// sessions alone instead of exiting.
 		onHangup(listenerHangup)
+		if listen := os.Getenv("ADSSH_ADMIN_LISTEN"); listen != "" {
+			if err := eng.Security().StartAdminAPI(listen, os.Getenv("ADSSH_ADMIN_KEYS"), os.Getenv("ADSSH_ADMIN_API_KEY")); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				os.Exit(1)
+			}
+		}
+		// Run as a service: with no script and no terminal (systemd), serve
+		// until SIGTERM or SIGINT instead of starting a REPL on /dev/null.
+		if cfg.ScriptPath == "" && cmdFlag == "" && !term.IsTerminal(int(os.Stdin.Fd())) {
+			slog.Info("serving without a terminal; waiting for SIGTERM")
+			stop := make(chan os.Signal, 1)
+			signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
+			<-stop
+			slog.Info("shutting down")
+			return
+		}
 	}
 
 	// Instrumentation agent: a hardened HTTP listener that runs only NAMED,
@@ -374,8 +426,16 @@ func main() {
 			}
 		}
 	} else {
-		smartReplWrapper(eng, env, cfg.Restricted, cfg.HistoryFile, os.Stdin, outCast, os.Stderr)
+		if status := smartReplWrapper(eng, env, cfg.Restricted, cfg.HistoryFile, os.Stdin, outCast, os.Stderr); status != 0 {
+			os.Exit(status)
+		}
 	}
+}
+
+// usageError reports a bad command line the way sh does and exits 2.
+func usageError(msg string) {
+	fmt.Fprintf(os.Stderr, "adssh: %s\nTry 'adssh --help' for more information.\n", msg)
+	os.Exit(2)
 }
 
 // evalOnce evaluates a single expression or command (for -c flag) against the
@@ -414,7 +474,7 @@ func evalOnce(sess *engine.Session, src string) error {
 		return errors.New("flow: not a block")
 	}
 
-	mode := parser.DetermineMode(src)
+	mode := repl.RefineMode(src, parser.DetermineMode(src), sess.Globals)
 
 	if mode == parser.ModeStarlark {
 		// Parse decides expression or statements, so src runs exactly once.
@@ -448,6 +508,9 @@ func evalOnce(sess *engine.Session, src string) error {
 		return fmt.Errorf("command error: %v", err)
 	}
 	if err := sess.Runner.Run(context.Background(), f); err != nil {
+		if status, ok := err.(interp.ExitStatus); ok {
+			return status
+		}
 		return fmt.Errorf("command error: %v", err)
 	}
 	return nil
@@ -652,6 +715,10 @@ ENVIRONMENT VARIABLES
   ADSSH_PROFILE           Login profile script (default: ~/.adsshprofile)
   ADSSH_RC                RC script (default: ~/.adsshrc)
   ADSSH_ADMIN_KEYS        admin serve named-key file, enterprise build (0600 name=key; approve/deny/unban)
+  ADSSH_REVOKED_KEYS      SSH revocation file: SHA256:<fp>, serial:<n>, keyid:<id> per line (fails closed)
+  ADSSH_ADMIN_LISTEN      Enterprise: start the admin API with the SSH server (unix:/path or loopback)
+  ADSSH_LOG_LEVEL         Listener log level: error|warn|info|debug (default info; stderr)
+  ADSSH_LOG_FORMAT        Listener log format: text|json (default text)
   ADSSH_SNOOP_NOTIFY      Snoop attach notice default for support (on|off; default on)
   ADSSH_SNOOP_NOTIFY_LOCK Force the snoop notice over policy (on; default off)
 
@@ -985,7 +1052,9 @@ Next steps:
 	return nil
 }
 
-func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
+// smartReplWrapper runs the REPL (or the user's menu) and returns the
+// session's exit status.
+func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) int {
 	var sessionID string
 	if val, ok := globals["SESSION_ID"]; ok {
 		if strVal, ok := val.(starlark.String); ok {
@@ -997,13 +1066,13 @@ func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricte
 		if session := sys.GetSession(sessionID); session != nil {
 			menuPath := eng.Security().GetMenuForUser(session.User, session.PrincipalList())
 			if menuPath != "" {
-				repl.StartMenu(menuPath, globals, restricted, in, out, errOut)
-				return
+				repl.StartMenu(menuPath, globals, restricted, historyFile, in, out, errOut)
+				return 0
 			}
 		}
 	}
 
-	repl.Start(globals, restricted, historyFile, in, out, errOut)
+	return repl.Start(globals, restricted, historyFile, in, out, errOut)
 }
 
 // directTCPIPPolicyRequest maps a listener direct-tcpip check to one gateway

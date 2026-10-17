@@ -37,6 +37,7 @@ const (
 	highlightNone highlightLevel = iota
 	highlightDestructive
 	highlightDenied
+	highlightSyntax
 )
 
 const (
@@ -50,9 +51,12 @@ const (
 type denyFunc func(args []string) bool
 
 // highlightColor is the ANSI color for a level: red when policy would deny,
-// yellow when destructive, none otherwise.
+// yellow when destructive, underlined magenta when the line cannot parse,
+// none otherwise.
 func highlightColor(level highlightLevel) string {
 	switch level {
+	case highlightSyntax:
+		return "\x1b[4;35m"
 	case highlightDenied:
 		return "\x1b[31m"
 	case highlightDestructive:
@@ -69,6 +73,11 @@ func classifyHighlight(line string, denied denyFunc) highlightLevel {
 	text := strings.TrimSpace(stripANSI(line))
 	if text == "" {
 		return highlightNone
+	}
+	// A line neither the shell nor Starlark can parse cannot run at all.
+	// An unfinished line (open quote, trailing |, block start) is not flagged.
+	if parser.SyntaxError(text) {
+		return highlightSyntax
 	}
 	if denied != nil && parser.DetermineMode(text) != parser.ModeStarlark {
 		shell := text
