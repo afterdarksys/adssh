@@ -405,6 +405,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	// debounce, off the input path.
 	hlAllowed := highlightPermitted(pasteTTY != nil)
 	hl := &highlighter{denied: policyDenyFunc(sessionID), debounce: highlightDebounce}
+	suggest := &suggestionPainter{inner: hl, history: &shellHistory, width: readline.GetScreenWidth, prompt: "adssh> "}
 
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:            "adssh> ",
@@ -414,7 +415,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 		HistorySearchFold: true,
 		AutoComplete:      &adsshCompleter{globals: globals},
 		Listener:          newAdsshListener(&shellHistory),
-		Painter:           hl,
+		Painter:           suggest,
 		Stdin:             editorIn,
 		Stdout:            out,
 		Stderr:            errOut,
@@ -425,6 +426,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 	}
 	defer rl.Close()
 	hl.refresh = rl.Refresh
+	editor := &promptEditor{Instance: rl, painter: suggest}
 	if highlightInitial(os.Getenv("ADSSH_HIGHLIGHT"), hlAllowed) {
 		if err := security.DefaultEngine().AuthorizeCommand([]string{"set", "highlight", "on"}, sessionID); err != nil {
 			fmt.Fprintf(errOut, "adssh: ADSSH_HIGHLIGHT: %v\n", err)
@@ -475,7 +477,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 				_ = sys.RestoreTermios(int(os.Stdin.Fd()), saved)
 			}
 			// Redraw the prompt so the user sees where they are.
-			rl.SetPrompt("adssh> ")
+			editor.SetPrompt("adssh> ")
 		}
 	}()
 
@@ -603,7 +605,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			}
 		}
 
-		rl.SetPrompt(prompt)
+		editor.SetPrompt(prompt)
 
 		line, err := rl.Readline()
 		if err != nil {
@@ -728,7 +730,7 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 
 		// Brace if/try and an incomplete POSIX if keep reading. A finished
 		// Starlark line returns here so the block below can still continue it.
-		buf, abort, eof, synErr := readPending(rl, line, prompt, out)
+		buf, abort, eof, synErr := readPending(editor, line, prompt, out)
 		if synErr != nil {
 			fmt.Fprintf(errOut, "%v\n", synErr)
 			continue
@@ -802,8 +804,8 @@ func Start(globals starlark.StringDict, restricted bool, historyFile string, in 
 			callHook(globals, "__preexec__", starlark.Tuple{starlark.String(line)})
 
 			// Collect continuation lines for multi-line constructs
-			buf = readStarlarkBlock(rl, buf, out)
-			rl.SetPrompt(prompt)
+			buf = readStarlarkBlock(editor, buf, out)
+			editor.SetPrompt(prompt)
 
 			exitCode := evalStarlarkInterruptible(starInt, thread, buf, globals, errOut)
 			globals["?"] = starlark.MakeInt(exitCode)
