@@ -6,7 +6,13 @@
 // (x/crypto/ssh would accept it for every name). Root, and any name that
 // resolves to uid 0, is refused unless SSHServerOptions.PermitRoot is set; a
 // lookup failure at that check refuses the login. pty-req and window-change
-// payloads are decoded strictly and sizes are clamped. A handshake holds one
+// payloads are decoded strictly and sizes are clamped. The pty-req terminal
+// modes are parsed strictly (ttymodes.go) and set on the session pty only
+// before the shell starts; a mode string that fails to parse refuses the
+// whole pty-req. An env request is accepted only before the shell starts,
+// only for LANG and the LC_* names in clientLocaleVars, and only with a
+// plain locale value; the session child gets those in place of the
+// listener's. A handshake holds one
 // of a bounded set of pre-auth slots and must finish before a deadline.
 // Certificate principals must be non-empty, NUL-free, and must not start
 // with '-'; they travel to the session as a JSON array, so a comma inside a
@@ -40,17 +46,20 @@ import (
 	"maps"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
 	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/creack/pty"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
 // loadOrGenerateHostKey loads the persistent SSH host key from keyPath,
@@ -718,6 +727,7 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 	session.SetPromptWriter(outCast)
 
 	setSize := func(ws *pty.Winsize) error { return setPTYSize(ptyMaster, ws) }
+	setModes := func(m []SSHMode) error { return applySSHModesFile(ptySlave, m) }
 	shell := make(chan struct{})
 	requestsDone := make(chan struct{})
 	go func() {
@@ -737,7 +747,7 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 					continue
 				}
 			case "pty-req":
-				ok = applyPTYRequest(setSize, req.Payload)
+				ok = handlePTYRequest(started, setSize, setModes, req.Payload)
 				if ok && !started {
 					if term := ptyTerm(req.Payload); term != "" {
 						_ = session.SetEnv("TERM", term) // validated above
@@ -745,8 +755,11 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 				}
 			case "window-change":
 				ok = applyWindowChange(setSize, req.Payload)
+			case "env":
+				ok = !started && acceptClientLocale(session, req.Payload)
 			}
-			// exec, env, subsystem, and anything unknown are refused.
+			// exec, subsystem, env other than the locale, and anything
+			// unknown are refused.
 			if req.Type == "window-change" {
 				slog.Debug("ssh channel request", "session", sessionID, "type", req.Type, "ok", ok)
 			} else {
@@ -784,7 +797,11 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 			_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{1})) // best-effort
 			return
 		}
-		go func() { _, _ = io.Copy(outCast, ptyMaster) }() // best-effort: stream ends on session close
+		outputDone := make(chan struct{})
+		go func() {
+			defer close(outputDone)
+			_, _ = io.Copy(outCast, ptyMaster) // best-effort: stream ends on session close
+		}()
 		// EOF on the client's stdin does not end a pty session.
 		go func() { _, _ = io.Copy(ptyMaster, channel) }() // best-effort
 		// The request stream ends when the client closes the channel or
@@ -798,6 +815,16 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 		slog.Info("ssh session start", "session", sessionID, "addr", peer, "user", name)
 		// The starter blocks until the session process exits.
 		startErr := start(sessionID, name, principals, ptySlave, ptySlave, ptySlave)
+		// Close the listener's copy of the slave so the master reads EOF once
+		// the session's copies are gone, then let the last output reach the
+		// client before the exit status. A background job that keeps the
+		// slave open bounds the wait at sessionDrainTimeout.
+		_ = ptySlave.Close()
+		select {
+		case <-outputDone:
+		case <-time.After(sessionDrainTimeout):
+		}
+		sendExitStatus(channel, startErr)
 		code, reason := sessionEndReason(startErr)
 		duration := time.Since(began).Round(time.Millisecond)
 		attrs := []any{"session", sessionID, "addr", peer, "user", name, "exit", code, "reason", reason, "duration", duration.String()}
@@ -817,7 +844,82 @@ func serveSessionChannel(newChannel ssh.NewChannel, peer, name string, principal
 const (
 	maxTermLen = 64
 	maxPTYDim  = 1000
+	// sessionDrainTimeout bounds the wait for a session's last output.
+	sessionDrainTimeout = 2 * time.Second
 )
+
+// clientLocaleVars are the env requests a session accepts, as OpenSSH's
+// AcceptEnv LANG LC_* does for the client's SendEnv default.
+var clientLocaleVars = []string{
+	"LANG", "LC_ALL", "LC_CTYPE", "LC_COLLATE", "LC_MESSAGES", "LC_MONETARY",
+	"LC_NUMERIC", "LC_TIME", "LC_ADDRESS", "LC_IDENTIFICATION", "LC_MEASUREMENT",
+	"LC_NAME", "LC_PAPER", "LC_TELEPHONE",
+}
+
+// acceptClientLocale records an env request for a locale variable whose value
+// is a plain locale name (en_US.UTF-8, C, POSIX, sr_RS@latin). Any other
+// name or value is refused: a client env request never sets PATH,
+// LD_PRELOAD, or anything else.
+func acceptClientLocale(session *Session, payload []byte) bool {
+	var req struct{ Name, Value string }
+	if err := ssh.Unmarshal(payload, &req); err != nil {
+		return false
+	}
+	if !slices.Contains(clientLocaleVars, req.Name) || !validLocaleValue(req.Value) {
+		return false
+	}
+	return session.SetEnv(req.Name, req.Value) == nil
+}
+
+func validLocaleValue(v string) bool {
+	if v == "" || len(v) > 64 {
+		return false
+	}
+	for _, r := range v {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-' || r == '@') {
+			return false
+		}
+	}
+	return true
+}
+
+// sendExitStatus reports how the session ended (RFC 4254 section 6.10):
+// exit-status with the exit code, or exit-signal with the signal name when a
+// signal ended it. Without either, OpenSSH exits 255 whatever the session did.
+func sendExitStatus(channel ssh.Channel, err error) {
+	if name, core, ok := exitSignal(err); ok {
+		_, _ = channel.SendRequest("exit-signal", false, ssh.Marshal(struct {
+			Signal     string
+			CoreDumped bool
+			Message    string
+			Lang       string
+		}{name, core, "", ""})) // best-effort
+		return
+	}
+	code, _ := sessionEndReason(err)
+	if code < 0 {
+		code = 1
+	}
+	_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{uint32(code)})) // best-effort
+}
+
+// exitSignal returns the RFC 4254 signal name ("TERM", "KILL", ...) when err
+// is a process killed by a signal.
+func exitSignal(err error) (name string, core bool, ok bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return "", false, false
+	}
+	ws, isWS := exitErr.Sys().(syscall.WaitStatus)
+	if !isWS || !ws.Signaled() {
+		return "", false, false
+	}
+	n := strings.TrimPrefix(unix.SignalName(ws.Signal()), "SIG")
+	if n == "" {
+		n = strconv.Itoa(int(ws.Signal()))
+	}
+	return n, ws.CoreDump(), true
+}
 
 // ptyRequest is the RFC 4254 section 6.2 pty-req payload.
 type ptyRequest struct {
@@ -848,15 +950,36 @@ func clampDims(cols, rows uint32) *pty.Winsize {
 	return &pty.Winsize{Cols: uint16(min(cols, maxPTYDim)), Rows: uint16(min(rows, maxPTYDim))}
 }
 
-// applyPTYRequest decodes a pty-req payload and applies its size. A payload
-// that does not decode exactly, or a term longer than maxTermLen, is refused
-// and setSize is not called.
-func applyPTYRequest(setSize func(*pty.Winsize) error, payload []byte) bool {
+// handlePTYRequest applies a pty-req. The client's terminal modes apply only
+// before the shell starts; a later pty-req can still resize.
+func handlePTYRequest(started bool, setSize func(*pty.Winsize) error, setModes func([]SSHMode) error, payload []byte) bool {
+	if started {
+		setModes = nil
+	}
+	return applyPTYRequest(setSize, setModes, payload)
+}
+
+// applyPTYRequest decodes a pty-req payload and applies its size and, when
+// setModes is not nil, its terminal modes. A payload that does not decode
+// exactly, a term longer than maxTermLen, or a mode string ParseSSHModes
+// refuses is refused, and neither setSize nor setModes is called.
+func applyPTYRequest(setSize func(*pty.Winsize) error, setModes func([]SSHMode) error, payload []byte) bool {
 	var req ptyRequest
 	if err := ssh.Unmarshal(payload, &req); err != nil || len(req.Term) > maxTermLen {
 		return false
 	}
-	return setSize(clampDims(req.Cols, req.Rows)) == nil
+	modes, err := ParseSSHModes(req.Modes)
+	if err != nil {
+		slog.Debug("ssh pty-req refused", "error", err)
+		return false
+	}
+	if setSize(clampDims(req.Cols, req.Rows)) != nil {
+		return false
+	}
+	if setModes != nil && setModes(modes) != nil {
+		return false
+	}
+	return true
 }
 
 // ptyTerm returns the pty-req terminal name when it is a plain terminfo
