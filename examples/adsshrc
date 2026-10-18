@@ -1,0 +1,51 @@
+# examples/adsshrc: a commented ~/.adsshrc for adssh.
+#
+# adssh runs these files at the start of a session, in order:
+#   /etc/adssh_profile   login shells only
+#   ~/.adsshprofile
+#   ~/.adsshrc           created from a short default if it does not exist
+# ADSSH_PROFILE and ADSSH_RC change the last two paths.
+#
+# They are Starlark, not shell: assignments, def, if, for, and the adssh
+# namespaces (sys, str, data, fs, ...). Every namespace call here passes the
+# same policy check as a command typed at the prompt.
+# Copy this file to ~/.adsshrc and keep the parts you want.
+
+# --- Prompt -----------------------------------------------------------------
+# PROMPT is read before each line. Escapes: \u user, \h host, \w working
+# directory, \W its last part, \$ "#" for root else "$", \t time, \d date,
+# \g git branch (with `set gitprompt on`), $(expr) a Starlark expression.
+PROMPT = "\x1b[36m\\u@\\h\x1b[0m:\x1b[33m\\W\x1b[0m\\$ "
+
+# RPROMPT is drawn at the right edge of the prompt line.
+RPROMPT = "\x1b[2m\\t\x1b[0m"
+
+# --- Line editing -------------------------------------------------------------
+# "emacs" (Ctrl-A, Ctrl-E, Ctrl-W, Ctrl-R ...) or "vi" (Esc for command mode).
+set_keymap("emacs")
+
+# --- Environment --------------------------------------------------------------
+# sys.setenv sets a variable for this session and the commands it runs.
+sys.setenv("EDITOR", "vim")
+sys.setenv("PAGER", "less")
+
+# --- Hooks --------------------------------------------------------------------
+# Hooks run around every command. They can only be defined in a profile;
+# the prompt refuses names that start with "__".
+def __preexec__(cmd):
+    # Runs before each command with the command line as typed.
+    pass
+
+def __postcmd__(cmd, code):
+    # Runs after each command with its exit code.
+    if code != 0:
+        print("exit %d: %s" % (code, cmd))
+
+# --- Commands written in Starlark -------------------------------------------
+# sys.register_command(name, callable) adds a shell command. The callable gets
+# one argument: the full argv as a list, argv[0] being the command name.
+def _greet(argv):
+    who = argv[1] if len(argv) > 1 else sys.getenv("USER")
+    print("hello, " + who)
+
+sys.register_command("greet", _greet)

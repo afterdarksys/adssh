@@ -2,138 +2,52 @@ package security
 
 import (
 	"context"
-	"fmt"
-	"io"
+	"errors"
 	"os"
-	"strings"
 
 	"github.com/afterdarksys/adssh/internal/sys"
 
 	"mvdan.cc/sh/v3/interp"
 )
 
-// sttyBinary implements the stty virtual binary.
+// sttyBinary implements the stty virtual binary on the command's standard
+// input. Operands follow POSIX stty and may be combined:
 //
-// Supported operations:
+//	stty                 — all settings (same as stty -a)
+//	stty -a | -g | size  — all settings, a restorable string, or "<rows> <cols>"
+//	stty SAVED           — restore a string printed by stty -g
+//	stty sane | raw | -raw | cooked | -cooked
+//	stty [-]FLAG ...     — icanon echo isig iexten icrnl ixon opost onlcr iutf8 ...
+//	stty CHAR VALUE ...  — intr quit erase kill eof eol eol2 start stop susp
+//	                       rprnt werase lnext discard; VALUE is ^X, ^?, undef, a
+//	                       character, or a number
+//	stty min N | time N | rows N | cols N
 //
-//	stty              — print current terminal settings summary
-//	stty sane         — restore a sensible canonical terminal state
-//	stty size         — print "<rows> <cols>"
-//	stty echo         — enable character echo
-//	stty -echo        — disable character echo
-//	stty raw          — switch to raw (non-canonical) mode
-//	stty -raw         — switch back to cooked (canonical) mode
-//	stty rows N       — set terminal row count
-//	stty cols N       — set terminal column count
+// Every operand is parsed before the terminal changes, so one bad operand
+// changes nothing. There is no -F, and standard input must be the session's
+// controlling terminal, so stty never reaches another terminal.
 type sttyBinary struct{}
 
 func (sttyBinary) Name() string        { return "stty" }
 func (sttyBinary) Description() string { return "Query and set terminal line attributes" }
 func (sttyBinary) Usage() string {
-	return "stty [sane | size | echo | -echo | raw | -raw | rows N | cols N]"
+	return "stty [-a | -g | size | SAVED | sane | raw | -raw | [-]FLAG | CHAR VALUE | min N | time N | rows N | cols N]..."
 }
 
 func (sttyBinary) Run(ctx context.Context, args []string) error {
 	hc := interp.HandlerCtx(ctx)
-	fd := int(os.Stdin.Fd())
-
-	// Verify stdin is a terminal before touching termios.
-	if _, _, err := sys.GetTerminalSize(fd); err != nil {
-		return fmt.Errorf("stty: not a terminal")
+	// mvdan gives a file (a pipe in a pipeline) or nil for a closed stdin.
+	// Neither falls back to the shell's own terminal.
+	in, ok := hc.Stdin.(*os.File)
+	if !ok || in == nil {
+		return errors.New("stty: standard input: not a terminal")
 	}
-
-	if len(args) < 2 {
-		return sttyPrint(hc.Stdout, fd)
+	// Only the session's own terminal: a redirect such as 0>/dev/pts/N must
+	// not reach another one.
+	if !sys.IsControllingTTY(in) {
+		return errors.New("stty: standard input is not this session's terminal")
 	}
-
-	switch args[1] {
-	case "sane":
-		if err := sys.MakeSane(fd); err != nil {
-			return fmt.Errorf("stty sane: %v", err)
-		}
-		return nil
-
-	case "size":
-		rows, cols, err := sys.GetTerminalSize(fd)
-		if err != nil {
-			return fmt.Errorf("stty size: %v", err)
-		}
-		fmt.Fprintf(hc.Stdout, "%d %d\n", rows, cols)
-		return nil
-
-	case "echo":
-		if err := sys.SetEcho(fd, true); err != nil {
-			return fmt.Errorf("stty echo: %v", err)
-		}
-		return nil
-
-	case "-echo":
-		if err := sys.SetEcho(fd, false); err != nil {
-			return fmt.Errorf("stty -echo: %v", err)
-		}
-		return nil
-
-	case "raw":
-		if err := sys.SetRaw(fd, true); err != nil {
-			return fmt.Errorf("stty raw: %v", err)
-		}
-		return nil
-
-	case "-raw":
-		if err := sys.SetRaw(fd, false); err != nil {
-			return fmt.Errorf("stty -raw: %v", err)
-		}
-		return nil
-
-	case "rows":
-		if len(args) < 3 {
-			return fmt.Errorf("stty rows: missing value")
-		}
-		var n int
-		if _, err := fmt.Sscan(args[2], &n); err != nil || n <= 0 {
-			return fmt.Errorf("stty rows: invalid value %q", args[2])
-		}
-		if err := sys.SetWinsize(fd, n, 0); err != nil {
-			return fmt.Errorf("stty rows: %v", err)
-		}
-		return nil
-
-	case "cols", "columns":
-		if len(args) < 3 {
-			return fmt.Errorf("stty cols: missing value")
-		}
-		var n int
-		if _, err := fmt.Sscan(args[2], &n); err != nil || n <= 0 {
-			return fmt.Errorf("stty cols: invalid value %q", args[2])
-		}
-		if err := sys.SetWinsize(fd, 0, n); err != nil {
-			return fmt.Errorf("stty cols: %v", err)
-		}
-		return nil
-
-	default:
-		return fmt.Errorf("stty: unknown operand %q\nUsage: %s", args[1], sttyBinary{}.Usage())
-	}
-}
-
-// sttyPrint writes a human-readable summary of current terminal settings.
-func sttyPrint(w io.Writer, fd int) error {
-	rows, cols, err := sys.GetTerminalSize(fd)
-	if err != nil {
-		rows, cols = 0, 0
-	}
-	flags, err := sys.TermiosFlags(fd)
-	if err != nil {
-		return fmt.Errorf("stty: %v", err)
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "size %d %d\n", rows, cols)
-	for _, f := range flags {
-		fmt.Fprintln(&sb, f)
-	}
-	_, err = fmt.Fprint(w, sb.String())
-	return err
+	return sys.Stty(int(in.Fd()), args[1:], hc.Stdout)
 }
 
 func init() { Register(sttyBinary{}) }

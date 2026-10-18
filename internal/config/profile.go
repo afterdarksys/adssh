@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,6 +25,26 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 
 	paths = append(paths, profilePath, rcPath)
 
+	// Profiles run before the REPL exists, so the REPL's set_keymap is not
+	// defined yet. This stand-in validates the mode and records it as KEYMAP,
+	// which the REPL applies when it starts (the PROMPT convention).
+	if _, ok := env["set_keymap"]; !ok {
+		env["set_keymap"] = starlark.NewBuiltin("set_keymap", func(_ *starlark.Thread, b *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+			var mode string
+			if err := starlark.UnpackArgs(b.Name(), args, kwargs, "mode", &mode); err != nil {
+				return nil, err
+			}
+			if mode != "vi" && mode != "emacs" {
+				return nil, fmt.Errorf("set_keymap: unknown mode '%s'. Use 'vi' or 'emacs'", mode)
+			}
+			env["KEYMAP"] = starlark.String(mode)
+			return starlark.None, nil
+		})
+	}
+
+	// A broken startup file does not stop the ones after it, as in bash: each
+	// error is reported with its file and line and the rest still load.
+	var errs []error
 	for _, path := range paths {
 		if path == "" {
 			continue
@@ -33,24 +54,39 @@ func LoadProfiles(thread *starlark.Thread, env starlark.StringDict, isLoginShell
 			// Auto-create the RC file with a starter template
 			if strings.HasSuffix(path, ".adsshrc") || path == rcPath {
 				if err := os.WriteFile(path, []byte(defaultRC), 0600); err != nil {
-					return env, fmt.Errorf("create profile %s: %w", path, err)
+					errs = append(errs, fmt.Errorf("create profile %s: %w", path, err))
+					continue
 				}
 			} else {
 				continue
 			}
 		} else if err != nil {
-			return env, fmt.Errorf("stat profile %s: %w", path, err)
+			errs = append(errs, fmt.Errorf("stat profile %s: %w", path, err))
+			continue
 		}
 
+		// On a runtime error ExecFile still returns what the file bound
+		// before the failing line; keep it.
 		globals, err := starlark.ExecFile(thread, path, nil, env)
-		if err != nil {
-			return env, fmt.Errorf("load profile %s: %w", path, err)
-		}
 		for k, v := range globals {
 			env[k] = v
 		}
+		if err != nil {
+			// EvalError's text has no position: name the innermost frame in
+			// this file, the profile line that failed.
+			var evalErr *starlark.EvalError
+			if errors.As(err, &evalErr) {
+				for i := range evalErr.CallStack {
+					if frame := evalErr.CallStack.At(i); frame.Pos.Filename() == path {
+						err = fmt.Errorf("%s: %s", frame.Pos, evalErr.Msg)
+						break
+					}
+				}
+			}
+			errs = append(errs, fmt.Errorf("load profile %w", err))
+		}
 	}
-	return env, nil
+	return env, errors.Join(errs...)
 }
 
 // sourceShellProfiles sources /etc/profile and ~/.profile by running them
@@ -90,17 +126,13 @@ func sourceShellProfiles() {
 	}
 }
 
-const defaultRC = `# Welcome to Adssh!
-# This file is evaluated as Starlark (a Python dialect) on every interactive session.
+const defaultRC = `# Welcome to adssh. This file is Starlark (a small Python dialect) and runs at
+# the start of every interactive session. examples/adsshrc in the adssh repo
+# documents everything it can set. Type "help" at the prompt for more.
 
-# 1. Terminal prompt (ANSI colors supported)
+# Prompt (ANSI colors work).
 PROMPT = "\x1b[32madssh>\x1b[0m "
 
-# 2. Key bindings: "vi" or "emacs"
-set_keymap("vi")
-
-# 3. Namespaces available: sys, net, crypto, data, re, sec, i18n, cloud
-# Examples:
-#   sys.setenv("EDITOR", "vim")
-#   sys.load_plugin("~/.adssh/plugins/systemapi.so")
+# Line editing keys: "emacs" (the bash/zsh default) or "vi".
+set_keymap("emacs")
 `

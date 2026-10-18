@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -84,7 +86,7 @@ func newBlockingStarter() *blockingStarter {
 	return &blockingStarter{notify: make(chan string, 64)}
 }
 
-func (b *blockingStarter) start(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) {
+func (b *blockingStarter) start(sessionID, user string, principals []string, in io.ReadCloser, out, errOut io.Writer) error {
 	term := ""
 	if s := GetSession(sessionID); s != nil {
 		term, _ = s.OverlayGet("TERM")
@@ -95,6 +97,7 @@ func (b *blockingStarter) start(sessionID, user string, principals []string, in 
 	b.mu.Unlock()
 	b.notify <- sessionID
 	_, _ = io.Copy(io.Discard, in)
+	return nil
 }
 
 func (b *blockingStarter) count() int {
@@ -469,5 +472,128 @@ func TestCertificatePrincipalsCarriedAsJSON(t *testing.T) {
 		if _, err := principalsFromPermissions(&ssh.Permissions{Extensions: map[string]string{"principals": ext}}); err == nil {
 			t.Fatalf("extension %q was accepted", ext)
 		}
+	}
+}
+
+// A session's exit code or signal reaches the client, after its last output.
+// Without exit-status, OpenSSH exits 255 whatever the session did.
+func TestSSHSessionSendsExitStatusAfterOutput(t *testing.T) {
+	stubUsers(t, map[string]string{"alice": "1001"})
+	for _, tc := range []struct {
+		name   string
+		script string
+		code   int
+		signal string
+	}{
+		{"exit code", "exit 3", 3, ""},
+		{"clean exit", "exit 0", 0, ""},
+		{"signal", "kill -TERM $$", -1, "TERM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := func(_, _ string, _ []string, _ io.ReadCloser, out, _ io.Writer) error {
+				_, _ = io.WriteString(out, "last line of output\r\n")
+				return exec.Command("/bin/sh", "-c", tc.script).Run()
+			}
+			addr := startTestSSH(t, start, nil)
+			client := dialTestSSH(t, addr, "alice")
+			sess, err := client.NewSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sess.Close()
+			var stdout strings.Builder
+			sess.Stdout = &stdout
+			if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := sess.Shell(); err != nil {
+				t.Fatal(err)
+			}
+			err = withTimeout(t, "session end", func() error { return sess.Wait() })
+			if !strings.Contains(stdout.String(), "last line of output") {
+				t.Fatalf("last output lost: %q", stdout.String())
+			}
+			if tc.code == 0 && tc.signal == "" {
+				if err != nil {
+					t.Fatalf("clean exit: %v", err)
+				}
+				return
+			}
+			var exitErr *ssh.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("got %v (%T), want *ssh.ExitError", err, err)
+			}
+			if tc.signal != "" && exitErr.Signal() != tc.signal {
+				t.Fatalf("signal %q, want %q", exitErr.Signal(), tc.signal)
+			}
+			if tc.signal == "" && exitErr.ExitStatus() != tc.code {
+				t.Fatalf("exit status %d, want %d", exitErr.ExitStatus(), tc.code)
+			}
+		})
+	}
+}
+
+// Only LANG and LC_* with plain locale values are accepted, and only before
+// the shell starts.
+func TestSSHSessionAcceptsOnlyClientLocale(t *testing.T) {
+	stubUsers(t, map[string]string{"alice": "1001"})
+	var lang, lcAll, path string
+	gotEnv := make(chan struct{})
+	start := func(sessionID, _ string, _ []string, in io.ReadCloser, _, _ io.Writer) error {
+		if s := GetSession(sessionID); s != nil {
+			lang, _ = s.OverlayGet("LANG")
+			lcAll, _ = s.OverlayGet("LC_ALL")
+			path, _ = s.OverlayGet("PATH")
+		}
+		close(gotEnv)
+		_, _ = io.Copy(io.Discard, in)
+		return nil
+	}
+	addr := startTestSSH(t, start, nil)
+	client := dialTestSSH(t, addr, "alice")
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	send := func(name, value string) bool {
+		return withTimeout(t, "env "+name, func() bool {
+			ok, err := sess.SendRequest("env", true, ssh.Marshal(struct{ Name, Value string }{name, value}))
+			return err == nil && ok
+		})
+	}
+	for _, tc := range []struct {
+		name, value string
+		want        bool
+	}{
+		{"LANG", "en_US.UTF-8", true},
+		{"LC_ALL", "sr_RS@latin", true},
+		{"LC_CTYPE", "en_US.UTF-8;rm -rf /", false},
+		{"LC_TIME", "", false},
+		{"LC_BOGUS", "C", false},
+		{"PATH", "/tmp", false},
+		{"LD_PRELOAD", "/tmp/x.so", false},
+		{"LANG\x00X", "C", false},
+	} {
+		if got := send(tc.name, tc.value); got != tc.want {
+			t.Errorf("env %q=%q accepted=%v, want %v", tc.name, tc.value, got, tc.want)
+		}
+	}
+	if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Shell(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-gotEnv:
+	case <-time.After(3 * time.Second):
+		t.Fatal("session did not start")
+	}
+	if lang != "en_US.UTF-8" || lcAll != "sr_RS@latin" || path != "" {
+		t.Fatalf("LANG %q LC_ALL %q PATH %q", lang, lcAll, path)
+	}
+	if send("LANG", "C") {
+		t.Fatal("env after the shell started was accepted")
 	}
 }

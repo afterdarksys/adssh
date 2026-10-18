@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"github.com/open-policy-agent/opa/rego"
+	v1ast "github.com/open-policy-agent/opa/v1/ast"
+	v1rego "github.com/open-policy-agent/opa/v1/rego"
 )
 
 // EngineConfig configures a security Engine constructed via NewEngine.
@@ -312,18 +314,44 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 	return e, nil
 }
 
+// parsePolicyModule parses a policy as Rego v1 when it parses that way, else
+// as v0, the syntax the shipped policies use.
+// Threats: compiled as v0, a v1 rule such as `allow = true if { ... }` loads
+// without error and does not mean what it says (a deny-by-default policy
+// with that rule allowed every command, the excluded one included). A source
+// that parses as v1 means the same in v0 wherever v0 also accepts it, so
+// preferring v1 changes no working v0 policy; a v0-only body (no `if`) does
+// not parse as v1 and keeps v0.
+//
+// The v0 fallback parses with every future keyword (if, contains, in,
+// every) on: one v0-only rule in a file must not turn the file's v1 rules
+// back into v0, where `allow = true if { ... }` does not mean what it says.
+// A v0 policy that uses one of those words as a name fails to load.
+func parsePolicyModule(name string, data []byte) (*v1ast.Module, v1ast.RegoVersion, error) {
+	if m, err := v1ast.ParseModuleWithOpts(name, string(data), v1ast.ParserOptions{RegoVersion: v1ast.RegoV1}); err == nil {
+		return m, v1ast.RegoV1, nil
+	}
+	m, err := v1ast.ParseModuleWithOpts(name, string(data), v1ast.ParserOptions{RegoVersion: v1ast.RegoV0, AllFutureKeywords: true})
+	return m, v1ast.RegoV0, err
+}
+
 // compilePolicy compiles Rego source and, on success, installs it as the
 // engine's prepared query. On failure the previously-loaded policy (if any) is
 // left untouched — the caller decides whether that is an error.
 func (e *Engine) compilePolicy(name string, data []byte) error {
 	ctx := context.Background()
-	query, err := rego.New(
-		rego.Query("data.adssh.authz"),
-		rego.Module(name, string(data)),
+	module, version, err := parsePolicyModule(name, data)
+	if err != nil {
+		return fmt.Errorf("failed to compile policy: %w", err)
+	}
+	query, err := v1rego.New(
+		v1rego.Query("data.adssh.authz"),
+		v1rego.ParsedModule(module),
+		v1rego.SetRegoVersion(version),
 		// Fail closed: surface builtin runtime errors (div-by-zero, bad
 		// to_number, etc.) as Eval errors instead of silently treating the
 		// rule as undefined.
-		rego.StrictBuiltinErrors(true),
+		v1rego.StrictBuiltinErrors(true),
 	).PrepareForEval(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to compile policy: %w", err)

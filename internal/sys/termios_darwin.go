@@ -6,6 +6,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// tcflag is the type of the termios flag words on darwin.
+type tcflag = uint64
+
+const tcflagBits = 64
+
+// vdisable is _POSIX_VDISABLE: a control character set to it is off.
+const vdisable = 0xff
+
 // IsCookedMode checks if the given file descriptor has ICANON enabled.
 func IsCookedMode(fd uintptr) bool {
 	t, err := unix.IoctlGetTermios(int(fd), unix.TIOCGETA)
@@ -37,13 +45,19 @@ func RestoreTermios(fd int, t *unix.Termios) error {
 	return unix.IoctlSetTermios(fd, unix.TIOCSETA, t)
 }
 
-// MakeSane resets the terminal to a sensible canonical state (equivalent to
-// stty sane): enables echo, line-editing, and standard control characters.
+// MakeSane resets the terminal to a sensible canonical state (stty sane).
 func MakeSane(fd int) error {
 	t, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
 	if err != nil {
 		return err
 	}
+	saneTermios(t)
+	return unix.IoctlSetTermios(fd, unix.TIOCSETA, t)
+}
+
+// saneTermios sets t to a sensible canonical state (stty sane): echo,
+// line editing, and the standard control characters.
+func saneTermios(t *unix.Termios) {
 	// Input: enable break signal, CR→NL, flow control; disable strip, NL→CR
 	t.Iflag |= unix.BRKINT | unix.ICRNL | unix.IMAXBEL | unix.IXON | unix.IXANY
 	t.Iflag &^= unix.IGNBRK | unix.INLCR | unix.IGNCR | unix.IXOFF | unix.ISTRIP
@@ -53,13 +67,22 @@ func MakeSane(fd int) error {
 	t.Lflag |= unix.ICANON | unix.ISIG | unix.IEXTEN | unix.ECHO | unix.ECHOE | unix.ECHOK | unix.ECHOCTL | unix.ECHOKE
 	t.Lflag &^= unix.NOFLSH
 	// Standard control characters
-	t.Cc[unix.VINTR] = 3    // Ctrl+C  → SIGINT
-	t.Cc[unix.VQUIT] = 28   // Ctrl+\  → SIGQUIT
-	t.Cc[unix.VERASE] = 127 // DEL     → erase char
-	t.Cc[unix.VKILL] = 21   // Ctrl+U  → kill line
-	t.Cc[unix.VEOF] = 4     // Ctrl+D  → EOF
-	t.Cc[unix.VSUSP] = 26   // Ctrl+Z  → SIGTSTP
-	return unix.IoctlSetTermios(fd, unix.TIOCSETA, t)
+	t.Cc[unix.VINTR] = 3     // Ctrl+C  → SIGINT
+	t.Cc[unix.VQUIT] = 28    // Ctrl+\  → SIGQUIT
+	t.Cc[unix.VERASE] = 127  // DEL     → erase char
+	t.Cc[unix.VKILL] = 21    // Ctrl+U  → kill line
+	t.Cc[unix.VEOF] = 4      // Ctrl+D  → EOF
+	t.Cc[unix.VSUSP] = 26    // Ctrl+Z  → SIGTSTP
+	t.Cc[unix.VSTART] = 17   // Ctrl+Q  → resume output
+	t.Cc[unix.VSTOP] = 19    // Ctrl+S  → stop output
+	t.Cc[unix.VWERASE] = 23  // Ctrl+W  → erase word
+	t.Cc[unix.VLNEXT] = 22   // Ctrl+V  → literal next
+	t.Cc[unix.VREPRINT] = 18 // Ctrl+R → reprint line
+	t.Cc[unix.VDISCARD] = 15 // Ctrl+O → discard output
+	t.Cc[unix.VEOL] = vdisable
+	t.Cc[unix.VEOL2] = vdisable
+	t.Cc[unix.VMIN] = 1
+	t.Cc[unix.VTIME] = 0
 }
 
 // GetTerminalSize returns the rows and columns of the terminal attached to fd.
@@ -69,63 +92,4 @@ func GetTerminalSize(fd int) (rows, cols int, err error) {
 		return 0, 0, err
 	}
 	return int(ws.Row), int(ws.Col), nil
-}
-
-// SetEcho enables or disables character echo on the terminal.
-func SetEcho(fd int, on bool) error {
-	t, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
-	if err != nil {
-		return err
-	}
-	if on {
-		t.Lflag |= unix.ECHO | unix.ECHOE | unix.ECHOK
-	} else {
-		t.Lflag &^= unix.ECHO | unix.ECHOE | unix.ECHOK
-	}
-	return unix.IoctlSetTermios(fd, unix.TIOCSETA, t)
-}
-
-// SetRaw switches the terminal between raw (non-canonical) and cooked
-// (canonical) mode.  Switching to raw disables echo and line-editing;
-// switching back restores ICANON and ECHO.
-func SetRaw(fd int, raw bool) error {
-	t, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
-	if err != nil {
-		return err
-	}
-	if raw {
-		t.Lflag &^= unix.ICANON | unix.ECHO | unix.ECHOE | unix.ECHOK | unix.ISIG | unix.IEXTEN
-		t.Iflag &^= unix.ICRNL | unix.IXON
-		t.Cc[unix.VMIN] = 1
-		t.Cc[unix.VTIME] = 0
-	} else {
-		t.Lflag |= unix.ICANON | unix.ECHO | unix.ECHOE | unix.ECHOK | unix.ISIG | unix.IEXTEN
-		t.Iflag |= unix.ICRNL | unix.IXON
-	}
-	return unix.IoctlSetTermios(fd, unix.TIOCSETA, t)
-}
-
-// TermiosFlags returns a human-readable list of active terminal flag strings
-// for use by the stty VBIN's no-argument display.
-func TermiosFlags(fd int) ([]string, error) {
-	t, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	flag := func(set bool, name string) {
-		if set {
-			out = append(out, name)
-		} else {
-			out = append(out, "-"+name)
-		}
-	}
-	flag(t.Lflag&unix.ICANON != 0, "icanon")
-	flag(t.Lflag&unix.ECHO != 0, "echo")
-	flag(t.Lflag&unix.ISIG != 0, "isig")
-	flag(t.Lflag&unix.IEXTEN != 0, "iexten")
-	flag(t.Iflag&unix.ICRNL != 0, "icrnl")
-	flag(t.Iflag&unix.IXON != 0, "ixon")
-	flag(t.Oflag&unix.OPOST != 0, "opost")
-	return out, nil
 }

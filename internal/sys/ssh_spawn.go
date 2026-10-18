@@ -73,6 +73,12 @@ func SpawnSSHSession(spec SSHSessionSpec) error {
 	}
 	home = filepath.Clean(home)
 	term, _ := session.OverlayGet("TERM")
+	var locale []string
+	for _, k := range clientLocaleVars {
+		if v, ok := session.OverlayGet(k); ok {
+			locale = append(locale, k+"="+v)
+		}
+	}
 	// CLOEXEC keeps the pair out of unrelated children. ForkExec clears
 	// CLOEXEC on the ExtraFiles copy, and the session-child exec keeps fd 3.
 	parent, child, err := newMonitorPair()
@@ -83,7 +89,7 @@ func SpawnSSHSession(spec SSHSessionSpec) error {
 	defer func() { _ = child.Close() }()
 
 	cmd := buildSSHSessionCmd(exe, spec, home)
-	cmd.Env = sshSessionEnv(target, session.User, home, exe, term)
+	cmd.Env = sshSessionEnv(target, session.User, home, exe, term, locale...)
 	cmd.Dir = "/"
 	if fi, err := os.Stat(home); err == nil && fi.IsDir() {
 		cmd.Dir = home
@@ -206,8 +212,10 @@ var sessionEnvPassthrough = []string{
 }
 
 // sshSessionEnv builds the session child's environment from the target user.
-// Nothing else from the listener's environment is copied.
-func sshSessionEnv(target *user.User, login, home, shell, term string) []string {
+// Nothing else from the listener's environment is copied. locale holds the
+// client's accepted LANG and LC_* assignments; each replaces the listener's
+// value for that name.
+func sshSessionEnv(target *user.User, login, home, shell, term string, locale ...string) []string {
 	name := target.Username
 	if name == "" {
 		name = login
@@ -223,12 +231,19 @@ func sshSessionEnv(target *user.User, login, home, shell, term string) []string 
 		"PATH=" + sanitizeSessionPath(os.Getenv("PATH")),
 		"TERM=" + term,
 	}
+	fromClient := map[string]bool{}
+	for _, kv := range locale {
+		fromClient[kv[:strings.IndexByte(kv, '=')]] = true
+	}
 	for _, key := range sessionEnvPassthrough {
+		if fromClient[key] {
+			continue
+		}
 		if v := os.Getenv(key); v != "" && strings.IndexByte(v, 0) < 0 {
 			env = append(env, key+"="+v)
 		}
 	}
-	return env
+	return append(env, locale...)
 }
 
 // sanitizeSessionPath keeps the absolute entries of path. An empty result is

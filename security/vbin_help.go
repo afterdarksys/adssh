@@ -100,7 +100,8 @@ func init() { Register(helpBinary{}) }
 // ── Subcommand implementations ────────────────────────────────────────────────
 
 func helpWelcome(w interface{ Write([]byte) (int, error) }) error {
-	fmt.Fprintf(w, "%s — programmable security-first shell\n\n", bold("adssh"))
+	fmt.Fprintf(w, "%s — programmable security-first shell\n", bold("adssh"))
+	fmt.Fprintf(w, "New here? Type %s for a short tour.\n\n", bold("help start"))
 
 	fmt.Fprintf(w, "%s\n", header("CATEGORIES"))
 	cats := HelpCategories()
@@ -119,6 +120,10 @@ func helpWelcome(w interface{ Write([]byte) (int, error) }) error {
 
 	fmt.Fprintf(w, "\n%s\n", header("QUICK START"))
 	examples := []struct{ cmd, desc string }{
+		{"help start", "start here: a short tour of adssh"},
+		{"help shell", "pipes, redirection, globs, known limits"},
+		{"help keys", "line editing keys"},
+		{"help starlark", "Starlark primer"},
 		{"help list vbin", "list all virtual binaries"},
 		{"help aws", "AWS namespace reference"},
 		{"help 4eyes", "dual-approval gate"},

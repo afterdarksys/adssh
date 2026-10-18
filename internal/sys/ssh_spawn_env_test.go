@@ -145,3 +145,24 @@ func TestSpawnSSHSessionRejectsUnusableHome(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHSessionEnvClientLocaleReplacesListener(t *testing.T) {
+	t.Setenv("LANG", "C")
+	t.Setenv("LC_ALL", "POSIX")
+	env := sshSessionEnv(&user.User{Username: "carol"}, "carol", "/home/carol", "/bin/adssh", "xterm", "LANG=en_US.UTF-8")
+	if v, _ := envValue(env, "LANG"); v != "en_US.UTF-8" {
+		t.Fatalf("LANG = %q, want the client's", v)
+	}
+	if v, _ := envValue(env, "LC_ALL"); v != "POSIX" {
+		t.Fatalf("LC_ALL = %q, want the listener's when the client sent none", v)
+	}
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "LANG=") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("LANG appears %d times", n)
+	}
+}

@@ -30,7 +30,9 @@ type MenuConfig struct {
 	Items       []MenuItem `yaml:"items"`
 }
 
-func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in io.ReadCloser, out io.Writer, errOut io.Writer) {
+// StartMenu runs a menu-driven session. historyFile is the session's own
+// history path, used if the menu drops to a shell ("" turns history off).
+func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, historyFile string, in io.ReadCloser, out io.Writer, errOut io.Writer) {
 	// Read Menu YAML
 	data, err := os.ReadFile(menuPath)
 	if err != nil {
@@ -48,7 +50,13 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 	if v, ok := globals["SESSION_ID"].(starlark.String); ok {
 		sessionID = string(v)
 	}
+	// As in Start: govern the builtins SetupExtensions installs.
+	beforeSetup := make(starlark.StringDict, len(globals))
+	for k, v := range globals {
+		beforeSetup[k] = v
+	}
 	starlarkext.SetupExtensions(starlarkext.ExtensionOptions{Env: globals, Restricted: restricted, SessionID: sessionID})
+	starlarkext.GovernReplacedGlobals(security.DefaultEngine(), globals, beforeSetup)
 
 	// Instantiate persistent runner with this session's own directory stack.
 	dirs := &sys.DirStackState{}
@@ -106,7 +114,7 @@ func StartMenu(menuPath string, globals starlark.StringDict, restricted bool, in
 			// Optional drop to shell logic
 			fmt.Fprintln(out, "Dropping to restricted shell...")
 			// Start standard repl
-			Start(globals, restricted, "/tmp/.adssh_history", in, out, errOut)
+			Start(globals, restricted, historyFile, in, out, errOut)
 			continue
 		}
 
