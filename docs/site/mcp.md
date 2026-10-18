@@ -14,7 +14,7 @@ Tool arguments named `agent_id` or `session_id` are command arguments. They do n
 
 Unset means policy is the only tool gate. A configured file, including an empty file, is an allowlist. An empty allowlist denies every tool with `agent: tool is not entitled`. A missing file, a non-regular file, a file larger than 64 KiB, or a name outside `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,64}$` fails closed at startup with exit code 2, before the engine is constructed.
 
-`policy/bundles/ai-agent.rego` lists `eval_starlark`, `run_shell`, `list_sessions`, `cloud_query`, and `audit_log`. `admin_*` and `identity_*` are absent, so that bundle denies them.
+`ee/policy/bundles/ai-agent.rego` lists `eval_starlark`, `run_shell`, `list_sessions`, `cloud_query`, and `audit_log`. `admin_*` and `identity_*` are absent, so that bundle denies them.
 
 ## Gate order
 

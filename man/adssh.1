@@ -198,6 +198,7 @@ Speak the sah/1 stdio protocol.
 Off unless
 .B ADSSH_SAH
 is 1, true or yes; when off it prints one error frame and exits.
+Enterprise build only; the core build prints an error and exits 2.
 .SH STARTUP FILES
 At startup adssh runs these Starlark files in this order, into one shared set
 of globals:
@@ -529,6 +530,36 @@ is added to an HMAC hash chain stored next to the log with the suffix
 .BR .chain .
 .B audit verify
 checks the chain.
+.SH CORE AND ENTERPRISE BUILDS
+adssh is built in two variants from one source tree.
+.B go build
+gives the core build, under the Apache License 2.0.
+.B go build \-tags ee
+gives the enterprise build, which adds the files named *_ee.go and the
+.B ee/
+directory, under the Business Source License 1.1.
+.PP
+These commands are in the enterprise build only:
+4eyes, cm, evidence, elevate, grant, lease, identity, gateway, admin,
+grid, flight, agent, worktree, repo, mirror share and mirror unshare,
+and the sah subcommand.
+In the core build each of these names is kept and prints that it is part of
+the enterprise build; it never runs a program of the same name from PATH.
+.PP
+In the core build,
+.B mirror view
+and
+.B mirror console
+attach only to the caller's own sessions.
+A command that matches a four-eyes rule in ~/.adssh/foureyes/rules is refused,
+because the core build has no way to approve it.
+A command covered by
+.B ADSSH_CM_PATTERNS
+is refused when
+.B ADSSH_CM_STRICT
+is 1, because the core build cannot accept a change ticket.
+If the rules file exists and cannot be read or parsed, every command is
+refused, in both builds.
 .SH SSH SERVER
 .B \-\-serve
 .I addr
@@ -563,8 +594,9 @@ The client's terminal modes from the pty request are applied to the session
 terminal, and LANG and LC_* variables sent by the client replace the server's
 before the shell starts.
 .PP
-The server also authorizes direct-tcpip channels, so it can serve as a
-policy-gated jump host.
+In the enterprise build the server also authorizes direct-tcpip channels
+through gateway policy, so it can serve as a policy-gated jump host.
+The core build refuses every direct-tcpip channel.
 Without a terminal (for example under systemd) it serves until SIGTERM.
 SIGHUP stops new logins and leaves running sessions alone.
 .SH ENVIRONMENT
@@ -628,10 +660,10 @@ Starting state of history suggestions: on, off, 1, 0, true, false, yes or no.
 Turn on danger highlighting at startup, when allowed.
 .TP
 .B ADSSH_CONTROLPLANE_URL
-Control-plane origin for identity device login, https://host[:port]. Unset fails closed.
+Control-plane origin for identity device login, https://host[:port]. Unset fails closed. Enterprise build.
 .TP
 .B ADSSH_OIDC_ISSUER
-Issuer for identity oidc import. Unset fails closed.
+Issuer for identity oidc import. Unset fails closed. Enterprise build.
 .TP
 .B ADSSH_OIDC_JWKS_URL
 https JWKS URL for that issuer.
@@ -661,7 +693,7 @@ Bearer token the agent requires. Without it the agent does not start.
 Agent task allowlist. Default ~/.adssh/instrument-tasks.yaml.
 .TP
 .B ADSSH_SAH
-Enable the sah subcommand. Only 1, true or yes; anything else stays off.
+Enable the sah subcommand. Only 1, true or yes; anything else stays off. Enterprise build.
 .TP
 .B ADSSH_GUARD
 SSH listener jail: off or on. Unset follows guard.yaml. Any other value fails closed.

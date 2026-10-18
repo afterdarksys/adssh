@@ -13,6 +13,7 @@ This guide covers the stable embedding surface:
 4. [Read and verify the audit chain](#4-read-and-verify-the-audit-chain)
 5. [Run many isolated sessions concurrently](#5-concurrent-isolated-sessions)
 6. [Mount the SSH server and MCP handlers](#6-mounting-ssh-and-mcp)
+7. [Core and enterprise builds](#7-core-and-enterprise-builds)
 
 The import path is `github.com/afterdarksys/adssh/engine`. The `engine` package
 is the intended boundary. `security/` is also public and may be reached through
@@ -26,8 +27,8 @@ the embedding surface at all — it cannot be imported from outside this module.
 ## 1. Create an engine
 
 An `*engine.Engine` owns one isolated security context: its own Rego policy
-evaluator, audit log, HMAC hash chain, four-eyes / change-management state, RBAC
-entitlements and virtual-binary registry. Two engines in one process share
+evaluator, audit log, HMAC hash chain, change-management patterns (and, in the
+enterprise build, tickets), RBAC entitlements and virtual-binary registry. Two engines in one process share
 nothing mutable, so each can serve a different tenant.
 
 Construction is **fail-closed**: a malformed policy, a `RequirePolicy` with no
@@ -163,7 +164,8 @@ authenticate `User` first; adssh does not.
 ## 3. Policy-gated commands and error classification
 
 Every shell command a session runs passes through the interceptor chain: Rego
-policy → change-management ticket → four-eyes approval → custom commands →
+policy → entitlements → approval gate (change-management ticket, then four-eyes
+approval; see [§7](#7-core-and-enterprise-builds)) → custom commands →
 builtins → virtual binaries → restricted checks → real exec. Policy failures
 **fail closed** (an evaluation error denies).
 
@@ -178,7 +180,8 @@ case err == nil:
 case engine.IsAccessDenied(err):
 	// blocked by Rego policy — surface as 403, not 500
 case engine.IsApprovalRequired(err):
-	// blocked by four-eyes or a change-management ticket — prompt for approval
+	// blocked by four-eyes or a change-management ticket. In the core build
+	// this is a refusal: nothing in the core build can approve it (§7).
 default:
 	// genuine execution failure
 }
@@ -254,7 +257,8 @@ is not reliable.
 ## 5. Concurrent isolated sessions
 
 Sessions are single-threaded internally, but many run in parallel per engine.
-Shared engine state (audit chain writes, four-eyes approvals) is mutex-guarded,
+Shared engine state (audit chain writes, and four-eyes approvals in the
+enterprise build) is mutex-guarded,
 so N goroutines each driving their own session are race-free:
 
 ```go
@@ -325,6 +329,92 @@ if err != nil || !allowed {
 sec.LogPolicyDecision(pctx.User, toolName, true, "")
 return dispatch()
 ```
+
+---
+
+## 7. Core and enterprise builds
+
+v0.10.0 splits adssh into two builds from one module. This is a breaking
+change for embedders.
+
+- `go build` (no tag) is the core, Apache 2.0. It compiles no `*_ee.go` file
+  and no package under `ee/`.
+- `go build -tags ee` is the enterprise build, BSL 1.1. It adds the `*_ee.go`
+  files next to the core files they extend, `ee/cmd/adsshadm` and
+  `ee/policy/bundles`.
+
+An embedder that imports `engine` or `security` gets the core unless its own
+build passes `-tags ee`. Build tags apply to the whole build, so a host that
+builds with `-tags ee` gets the enterprise layer and is bound by its license.
+
+### What moved to the enterprise build
+
+| Area | Files | Moved in |
+|---|---|---|
+| Admin API, attach, adsshadm | `admin_*_ee.go`, `vbin_admin_ee.go`, `ee/cmd/adsshadm` | wave 1 |
+| Four-eyes approval | `foureyes_ee.go`, `foureyes_hook_ee.go`, `foureyes_pending_ee.go`, `vbin_foureyes_ee.go`, `approval_notice_ee.go` | wave 2 |
+| Change management | `cm_ee.go`, `cm_hook_ee.go`, `vbin_cm_ee.go` | wave 2 |
+| Evidence export | `vbin_evidence_ee.go`, `gateway_evidence_ee.go` | wave 2 (gateway evidence in wave 3, with the gateway) |
+| Elevation and grants | `vbin_elevate_ee.go`, `grants_ee.go` | wave 2 |
+| Secret leases | `vbin_lease_ee.go`, `vbin_lease_sources_ee.go` | wave 2 |
+| Identity: OIDC import, device login, SSH CA | `vbin_identity_ee.go`, `device_login_ee.go`; MCP `identity_device_login` | wave 3 |
+| Governed gateways and SSH `direct-tcpip` | `vbin_gateway_ee.go`, `gateway_policy_ee.go`, `main_gateway_ee.go` | wave 3 |
+| Mirror sharing and supervising other users' sessions | `mirror_share_ee.go` | wave 3 |
+| Grid, sah/1 | `internal/grid/*_ee.go`, `internal/sah/*_ee.go`, `main_sah_ee.go` | wave 3 |
+| Policy bundles | `ee/policy/bundles/` | wave 3 |
+
+These exported `security` identifiers exist only with `-tags ee`: the
+four-eyes request and decision API (`CheckFourEyes*`, `RequestApproval*`,
+`ApproveRequest*`, `DenyRequest*`, `DecideRequest`, `ListPending`,
+`AddFourEyesRule`, `RemoveFourEyesRule`, `SaveFourEyesRules`,
+`FourEyesPending`, `FourEyesStatus*`, `FourEyesSurface*`), change-management
+tickets (`CMTicket`, `FetchCMTicket`, `IsTicketValid`, `CMSessionCheck*`,
+`CMCurrentTicketID`, `Set`/`Get`/`ClearActiveCMTicket*`), evidence
+(`EvidenceBundle`, `EvidenceFilter`, `BuildEvidence`), identity
+(`DeviceLogin`, `DeviceLoginRequest`, `DeviceLoginResult`,
+`ParseFlexibleDuration`), gateways (`GatewayPolicyRequest`,
+`AuthorizeGateway`, `GatewayConnectionRecord`, `GatewayLogRef`,
+`NewGatewayClaim`), and the admin API (`NewAdminHTTPHandler*`, `AdminKey`,
+`LoadAdminKeysFile`, `AdminHTTPPaths`, the `List*` admin methods,
+`ApprovalPublic`, `RecordingRef`, `RecordingListItem`, `ElevationListItem`).
+`StartAdminAPI` exists in both builds and returns an error in the core.
+
+These stay in core: `FourEyesRule`, `FourEyesDir`, `LoadFourEyesRules`,
+`MatchesFourEyes`, `ForbidFourEyesDecisions`, `CMPatternsForSession`,
+`AddCMPatternForSession`, `CMRequiredForSession`, `CMRequiredForCommand`,
+`CMStrictMode`, `EngineConfig.FourEyesDir`, `LeaseEvidence`, and the policy
+input claims (`ElevationClaim`, `LeaseClaim`, `GatewayClaim`, `SnoopClaim`).
+
+### Hook points
+
+| Hook | Who fills it | Without it (core) |
+|---|---|---|
+| `security.SetApprovalGate(security.ApprovalGate)` | The enterprise build, from `init()`. A core embedder may install its own gate. It can be set once per process. | The core gate: a command that matches a four-eyes rule, or that strict change management covers, is refused with a `foureyes:` or `cm:` error (`engine.IsApprovalRequired` is true). An unreadable rules file refuses every command. |
+| `mirrorPeerAccess` (unexported, `mirror_attach.go`) | `mirror_share_ee.go` | `mirror view`/`console` attach only to the caller's own sessions. |
+| `enterpriseToolRegistrars` (unexported, `cmd/adssh-mcp`) | `tools_admin_ee.go`, `tools_identity_ee.go` | MCP has `identity_status` and no `admin_*` or `identity_device_login` tool. |
+| `directTCPIPAuthorizer` (unexported, `main`) | `main_gateway_ee.go` | The SSH listener gets no authorizer and refuses every `direct-tcpip` channel. |
+
+`ApprovalGate` has three methods. `Check(ctx, engine, sessionID, args)` runs
+after policy and entitlements allow a command and returns nil to let it run;
+return an error that starts with `cm:` or `foureyes:` so the host can classify
+it. `Explain(engine, sessionID, args)` returns the `change_management` and
+`four_eyes` stages for `why` and `??`, with no side effects.
+`NotifyPolicyDenial(command, requiredRole)` is called in its own goroutine when
+policy denies `gateway`, `lease` or `elevate`.
+
+### What a core-only embedder no longer has
+
+- No way to approve a four-eyes request or to set a change ticket. Commands
+  those rules cover are refused, not run. Install an `ApprovalGate` if your
+  host has its own approval flow.
+- No `evidence`, `elevate`, `grant`, `lease`, `identity`, `gateway`, `admin`,
+  `4eyes`, `cm`, `grid`, `flight`, `agent`, `worktree` or `repo` virtual
+  binary. The names stay registered and return an error that says they are
+  enterprise; they never run a program of the same name on `PATH`.
+- No attaching to another user's session, and no `mirror share`.
+- No SSH `direct-tcpip` forwarding and no `adssh sah`.
+- No starter policy bundles. `policy/default.rego` and `policy/examples/`
+  remain.
 
 ---
 

@@ -95,7 +95,7 @@ jobs:
           awk -v t="$total" -v gate="$COVERAGE_THRESHOLD" \
             'BEGIN { if (t + 0 < gate + 0) { print "FAIL: coverage " t "% is below the " gate "% ratchet"; exit 1 } }'
       - name: Run enterprise tests with race detector
-        run: go test -race -tags ee ./security/ ./cmd/adssh-mcp/ ./ee/...
+        run: go test -race -tags ee . ./security/ ./cmd/adssh-mcp/ ./engine/ ./internal/grid/ ./internal/sah/ ./ee/...
 
   e2e:
     name: E2E (${{ matrix.os }})

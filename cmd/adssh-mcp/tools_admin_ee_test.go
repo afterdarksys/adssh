@@ -83,3 +83,26 @@ func TestEnterpriseRegistersReadOnlyAdminTools(t *testing.T) {
 		}
 	}
 }
+
+// The MCP process forbids four-eyes decisions (TestMain), so even the Go API
+// cannot approve from inside it.
+func TestMCPProcessCannotDecideFourEyes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pending"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pending := `{"request_id":"req-mcp","requester":"alice","rule":{"pattern":"*"}}`
+	if err := os.WriteFile(filepath.Join(dir, "pending", "req-mcp.json"), []byte(pending), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sec, err := security.NewEngine(security.EngineConfig{FourEyesDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sec.DecideRequest("req-mcp", "bob", security.FourEyesSurfaceShell, true); err == nil {
+		t.Fatal("the MCP process decided a four-eyes request")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pending", "req-mcp.json")); err != nil {
+		t.Fatalf("pending request changed: %v", err)
+	}
+}

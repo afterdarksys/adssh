@@ -13,7 +13,6 @@ import (
 	"github.com/afterdarksys/adssh/engine"
 	"github.com/afterdarksys/adssh/internal/config"
 	// grid registers the grid, flight, agent, worktree, and repo vbins.
-	_ "github.com/afterdarksys/adssh/internal/grid"
 	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
 	"github.com/afterdarksys/adssh/internal/sys"

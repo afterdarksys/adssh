@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/afterdarksys/adssh/internal/sys"
@@ -38,6 +39,30 @@ type SessionState struct {
 	// of Globals["SESSION_ID"], so a later write to that global cannot move the
 	// session to another principal. Empty keeps the legacy globals lookup.
 	SessionID string
+
+	// globalsMu serializes the shell builtins that write Globals (set,
+	// alias, unalias, read) with ReadGlobals. A background job (`cmd &`)
+	// runs those builtins on its own goroutine while the session thread can
+	// be copying Globals for sys.parallel.
+	globalsMu sync.RWMutex
+}
+
+// ReadGlobals runs fn while no shell builtin of this session writes Globals
+// or its __aliases__ and __shopts__ dicts. fn must not run shell commands on
+// this session.
+func (s *SessionState) ReadGlobals(fn func(starlark.StringDict) error) error {
+	if s == nil {
+		return fn(nil)
+	}
+	s.globalsMu.RLock()
+	defer s.globalsMu.RUnlock()
+	return fn(s.Globals)
+}
+
+// lockGlobals takes the write side of globalsMu and returns its unlock.
+func (s *SessionState) lockGlobals() func() {
+	s.globalsMu.Lock()
+	return s.globalsMu.Unlock
 }
 
 // gateSessionID returns the ID the gates authorize this session under.
@@ -224,16 +249,7 @@ func (e *Engine) gateCommandContext(ctx context.Context, restricted bool, args [
 			if approver == "" {
 				approver = "unspecified"
 			}
-			commandName := args[0]
-			go func() {
-				_ = sendApprovalNotice(approvalNotice{
-					Event:            "policy_denied",
-					Kind:             commandName,
-					Command:          commandName,
-					RequiredApprover: approver,
-					Fingerprint:      fingerprintSecret(commandName),
-				})
-			}()
+			go currentApprovalGate().NotifyPolicyDenial(args[0], approver)
 		}
 		auditErr := e.LogPolicyDecisionDetail(pctx.User, cmd, decision)
 		e.rememberDeniedCommand(sessionID, args)
@@ -259,14 +275,10 @@ func (e *Engine) gateCommandContext(ctx context.Context, restricted bool, args [
 		return joinDeny(fmt.Sprintf("adssh: access denied by entitlements for %q", args[0]), auditErr)
 	}
 
-	// 0a. Change management ticket check.
-	if err := e.CMSessionCheckForSession(sessionID, args[0], args[1:]); err != nil {
-		e.rememberDeniedCommand(sessionID, args)
-		return err
-	}
-
-	// 0b. 4-eyes dual-approval gate.
-	if err := e.CheckFourEyesForSessionContext(ctx, cmd, args, sessionID); err != nil {
+	// 0a/0b. Approval gate: change-management ticket, then four-eyes
+	// dual approval (approval_gate.go; the enterprise gate is
+	// approval_gate_ee.go).
+	if err := currentApprovalGate().Check(ctx, e, sessionID, args); err != nil {
 		e.rememberDeniedCommand(sessionID, args)
 		return err
 	}
@@ -603,17 +615,25 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 			// Assignment form of set returns before HandlerCtx. A direct call
 			// has no interpreter context, and a session assignment must not
 			// reach os.Setenv.
-			if handled, err := applySetAssignment(globals, sess.gateSessionID(), args); handled {
+			unlock := sess.lockGlobals()
+			handled, err := applySetAssignment(globals, sess.gateSessionID(), args)
+			unlock()
+			if handled {
 				return err
 			}
 
 			// xtrace: print command before executing
+			xtrace := false
+			sess.globalsMu.RLock()
 			if opts, ok := globals["__shopts__"].(*starlark.Dict); ok {
 				if v, found, _ := opts.Get(starlark.String("xtrace")); found {
-					if b, ok := v.(starlark.Bool); ok && bool(b) {
-						fmt.Fprintf(interp.HandlerCtx(ctx).Stderr, "+ %s\n", strings.Join(args, " "))
-					}
+					b, ok := v.(starlark.Bool)
+					xtrace = ok && bool(b)
 				}
+			}
+			sess.globalsMu.RUnlock()
+			if xtrace {
+				fmt.Fprintf(interp.HandlerCtx(ctx).Stderr, "+ %s\n", strings.Join(args, " "))
 			}
 
 			// An SSH session process sends a listener-run vbin to the
@@ -684,12 +704,20 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 			// ------------------------------------------------------------------
 			case "set":
 				if len(args) == 1 {
-					// print all variables (skip __ keys)
+					// print all variables (skip __ keys). Copy under the
+					// lock and print after, so a full output pipe never
+					// holds the lock.
+					var lines []string
+					sess.globalsMu.RLock()
 					for k, v := range globals {
 						if strings.HasPrefix(k, "__") && strings.HasSuffix(k, "__") {
 							continue
 						}
-						fmt.Fprintf(hc.Stdout, "%s=%s\n", k, v.String())
+						lines = append(lines, fmt.Sprintf("%s=%s\n", k, v.String()))
+					}
+					sess.globalsMu.RUnlock()
+					for _, line := range lines {
+						fmt.Fprint(hc.Stdout, line)
 					}
 					return nil
 				}
@@ -698,6 +726,7 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 				if len(args) >= 2 && (strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[1], "+")) {
 					enable := args[1][0] == '-'
 					flag := args[1][1:]
+					defer sess.lockGlobals()()
 					d := getShopts()
 					if d == nil {
 						return nil
@@ -724,7 +753,10 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 				// set VARNAME VALUE  or  set VARNAME=VALUE. The early return
 				// above already handles this; keep the same writer here so
 				// this branch cannot fall back to os.Setenv.
-				if handled, err := applySetAssignment(globals, sess.gateSessionID(), args); handled {
+				unlock := sess.lockGlobals()
+				handled, err := applySetAssignment(globals, sess.gateSessionID(), args)
+				unlock()
+				if handled {
 					return err
 				}
 				return nil
@@ -733,33 +765,51 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 			// alias
 			// ------------------------------------------------------------------
 			case "alias":
-				aliasDict := getAliases()
+				// The lock covers the dict access only; output is written
+				// after unlock so a full pipe cannot hold it.
 				if len(args) == 1 {
 					// list all aliases
-					if aliasDict != nil {
-						for _, item := range aliasDict.Items() {
-							fmt.Fprintf(hc.Stdout, "alias %s='%s'\n", item[0].(starlark.String), item[1].(starlark.String))
-						}
+					var items []starlark.Tuple
+					unlock := sess.lockGlobals()
+					if aliasDict := getAliases(); aliasDict != nil {
+						items = aliasDict.Items()
+					}
+					unlock()
+					for _, item := range items {
+						fmt.Fprintf(hc.Stdout, "alias %s='%s'\n", item[0].(starlark.String), item[1].(starlark.String))
 					}
 					return nil
 				}
 				arg := args[1]
 				if !strings.Contains(arg, "=") {
 					// alias name — print value
+					unlock := sess.lockGlobals()
+					aliasDict := getAliases()
+					var v starlark.Value
+					found := false
 					if aliasDict != nil {
-						if v, found, _ := aliasDict.Get(starlark.String(arg)); found {
-							fmt.Fprintf(hc.Stdout, "alias %s='%s'\n", arg, v.(starlark.String))
-						} else {
-							return fmt.Errorf("alias: %s: not found", arg)
-						}
+						v, found, _ = aliasDict.Get(starlark.String(arg))
 					}
+					unlock()
+					if aliasDict == nil {
+						return nil
+					}
+					if !found {
+						return fmt.Errorf("alias: %s: not found", arg)
+					}
+					fmt.Fprintf(hc.Stdout, "alias %s='%s'\n", arg, v.(starlark.String))
 					return nil
 				}
 				parts := strings.SplitN(arg, "=", 2)
 				name := parts[0]
 				value := strings.Trim(parts[1], "'\"")
+				unlock := sess.lockGlobals()
+				aliasDict := getAliases()
 				if aliasDict != nil {
 					_ = aliasDict.SetKey(starlark.String(name), starlark.String(value))
+				}
+				unlock()
+				if aliasDict != nil {
 					fmt.Fprintf(hc.Stdout, "alias %s='%s'\n", name, value)
 				}
 				return nil
@@ -771,10 +821,12 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 				if len(args) < 2 {
 					return fmt.Errorf("unalias: usage: unalias name")
 				}
+				unlock := sess.lockGlobals()
 				aliasDict := getAliases()
 				if aliasDict != nil {
 					_, _, _ = aliasDict.Delete(starlark.String(args[1]))
 				}
+				unlock()
 				return nil
 
 			// ------------------------------------------------------------------
@@ -842,7 +894,9 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 					return err
 				}
 				if globals != nil {
+					unlock := sess.lockGlobals()
 					globals[varName] = starlark.String(value)
+					unlock()
 				}
 				return nil
 

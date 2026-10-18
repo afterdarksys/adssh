@@ -446,34 +446,41 @@ func parallelWorkerCount(requested, commands int) (int, error) {
 // isolated returns params whose session globals map is a private copy
 // without the custom-command table, so no worker can call into Starlark.
 // __aliases__ and __shopts__ are copied one level deep; other nested values
-// are shared. The caller must not mutate the source map
-// while copies are taken.
+// are shared. The copy is taken under the session's globals lock
+// (SessionState.ReadGlobals), so a background shell job of the same session
+// running set, alias, unalias or read cannot write the map or those dicts
+// while it is copied.
 func (p execParams) isolated() (execParams, error) {
 	restricted := false
 	sessionID := ""
-	var globals starlark.StringDict
 	if p.session != nil {
 		restricted = p.session.Restricted
 		sessionID = p.session.SessionID
-		globals = p.session.Globals
 	}
-	copied := make(starlark.StringDict, len(globals))
-	for key, value := range globals {
-		switch key {
-		case "__custom_commands__":
-			continue
-		case "__aliases__", "__shopts__":
-			// The shell builtins write these dicts in place; each worker
-			// gets its own so workers never share one across goroutines.
-			if dict, ok := value.(*starlark.Dict); ok {
-				copiedDict, err := copyStarlarkDict(dict)
-				if err != nil {
-					return execParams{}, fmt.Errorf("copy %s: %w", key, err)
+	var copied starlark.StringDict
+	err := p.session.ReadGlobals(func(globals starlark.StringDict) error {
+		copied = make(starlark.StringDict, len(globals))
+		for key, value := range globals {
+			switch key {
+			case "__custom_commands__":
+				continue
+			case "__aliases__", "__shopts__":
+				// The shell builtins write these dicts in place; each worker
+				// gets its own so workers never share one across goroutines.
+				if dict, ok := value.(*starlark.Dict); ok {
+					copiedDict, err := copyStarlarkDict(dict)
+					if err != nil {
+						return fmt.Errorf("copy %s: %w", key, err)
+					}
+					value = copiedDict
 				}
-				value = copiedDict
 			}
+			copied[key] = value
 		}
-		copied[key] = value
+		return nil
+	})
+	if err != nil {
+		return execParams{}, err
 	}
 	p.session = &security.SessionState{Restricted: restricted, SessionID: sessionID, Globals: copied}
 	return p, nil

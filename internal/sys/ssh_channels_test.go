@@ -597,3 +597,16 @@ func TestSSHSessionAcceptsOnlyClientLocale(t *testing.T) {
 		t.Fatal("env after the shell started was accepted")
 	}
 }
+
+// With no authorizer (the core build has no gateway policy) every
+// direct-tcpip channel is refused.
+func TestDirectTCPIPNilAuthorizerRefuses(t *testing.T) {
+	stubUsers(t, map[string]string{"alice": "1001"})
+	host, port := holdListener(t)
+	addr := startTestSSH(t, newBlockingStarter().start, nil)
+	client := dialTestSSH(t, addr, "alice")
+	if c, err := client.Dial("tcp", net.JoinHostPort(host, port)); err == nil {
+		_ = c.Close()
+		t.Fatal("SECURITY: a forward opened with no gateway authorizer")
+	}
+}

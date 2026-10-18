@@ -278,7 +278,7 @@ Each chain entry contains: type, source, command, user, timestamp, prev_hash, ha
 		{
 			Name:     "4eyes",
 			Category: "security",
-			Summary:  "Dual-approval gate for sensitive commands",
+			Summary:  "Dual-approval gate for sensitive commands (enterprise build)",
 			Description: `4eyes requires a second authorized user to approve commands matching registered
 patterns before they execute. Required for SOX, PCI-DSS, and FedRAMP compliance.
 
@@ -307,7 +307,7 @@ requests to a Slack/Teams/PagerDuty webhook.`,
 		{
 			Name:     "cm",
 			Category: "security",
-			Summary:  "Change management — require a ticket before executing changes",
+			Summary:  "Change management — require a ticket before executing changes (enterprise build)",
 			Description: `The cm (change management) integration requires operators to associate a
 change ticket with their session before running commands that match CM rules.
 

@@ -180,15 +180,15 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `jq` | JSON processor |
 | `yq` | YAML processor |
 | `http` | HTTP GET client |
-| `mirror` | Live session metadata, viewer, console, audited termination, and time-boxed `share`/`unshare` grants |
+| `mirror` | Live session metadata, viewer and console for your own sessions, audited termination; supervising other users' sessions and time-boxed `share`/`unshare` grants are enterprise build |
 | `admin` | Local admin API for sessions, gateways, approvals, evidence, and explanations (enterprise build) |
-| `identity` | OIDC identity import and short-lived SSH certificate issuance |
+| `identity` | OIDC identity import, device login, and short-lived SSH certificate issuance (enterprise build) |
 | `cmdgen` | Cloud CLI command generator |
 | `package` | Cross-platform package manager |
 | `proc` | `/proc` filesystem reader/writer (Linux) |
-| `grant` | Temporary role escalation |
-| `elevate` | Time-boxed break-glass elevation with reason and audit trail |
-| `gateway` | Policy-audited local TCP gateway for SSH and internal services |
+| `grant` | Temporary role escalation (enterprise build) |
+| `elevate` | Time-boxed break-glass elevation with reason and audit trail (enterprise build) |
+| `gateway` | Policy-audited local TCP gateway for SSH and internal services (enterprise build) |
 | `pick` | Charm-powered fuzzy selector for arguments, stdin, or JSON choices |
 | `nav` | Interactive three-column file navigator with previews |
 | `from` / `where` / `select` / `to` | JSONL pipeline for JSON, YAML, CSV, and struct-shaped JSON |
@@ -198,10 +198,15 @@ Built-in tools that work without installing anything. Type `vbins` to list them 
 | `runbook` | Typed Starlark runbooks with governed argv-only steps |
 | `plugin` | Load checked Starlark plugins from the config plugins directory |
 | `par` | Bounded parallel execution with per-child authorization |
-| `evidence` | Verified, filtered HMAC-chain evidence bundles |
-| `lease` | TTL-bounded command-scoped secrets from environment, private files, Vault, and cloud secret managers |
+| `evidence` | Verified, filtered HMAC-chain evidence bundles (enterprise build) |
+| `lease` | TTL-bounded command-scoped secrets from environment, private files, Vault, and cloud secret managers (enterprise build) |
 | `darkscan` | Simulated malware-scanner demo (no security verdict) |
 | `memforensics` | Simulated memory-forensics demo (no process inspection) |
+| `4eyes` | Dual approval for commands that match a rule (enterprise build) |
+| `cm` | Change-management tickets for covered commands (enterprise build) |
+| `grid` / `flight` / `agent` / `worktree` / `repo` | sah-grid fleet commands (enterprise build) |
+
+"Enterprise build" means `go build -tags ee` (BSL 1.1, `ee/`). The core build (`go build`, Apache 2.0) keeps these names, and running one prints that it is part of the enterprise build; it never falls through to a program of the same name on `PATH`. In the core build a command that matches a four-eyes rule, or that strict change management (`ADSSH_CM_STRICT=1` with `ADSSH_CM_PATTERNS`) covers, is refused, because the core build cannot approve it. SSH `direct-tcpip` forwarding is refused, and `adssh sah` exits with an error.
 
 ### Advanced VBIN workflows
 
@@ -322,7 +327,7 @@ allow {
 }
 ```
 
-Starter policy bundles live in `policy/bundles/`:
+Starter policy bundles are part of the enterprise layer and live in `ee/policy/bundles/`:
 
 | Bundle | Purpose |
 |---|---|

@@ -1,5 +1,5 @@
 # Focused example of the destructive-agent rule already in
-# policy/bundles/ai-agent.rego. This file is an example, not a new control.
+# ee/policy/bundles/ai-agent.rego. This file is an example, not a new control.
 # input.agent is set for MCP calls: id, kind, risk, dry_run.
 package adssh.authz
 

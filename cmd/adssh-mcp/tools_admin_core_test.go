@@ -11,7 +11,8 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// The core build has the identity tools and no admin_* tools.
+// The core build has identity_status and no admin_* tools and no
+// identity_device_login (enterprise).
 func TestCoreRegistersNoAdminTools(t *testing.T) {
 	eng, err := engine.New(engine.Config{})
 	if err != nil {
@@ -25,9 +26,10 @@ func TestCoreRegistersNoAdminTools(t *testing.T) {
 			t.Errorf("core build registers enterprise tool %s", name)
 		}
 	}
-	for _, name := range []string{"identity_status", "identity_device_login"} {
-		if _, ok := tools[name]; !ok {
-			t.Errorf("core build lacks %s", name)
-		}
+	if _, ok := tools["identity_status"]; !ok {
+		t.Error("core build lacks identity_status")
+	}
+	if _, ok := tools["identity_device_login"]; ok {
+		t.Error("core build registers enterprise tool identity_device_login")
 	}
 }

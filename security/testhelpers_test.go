@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/afterdarksys/adssh/internal/sys"
 )
 
 // Chain and four-eyes helpers shared by core and enterprise tests.
@@ -25,23 +27,12 @@ func chainEngine(t *testing.T) (*Engine, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.ensureFourEyesDirs(); err != nil {
-		t.Fatal(err)
+	for _, sub := range []string{"pending", "approved", "denied"} {
+		if err := os.MkdirAll(filepath.Join(dir, "foureyes", sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return eng, chain, auditLog
-}
-
-func seedPending(t *testing.T, eng *Engine, id, requester, approver string) string {
-	t.Helper()
-	data, err := json.Marshal(FourEyesPending{Token: "tok-" + id, RequestID: id, Requester: requester, Command: "rm -rf /srv", Rule: FourEyesRule{Approver: approver}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(eng.fourEyesPendingDir(), id+".json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 // breakChain makes every later chain append fail by replacing the ledger file
@@ -59,5 +50,44 @@ func breakChain(t *testing.T, eng *Engine, chain string) {
 	}
 	if err := eng.LogEvent("TEST_PROBE"); err == nil {
 		t.Fatal("broken chain still accepted an event")
+	}
+}
+
+func registerTestSession(t *testing.T, s *sys.Session) {
+	t.Helper()
+	if err := sys.RegisterSession(s); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sys.UnregisterSession(s.ID) })
+}
+
+// setDefaultCMPatterns replaces the default engine's startup patterns for
+// one test; the engine reads ADSSH_CM_PATTERNS only when it is built.
+func setDefaultCMPatterns(t *testing.T, raw string) {
+	t.Helper()
+	defaultEngine.cmMu.Lock()
+	prev := defaultEngine.cmDefaultPatterns
+	defaultEngine.cmDefaultPatterns = parseCMPatterns(raw)
+	defaultEngine.cmMu.Unlock()
+	t.Cleanup(func() {
+		defaultEngine.cmMu.Lock()
+		defaultEngine.cmDefaultPatterns = prev
+		defaultEngine.cmMu.Unlock()
+	})
+}
+
+// writeFourEyesRules writes the four-eyes rules file the way 4eyes add does,
+// without the enterprise code.
+func writeFourEyesRules(t *testing.T, eng *Engine, rules ...FourEyesRule) {
+	t.Helper()
+	if err := os.MkdirAll(eng.fourEyesBaseDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eng.fourEyesRulesPath(), data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -16,8 +16,8 @@ Ryan approved: the core under Apache 2.0, the enterprise layer under BSL 1.1 in 
 ## Waves (adssh-06's sizing, done in a fresh session)
 
 1. DONE on branch ee/wave1: admin API (`admin_http`, `admin_attach`, `admin_lists`, `vbin_admin`) to `_ee.go`, the MCP `admin_*` tools to `tools_admin_ee.go` via `enterpriseToolRegistrars`, adsshadm to `ee/cmd/adsshadm`, and CI for both builds. Enterprise packaging moved to wave 3.
-2. Four-eyes, change management, evidence, elevate/grants, leases.
-3. Identity/device login, gateway, mirror_share, grid, sah, risk, bundles, docs, and release (enterprise tarballs `adssh-enterprise_*` with adsshadm; Homebrew formula for the core).
+2. DONE on branch ee/wave2 (2026-10-18): four-eyes, change management, evidence, elevate/grants, leases. Core keeps the rule and pattern readers and refuses what it cannot approve (`approval_gate.go`); the enterprise gate plugs in through `SetApprovalGate`. Gateway evidence moved with the gateway in wave 3.
+3. DONE on branch ee/wave2 (2026-10-18): identity/device login, gateway, mirror_share, grid, sah, bundles (`ee/policy/bundles`), docs, and opt-in enterprise tarballs (`ENTERPRISE=1 scripts/package-release.sh`, needs `ee/LICENSE`). Not done: `internal/risk` stays core (the core REPL and the MCP `input.agent.risk` claim use it; a stub would either fail open or refuse every agent shell call). The Homebrew formula is not done.
 
 Ryan confirmed the classification table on 2026-10-16. The refactor may start.
 
