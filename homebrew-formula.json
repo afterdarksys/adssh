@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "repo": "afterdarksys/adssh",
+  "tag": "v0.10.0",
+  "formula": "adssh",
+  "class": "Adssh",
+  "description": "Policy-governed shell and SSH server with audited, approvable execution",
+  "license": "Apache-2.0",
+  "build": {
+    "kind": "go",
+    "target": ".",
+    "binary": "adssh"
+  }
+}
