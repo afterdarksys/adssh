@@ -502,7 +502,13 @@ func (e *Engine) snoopApprovalState(key string, session *sys.Session, owner, pur
 	}
 	cmd := fmt.Sprintf("snoop rw %s %s %s", purpose, session.ID, owner)
 	rule := FourEyesRule{Pattern: "snoop rw *"}
-	if matched, ok := e.MatchesFourEyes(cmd); ok {
+	// An unreadable rules file refuses the request rather than dropping a
+	// configured Approver restriction.
+	matched, ok, err := e.matchFourEyes(cmd)
+	if err != nil {
+		return 0, "", fmt.Errorf("foureyes: %v; refusing the request", err)
+	}
+	if ok {
 		rule = *matched
 	}
 	if rule.TTL <= 0 {

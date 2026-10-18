@@ -5,6 +5,12 @@ control, with a programmable and AI-native operations shell.
 
 ## Recently Completed
 
+- Open core wave 2 (2026-10-18, branch `ee/wave2`, uncommitted): four-eyes, change management, evidence export, elevate, grants and leases are `*_ee.go` files built only with `-tags ee`. The core keeps the four-eyes rules reader and the CM pattern matcher and refuses any command they cover, because the core build cannot approve it (`security/approval_gate.go`); the enterprise gate installs through `security.SetApprovalGate`. Enterprise command names stay reserved in core and never fall through to `PATH`. An unreadable four-eyes rules file now refuses every command in both builds (it used to read as no rules).
+- Open core wave 3 (2026-10-18, same branch): identity (OIDC import, device login, SSH CA), gateways and SSH `direct-tcpip`, mirror sharing and supervision of other users' sessions, `internal/grid`, `internal/sah` and the policy bundles (`ee/policy/bundles`) are enterprise. Core `mirror view/console` attaches to the caller's own sessions only; core refuses `direct-tcpip` and `adssh sah`. `scripts/package-release.sh` leaves the bundles out of the core artifacts and builds `adssh-enterprise_*` tarballs only with `ENTERPRISE=1` and an `ee/LICENSE`. `docs/EMBEDDING.md` §7 lists what moved and the hook points.
+- `sys.parallel` copies the session globals under the session's globals lock (`SessionState.ReadGlobals`); the shell builtins that write them take the write side. Race test `TestParallelIsolatedCopyRacesNoBackgroundWriter`. (2026-10-18)
+- `disown`, its help entry and the `sys.GlobalJobTable()` shim are gone; no code referenced them any more, and the last mention (CLAUDE.md) is removed. (2026-10-18)
+- `sys.parallel` stops on REPL Ctrl-C: SIGINT cancels the Starlark thread, the batch polls `Thread.Cancel` every 50 ms and cancels its context, which kills the running children (`TestParallelThreadCancelKillsChildrenPromptly`). The "runs under `context.Background()`" note below was stale. (verified 2026-10-18)
+
 - Vault/cloud-backed one-command secret leases.
 - Credential redaction across leased output and audit command/event/policy records.
 - Live session supervision with `mirror list/view/console/kill`.
@@ -58,11 +64,12 @@ The items above are in the tree. Publishing is a morning step. Do not treat this
 - The Homebrew tap `afterdarksys/homebrew-tap` exists and publishes via its `publish-spec.sh`; adssh needs a `homebrew-formula.json` and a LICENSE file (the repo is public with none) before a formula can ship.
 - `docs/site/` is source. It is not a hosted site.
 - The provision → enroll → execute handoff is not wired. Do not mark it implemented.
+- The open-core split (waves 2 and 3) is on branch `ee/wave2`, verified 2026-10-18 (both builds, vet, the CI import guard, core and enterprise tests, e2e in both builds) and awaiting merge to main. `LICENSE` (Apache 2.0), `ee/LICENSE` (BSL 1.1), `docs/LICENSING.md`, `KEYS` and `homebrew-formula.json` are on main. The remaining "Before release" items in the plan are the legal ones (licensor name, lawyer review, contributor copyright, trademarks).
+- `internal/risk` stays in core although the plan lists it as enterprise: the core REPL (`confirm`, highlighting) and the MCP `input.agent.risk` claim used by `policy/examples/agent-destructive.rego` depend on it. Ryan to decide.
+- golangci-lint was not run for the split (not installed for the local Go version); CI runs it for both builds.
+- `sudo make test-e2e` (`TestSSHRoundTrip`, root-only) has not been run since the SSH changes; the non-root e2e tests pass in both builds (2026-10-18).
+- `TestExecCmdErrorIncludesOutput` (internal/starlarkext) takes 15-18 s alone against a 30 s exec timeout and can time out under a full parallel `go test ./...`; same timing on main.
 
 ## Deferred from the 2026-10-16 remediation
 
-- `sys.parallel` workers share `__aliases__` and `__shopts__`. REPL Ctrl-C now cancels the Starlark thread, but `sys.parallel` runs its batch under `context.Background()`, so the batch finishes before the cancel is seen; it needs the REPL's cancellation as a context.
-- Release note for the next tag: `authorized_keys` lines need `user="name"`; `identity oidc import` takes issuer, JWKS URL and audience from `ADSSH_OIDC_*` only; `identity device login` needs `ADSSH_CONTROLPLANE_URL`; `ADSSH_AUDIT_URL` must be https; approvals need a named key from `ADSSH_ADMIN_KEYS`.
-- `sudo make test-e2e` has not been run since the SSH changes; the SSH e2e test now binds the key to the test user.
-- The job table and `jobs`/`fg`/`bg` are gone. The `disown` builtin in `security/interceptor.go` still calls the empty `sys.GlobalJobTable()` shim in `internal/sys/disown.go`; remove the builtin, its help entry and the shim together.
-- `sys.parallel` `isolated()` copies the caller's globals map without a lock while a mvdan background job on the same session could write to it; low likelihood, no fix yet.
+- Release note for the next tag: `authorized_keys` lines need `user="name"`; `identity oidc import` takes issuer, JWKS URL and audience from `ADSSH_OIDC_*` only; `identity device login` needs `ADSSH_CONTROLPLANE_URL`; `ADSSH_AUDIT_URL` must be https; approvals need a named key from `ADSSH_ADMIN_KEYS`. v0.10.0 is breaking for embedders: the core build drops the enterprise API listed in `docs/EMBEDDING.md` §7, and refuses commands that four-eyes rules or strict CM cover.

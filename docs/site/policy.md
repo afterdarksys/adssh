@@ -78,7 +78,7 @@ metadata := {"required_role": "netops"}
 
 ## Examples
 
-`policy/examples/` and `policy/bundles/` are starter policies. They compile. Loading them does not by itself evaluate a decision.
+`policy/examples/` and `ee/policy/bundles/` are starter policies. They compile. Loading them does not by itself evaluate a decision.
 
 - `policy/examples/cert_principal.rego` treats certificate principals as `input.groups`.
 - `policy/examples/lease_bounds.rego` bounds a lease to vault, a TTL of at most 300 seconds, destination `TOKEN`, and command `deploy`.
@@ -86,8 +86,8 @@ metadata := {"required_role": "netops"}
 - `policy/examples/agent-session.rego` allows one MCP agent id and one session id. Tool arguments named `agent_id` or `session_id` do not replace those fields.
 - `policy/examples/explained.rego` returns `allow`, `deny_reason`, `required_role`, `rule`, and `required_entitlement`.
 - `policy/examples/mirror_share.rego` caps `mirror share` at 30 minutes and lets only `oncall-lead` grant console access.
-- `policy/bundles/ai-agent.rego` allows a fixed set of MCP tools. `admin_*` and `identity_*` are absent from `mcp_tools`, so those tools fail closed under that bundle.
-- `policy/bundles/admin-api.rego` is the role-separated admin API starter.
+- `ee/policy/bundles/ai-agent.rego` allows a fixed set of MCP tools. `admin_*` and `identity_*` are absent from `mcp_tools`, so those tools fail closed under that bundle.
+- `ee/policy/bundles/admin-api.rego` is the role-separated admin API starter.
 
 ## Structured input
 

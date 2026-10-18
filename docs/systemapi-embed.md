@@ -25,6 +25,10 @@ the same state directory. Child environment names that start with `SYSTEMAPI`,
 contain `API_KEY`, or start with `ADSTELCO` are stripped before both the login
 shell and adssh.
 
+The child can be the core build (`go build`). `adssh sah` (sah/1) and
+`identity device login` exist only in the enterprise build (`go build -tags ee`);
+see [EMBEDDING.md §7](EMBEDDING.md#7-core-and-enterprise-builds).
+
 A second `pty_start` replaces the active session. Follow-up `pty_input`,
 resize, and stop frames are not re-leased. The kill timer is `expiresUnix`.
 

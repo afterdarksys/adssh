@@ -1,6 +1,7 @@
 package starlarkext
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -470,5 +471,47 @@ func TestParallelThreadCancelKillsChildrenPromptly(t *testing.T) {
 	out, _ := exec.Command("pgrep", "-f", marker).Output()
 	if pids := strings.TrimSpace(string(out)); pids != "" {
 		t.Fatalf("child processes still running after cancel: %s", pids)
+	}
+}
+
+// The session exec handler's set builtin writes the session globals map. A
+// background job of the same session can reach it while sys.parallel copies
+// the globals; under -race the copy must not race with that write
+// (SessionState.ReadGlobals).
+func TestParallelIsolatedCopyRacesNoBackgroundWriter(t *testing.T) {
+	sess := &security.SessionState{Globals: starlark.StringDict{
+		"__aliases__": starlark.NewDict(1),
+		"__shopts__":  starlark.NewDict(1),
+	}}
+	eng := allowAllEngine(t)
+	p := execParams{engine: eng, session: sess, timeout: 10 * time.Second, outputCap: 1 << 16}
+	handler := eng.BashInterceptorSession(sess)(func(context.Context, []string) error { return nil })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			if err := handler(context.Background(), []string{"set", fmt.Sprintf("V%d=x", i)}); err != nil {
+				t.Errorf("background writer: %v", err)
+				return
+			}
+		}
+	}()
+	copies := 0
+	for {
+		select {
+		case <-done:
+			if _, ok := sess.Globals["V199"]; !ok {
+				t.Fatal("the writer never reached the session globals")
+			}
+			if copies == 0 {
+				t.Fatal("no copy ran alongside the writer")
+			}
+			return
+		default:
+		}
+		if _, err := p.isolated(); err != nil {
+			t.Fatal(err)
+		}
+		copies++
 	}
 }

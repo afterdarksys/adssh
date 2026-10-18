@@ -185,9 +185,7 @@ func TestWhoamiCapsHasNoSideEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.SaveFourEyesRules([]FourEyesRule{{Pattern: "rm *", Approver: "bob", TTL: 60}}); err != nil {
-		t.Fatal(err)
-	}
+	writeFourEyesRules(t, eng, FourEyesRule{Pattern: "rm *", Approver: "bob", TTL: 60})
 	session := &sys.Session{ID: "whoami-noside", User: "alice"}
 	if err := sys.RegisterSession(session); err != nil {
 		t.Fatal(err)

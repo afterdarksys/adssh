@@ -57,10 +57,11 @@ SSH sessions mapped to a menu by `security.GetMenuForUser`.
 goes through `mvdan.cc/sh/v3/interp` configured with `security.BashInterceptor` as its exec handler
 and `(*security.Engine).OpenHandlerSession` as its open handler (it gates `/dev/tcp`/`/dev/udp`). `BashInterceptor` is the real authorization
 chokepoint and runs, in order: (1) Rego policy evaluation via `security.EvaluatePolicy`
-(fail-closed on error), (2) change-management ticket check (`security.CMSessionCheck`), (3) four-eyes
-dual-approval gate (`security.CheckFourEyes`), (4) custom commands registered from Starlark via
+(fail-closed on error), (2)+(3) the approval gate (`security.ApprovalGate`, `approval_gate.go`):
+change-management ticket check then four-eyes dual approval in the enterprise build
+(`approval_gate_ee.go`), and in the core build a refusal of any command those rules cover, (4) custom commands registered from Starlark via
 `sys.register_command`, (5) built-in shell verbs adssh implements itself (`set`, `alias`, `pushd`,
-`popd`, `dirs`, `read`, `time`, `disown`, `type`, `command -v`, ...), (6) the virtual binary registry
+`popd`, `dirs`, `read`, `time`, `type`, `command -v`, ...), (6) the virtual binary registry
 (`security.Lookup`/`DispatchVBin`), (7) restricted-mode checks (blocks `/` in command names, `cd`,
 `export`), and only then (8) falls through to the real OS exec. Every command is also logged via
 `security.LogCommand`/`LogPolicyDecision` regardless of outcome.
@@ -70,7 +71,7 @@ dual-approval gate (`security.CheckFourEyes`), (4) custom commands registered fr
 instead of shelling out. Each implements the `security.VirtualBinary` interface (`Name`,
 `Description`, `Usage`, `Run`) and self-registers via `security.Register` from an `init()`; the
 registry is package-global in `security/` (`vbin_*.go` files; the grid vbins live in `internal/grid` and
-self-register from their own package, which `main.go`, `cmd/adssh-mcp` and `engine` blank-import), with
+self-register from their own package, which the enterprise build blank-imports from `main_grid_ee.go`, `cmd/adssh-mcp/grid_ee.go` and `engine/grid_ee.go`), with
 `internal/sysmgmt/` and `internal/starlarkext/` supplying some of the underlying implementations (e.g. `/proc` access, package management, container
 exec). See `docs/VBIN-SPEC.md` for the contract new virtual binaries must follow.
 
@@ -87,9 +88,11 @@ omitted from the dict entirely rather than merely blocked at call time. `main.go
 
 **Security layer (`security/`)** is the enforcement core shared by the shell, the SSH server, and the
 MCP server: Rego/OPA policy (`policy.go`), RBAC entitlements (`entitlements.go`), the audit log and
-tamper-evident hash chain (`audit.go`, `audit_chain.go`), change-management gating (`cm.go`,
-`cm_hook.go`), four-eyes dual approval (`foureyes.go`, `foureyes_hook.go`), session mirroring
-(`mirror.go`), and the virtual binary registry/dispatch described above. Rego policies live in
+tamper-evident hash chain (`audit.go`, `audit_chain.go`), the approval gate hook
+(`approval_gate.go`; change management `cm_ee.go` and four-eyes `foureyes_ee.go` are enterprise),
+and session mirroring (`mirror.go`, `mirror_attach.go`; sharing is `mirror_share_ee.go`),
+and the virtual binary registry/dispatch described above. `*_ee.go` files build only with
+`-tags ee` (see `docs/plans/2026-10-16-open-core-split.md`). Rego policies live in
 `policy/` (`default.rego` plus `policy/examples/`) and are evaluated against a `PolicyContext`
 (user, groups, command, args, session) built by `security.BuildPolicyContext`.
 

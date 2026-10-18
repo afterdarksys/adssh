@@ -6,7 +6,6 @@ package security
 import (
 	"crypto/sha256"
 	"crypto/subtle"
-	"sort"
 	"strings"
 
 	"github.com/afterdarksys/adssh/internal/sys"
@@ -119,25 +118,8 @@ func isEngineEvent(entry ChainEntry) bool {
 	return entry.Type == "event" && entry.Source == ""
 }
 
-func adminGatewaySnapshot() []map[string]any {
-	gatewayMu.RLock()
-	sessions := make([]*gatewaySession, 0, len(gatewaySessions))
-	for _, session := range gatewaySessions {
-		sessions = append(sessions, session)
+func zeroBytes(data []byte) {
+	for i := range data {
+		data[i] = 0
 	}
-	gatewayMu.RUnlock()
-	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
-
-	out := make([]map[string]any, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, map[string]any{
-			"id":         s.ID,
-			"name":       s.Name,
-			"listen":     s.Listen,
-			"target":     s.Target,
-			"user":       s.User,
-			"started_at": s.Started,
-		})
-	}
-	return out
 }

@@ -88,10 +88,9 @@ type Engine struct {
 	chainSession  string
 	auditChangeID string
 
-	// active change-management tickets, keyed by authenticated session ID.
-	// The empty key is retained for legacy single-session package APIs.
-	cmMu      sync.Mutex
-	cmTickets map[string]cmTicketState
+	// change-management patterns. The tickets themselves are enterprise
+	// state (cm_ee.go) and live in ext.
+	cmMu sync.Mutex
 	// cmDefaultPatterns is ADSSH_CM_PATTERNS, read once when the engine is
 	// built; cmPatterns holds what each session added with cm require.
 	cmDefaultPatterns []string
@@ -121,6 +120,28 @@ type Engine struct {
 	// session never borrows the host identity or another engine's binding.
 	identityMu sync.RWMutex
 	identities map[string]sessionIdentity
+
+	// ext holds per-engine state that *_ee.go files create on first use
+	// (see extension). The core build leaves it empty.
+	extMu sync.Mutex
+	ext   map[string]any
+}
+
+// extension returns the per-engine value stored under key, creating it with
+// create on first use. Enterprise files keep their engine state here so the
+// core Engine type does not name enterprise types.
+func (e *Engine) extension(key string, create func() any) any {
+	e.extMu.Lock()
+	defer e.extMu.Unlock()
+	if v, ok := e.ext[key]; ok {
+		return v
+	}
+	if e.ext == nil {
+		e.ext = map[string]any{}
+	}
+	v := create()
+	e.ext[key] = v
+	return v
 }
 
 // sessionIdentity is the principal bound to one session ID on one engine.
@@ -206,7 +227,6 @@ var defaultEngine = newDefaultEngine()
 func newDefaultEngine() *Engine {
 	return &Engine{
 		vbins:       map[string]VirtualBinary{},
-		cmTickets:   map[string]cmTicketState{},
 		lastDenials: map[string]CommandExplanation{},
 		identities:  map[string]sessionIdentity{},
 
@@ -248,7 +268,6 @@ func NewEngine(cfg EngineConfig) (*Engine, error) {
 		restricted:  cfg.Restricted,
 		fourEyesDir: cfg.FourEyesDir,
 		vbins:       map[string]VirtualBinary{},
-		cmTickets:   map[string]cmTicketState{},
 		lastDenials: map[string]CommandExplanation{},
 		identities:  map[string]sessionIdentity{},
 

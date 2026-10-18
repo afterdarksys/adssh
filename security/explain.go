@@ -94,32 +94,16 @@ func (e *Engine) ExplainCommand(sessionID string, args []string) (CommandExplana
 		explanation.NeededEntitlements = nil
 	}
 
-	if !e.CMRequiredForSession(sessionID, args[0]) {
-		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "change_management", Status: "not_required"})
-	} else if ticket, id := e.GetActiveCMTicketForSession(sessionID); ticket == nil {
-		if CMStrictMode() {
-			deny("change_management", "an active approved change ticket is required")
-		} else {
-			explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "change_management", Status: "warning", Reason: "no active ticket; strict mode is disabled"})
+	for _, stage := range currentApprovalGate().Explain(e, sessionID, args) {
+		explanation.Stages = append(explanation.Stages, stage)
+		switch stage.Status {
+		case "denied":
+			explanation.Outcome = "denied"
+		case "approval_required":
+			if explanation.Outcome != "denied" {
+				explanation.Outcome = "approval_required"
+			}
 		}
-	} else if !IsTicketValid(ticket) {
-		deny("change_management", fmt.Sprintf("ticket %s is not valid (state: %s)", id, ticket.State))
-	} else {
-		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "change_management", Status: "allowed", Reason: "ticket " + id})
-	}
-
-	fullCommand := strings.Join(args, " ")
-	if rule, matched := e.MatchesFourEyes(fullCommand); matched {
-		reason := fmt.Sprintf("matches rule %q", rule.Pattern)
-		if rule.Approver != "" {
-			reason += "; approver=" + rule.Approver
-		}
-		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "four_eyes", Status: "approval_required", Reason: reason})
-		if explanation.Outcome != "denied" {
-			explanation.Outcome = "approval_required"
-		}
-	} else {
-		explanation.Stages = append(explanation.Stages, ExplanationStage{Name: "four_eyes", Status: "not_required"})
 	}
 
 	if !e.restricted {

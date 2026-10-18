@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,10 +27,8 @@ import (
 	"golang.org/x/term"
 
 	// grid registers the grid, flight, agent, worktree, and repo vbins.
-	_ "github.com/afterdarksys/adssh/internal/grid"
 	"github.com/afterdarksys/adssh/internal/guard"
 	"github.com/afterdarksys/adssh/internal/repl"
-	"github.com/afterdarksys/adssh/internal/sah"
 	"github.com/afterdarksys/adssh/internal/starlarkext"
 	"github.com/afterdarksys/adssh/internal/sys"
 	"github.com/afterdarksys/adssh/parser"
@@ -125,7 +122,7 @@ func main() {
 
 	// Disabled sah/1 exits before the engine starts and before the frame is read.
 	if sahMode && !cfg.SAHEnabled {
-		os.Exit(sah.Handle(false, nil, os.Stdout, nil))
+		os.Exit(sahDisabled())
 	}
 
 	if doctorFlag {
@@ -299,9 +296,7 @@ func main() {
 		}
 		return err
 	}
-	gatewayAuthorizer := func(req sys.GatewayAuthRequest) error {
-		return eng.Security().AuthorizeGateway(directTCPIPPolicyRequest(req))
-	}
+	gatewayAuthorizer := directTCPIPAuthorizer(eng.Security())
 
 	// 6b. Inject SSH management builtins into `sys` dict
 	if sysVal, ok := env["sys"]; ok {
@@ -528,115 +523,6 @@ func evalLineScript(sess *engine.Session, src string) error {
 		return nil
 	})
 }
-
-func runSAH(sec *security.Engine, sessionID string) int {
-	return sah.Handle(true, os.Stdin, os.Stdout, func(command []string) (string, string, int, error) {
-		return sahExecute(sec, sessionID, command)
-	})
-}
-
-func sahExecute(sec *security.Engine, sessionID string, command []string) (string, string, int, error) {
-	if sec == nil || !sec.PolicyLoaded() {
-		return "", "", 0, errors.New("policy_required")
-	}
-	argv0 := command[0]
-	base := argv0
-	if strings.Contains(argv0, "/") {
-		base = filepath.Base(argv0)
-	}
-	switch base {
-	case "adssh", "sah", "adssh-mcp":
-		return "", "", 0, errors.New("command_rejected")
-	}
-	if _, ok := sec.Lookup(argv0); ok {
-		return "", "", 0, errors.New("command_rejected")
-	}
-	if err := sec.AuthorizeCommand(command, sessionID); err != nil {
-		return "", "", 0, errors.New("policy_denied")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	// The child sees an allowlisted environment, never the listener's
-	// ADSSH_* settings or tokens, and its output is capped while it runs so a
-	// policy-allowed `yes` cannot grow memory for the 30 seconds.
-	cmd.Env = sahChildEnv()
-	cmd.WaitDelay = 2 * time.Second
-	stdout := &sahCappedBuffer{limit: sahOutputCap}
-	stderr := &sahCappedBuffer{limit: sahOutputCap}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	runErr := cmd.Run()
-	out := security.RedactSensitiveText(stdout.String())
-	errOut := security.RedactSensitiveText(stderr.String())
-	if runErr == nil {
-		return out, errOut, 0, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) {
-		return out, errOut, exitErr.ExitCode(), nil
-	}
-	return "", "", 0, errors.New("execute_failed")
-}
-
-// localIdentity resolves the account this process runs as and its group
-// names. A resolution failure is an error, not a fallback to $USER.
-func localIdentity() (string, []string, error) {
-	u, err := osuser.Current()
-	if err != nil {
-		return "", nil, fmt.Errorf("resolve local user: %v", err)
-	}
-	if u.Username == "" {
-		return "", nil, errors.New("resolve local user: empty username")
-	}
-	var groups []string
-	if gids, err := u.GroupIds(); err == nil {
-		for _, gid := range gids {
-			if g, err := osuser.LookupGroupId(gid); err == nil {
-				groups = append(groups, g.Name)
-			}
-		}
-	}
-	return u.Username, groups, nil
-}
-
-// sahOutputCap bounds each of stdout and stderr captured from a sah child.
-// The frame response caps again at 4 KiB; this cap exists so the buffer
-// stops growing while the child is still running.
-const sahOutputCap = 64 * 1024
-
-// sahChildEnv is the environment a sah child receives: locale and path only,
-// plus the caller's HOME, USER and LOGNAME. Nothing named ADSSH_* and no
-// token-looking variable crosses into the child.
-func sahChildEnv() []string {
-	env := make([]string, 0, 8)
-	for _, name := range []string{"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TERM"} {
-		if v, ok := os.LookupEnv(name); ok && v != "" {
-			env = append(env, name+"="+v)
-		}
-	}
-	return env
-}
-
-// sahCappedBuffer keeps the first limit bytes written and reports every write
-// as complete so the child is not killed with EPIPE.
-type sahCappedBuffer struct {
-	buf   bytes.Buffer
-	limit int
-}
-
-func (b *sahCappedBuffer) Write(p []byte) (int, error) {
-	n := len(p)
-	if remaining := b.limit - b.buf.Len(); remaining > 0 {
-		if len(p) > remaining {
-			p = p[:remaining]
-		}
-		b.buf.Write(p)
-	}
-	return n, nil
-}
-
-func (b *sahCappedBuffer) String() string { return b.buf.String() }
 
 func printHelp() {
 	fmt.Print(`adssh — programmable DevOps shell
@@ -1075,19 +961,25 @@ func smartReplWrapper(eng *engine.Engine, globals starlark.StringDict, restricte
 	return repl.Start(globals, restricted, historyFile, in, out, errOut)
 }
 
-// directTCPIPPolicyRequest maps a listener direct-tcpip check to one gateway
-// policy decision: the requested name and the address it resolved to are
-// both in the input.
-func directTCPIPPolicyRequest(req sys.GatewayAuthRequest) security.GatewayPolicyRequest {
-	return security.GatewayPolicyRequest{
-		SessionID:  req.SessionID,
-		User:       req.User,
-		Groups:     req.Principals,
-		Action:     "direct-tcpip",
-		TargetHost: req.TargetHost,
-		TargetIP:   req.TargetIP,
-		TargetPort: req.TargetPort,
+// localIdentity resolves the account this process runs as and its group
+// names. A resolution failure is an error, not a fallback to $USER.
+func localIdentity() (string, []string, error) {
+	u, err := osuser.Current()
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve local user: %v", err)
 	}
+	if u.Username == "" {
+		return "", nil, errors.New("resolve local user: empty username")
+	}
+	var groups []string
+	if gids, err := u.GroupIds(); err == nil {
+		for _, gid := range gids {
+			if g, err := osuser.LookupGroupId(gid); err == nil {
+				groups = append(groups, g.Name)
+			}
+		}
+	}
+	return u.Username, groups, nil
 }
 
 // onHangup is sys.OnHangup; tests replace it.

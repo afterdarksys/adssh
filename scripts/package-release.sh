@@ -35,15 +35,45 @@ build_platform() {
   cp "$ROOT/man/adssh.1" "$work/man/"
   cp "$ROOT/completions/adssh.bash" "$ROOT/completions/adssh.zsh" "$work/completions/"
   cp -R "$ROOT/packaging/homebrew" "$work/packaging/"
-  cp -R "$ROOT/policy/default.rego" "$ROOT/policy/examples" "$ROOT/policy/bundles" "$work/policy/"
+  cp -R "$ROOT/policy/default.rego" "$ROOT/policy/examples" "$work/policy/"
 
   tar -C "$DIST" -czf "$DIST/$name.tar.gz" "$name"
   rm -rf "$work"
 }
 
+# Enterprise tarballs (go build -tags ee, plus adsshadm and the policy
+# bundles) are opt-in with ENTERPRISE=1 and need ee/LICENSE: BSL code does
+# not ship without its license.
+build_enterprise() {
+  local goos="$1"
+  local goarch="$2"
+  local name="adssh-enterprise_${VERSION}_${goos}_${goarch}"
+  local work="$DIST/$name"
+  mkdir -p "$work"/{bin,man,policy}
+  (
+    cd "$ROOT"
+    for target in .:adssh ./cmd/adssh-mcp:adssh-mcp ./ee/cmd/adsshadm:adsshadm; do
+      GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 "$GO_BIN" build -tags ee -ldflags "-X main.version=$VERSION" -o "$work/bin/${target#*:}" "${target%%:*}"
+    done
+  )
+  cp "$ROOT/README.md" "$ROOT/CHANGELOG.md" "$ROOT/ee/LICENSE" "$work/"
+  cp "$ROOT/man/adssh.1" "$work/man/"
+  cp -R "$ROOT/policy/default.rego" "$ROOT/policy/examples" "$ROOT/ee/policy/bundles" "$work/policy/"
+  tar -C "$DIST" -czf "$DIST/$name.tar.gz" "$name"
+  rm -rf "$work"
+}
+
+if [[ "${ENTERPRISE:-0}" == "1" && ! -f "$ROOT/ee/LICENSE" ]]; then
+  echo "package-release: ENTERPRISE=1 needs ee/LICENSE" >&2
+  exit 1
+fi
+
 for platform in $PLATFORMS; do
   IFS=/ read -r goos goarch <<<"$platform"
   build_platform "$goos" "$goarch"
+  if [[ "${ENTERPRISE:-0}" == "1" ]]; then
+    build_enterprise "$goos" "$goarch"
+  fi
 done
 
 (
@@ -65,7 +95,7 @@ if command -v dpkg-deb >/dev/null 2>&1 && [[ -f "$DIST/adssh_${VERSION}_linux_am
   cp "$ROOT/man/adssh.1" "$pkg/usr/local/share/man/man1/adssh.1"
   cp "$ROOT/completions/adssh.bash" "$pkg/usr/local/share/bash-completion/completions/adssh"
   cp "$ROOT/completions/adssh.zsh" "$pkg/usr/local/share/zsh/site-functions/_adssh"
-  cp -R "$ROOT/policy/default.rego" "$ROOT/policy/examples" "$ROOT/policy/bundles" "$pkg/usr/local/share/adssh/policy/"
+  cp -R "$ROOT/policy/default.rego" "$ROOT/policy/examples" "$pkg/usr/local/share/adssh/policy/"
   rm -rf "$pkg/adssh_${VERSION}_linux_amd64" "$pkg/adssh_${VERSION}_linux_amd64.tar.gz"
   cat >"$pkg/DEBIAN/control" <<EOF
 Package: adssh
