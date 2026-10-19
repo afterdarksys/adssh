@@ -38,6 +38,7 @@ jobs:
       - name: Import release signing key
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           if [ -n "$GPG_PRIVATE_KEY" ]; then
             printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
@@ -49,6 +50,7 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           GO_BIN: go
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           if [ -n "$GPG_PRIVATE_KEY" ]; then
             export GPG_SIGN=1

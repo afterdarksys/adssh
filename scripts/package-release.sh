@@ -160,7 +160,13 @@ fi
     shasum -a 256 "${artifacts[@]}" > SHA256SUMS
   fi
   if [[ "${GPG_SIGN:-0}" == "1" ]]; then
-    gpg --batch --yes --armor --detach-sign SHA256SUMS
+    # Non-interactive signing: loopback pinentry so a CI runner never tries to open a tty.
+    # GPG_PASSPHRASE is read from the environment only when the key is protected; an unprotected key signs with none.
+    if [[ -n "${GPG_PASSPHRASE:-}" ]]; then
+      printf '%s' "$GPG_PASSPHRASE" | gpg --batch --yes --armor --pinentry-mode loopback --passphrase-fd 0 --detach-sign SHA256SUMS
+    else
+      gpg --batch --yes --armor --pinentry-mode loopback --detach-sign SHA256SUMS
+    fi
   fi
 )
 
