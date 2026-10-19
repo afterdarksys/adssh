@@ -119,8 +119,9 @@ Name: adssh
 Version: ${VERSION#v}
 Release: 1
 Summary: Security-first programmable DevOps shell and governed SSH gateway
-License: Proprietary
+License: Apache-2.0
 BuildArch: x86_64
+Source0: adssh_${VERSION}_linux_amd64.tar.gz
 
 %description
 adssh is a programmable DevOps shell with policy, audit, evidence, secret leases, and SSH gateway controls.
