@@ -30,4 +30,4 @@ The design sentence "computeapi provisions, the machine enrolls through systemap
 
 The SSH listener jail is `docs/guard.md`.
 
-The Homebrew tap is not published. The SLSA workflow has not produced a signed attestation. `package-release.sh` writes `provenance.json` and `slsa-provenance.intoto.json` as local metadata. Those files are not a signed attestation.
+v0.10.0 (2026-10-19) is the first tagged release: `.github/workflows/release.yml` built it, GPG-signed `SHA256SUMS`, and ran `actions/attest-build-provenance@v4` on the tag push, giving it a real, verifiable Sigstore-backed attestation (`gh attestation verify ... --repo afterdarksys/adssh`). `package-release.sh` separately writes `provenance.json` and `slsa-provenance.intoto.json` as local metadata; those two files are not themselves a signed attestation. The Homebrew tap publish is still pending: this repository has a committed `homebrew-formula.json` and `LICENSE` for `afterdarksys/homebrew-tap`'s spec publisher, but the rendered formula has not been pushed to the tap.
