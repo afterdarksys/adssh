@@ -367,21 +367,25 @@ func TestGridReaperExpiresFlightsWhileListening(t *testing.T) {
 		t.Fatal(err)
 	}
 	expireAllFlights(t)
+	// Cancel is published before the agent session is unregistered, so one
+	// poll can see a canceled flight whose session is still registered.
 	deadline := time.Now().Add(3 * time.Second)
+	var status flightResult
 	for time.Now().Before(deadline) {
-		status, err := procGrid.flightStatus(flightID, false)
+		got, err := procGrid.flightStatus(flightID, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if status.Status == flightStatusCanceled {
-			if sys.GetSession("agent-"+agentID) != nil {
-				t.Fatal("reaped agent session is still registered")
-			}
+		status = got
+		if status.Status == flightStatusCanceled && sys.GetSession("agent-"+agentID) == nil {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("reaper did not cancel the expired flight")
+	if status.Status != flightStatusCanceled {
+		t.Fatal("reaper did not cancel the expired flight")
+	}
+	t.Fatal("reaped agent session is still registered")
 }
 
 func TestAgentCheckoutUsesBoundSource(t *testing.T) {
