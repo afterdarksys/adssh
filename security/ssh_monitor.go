@@ -164,8 +164,10 @@ func subcommands(names ...string) map[string]bool {
 // (runs a command and reads secret paths as the listener), repo (reads the
 // listener's shared scratch root without elevation), plugin load
 // (Starlark that executes in the session process).
+// The listener is the only long-lived root process. The parent uid stays. Shells are refused. do is the one-shot credentialed verb.
 var sshListenerRuns = map[string]map[string]bool{
 	"elevate": nil, "why": nil, "??": nil, "agent": nil, "whoami": nil,
+	"do": nil,
 	"evidence": nil,
 	"cm":       subcommands("set", "check", "clear", "status", "providers", "require"),
 	"grant":    subcommands("drop"),

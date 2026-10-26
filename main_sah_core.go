@@ -19,3 +19,9 @@ func sahDisabled() int {
 
 // runSAH refuses sah/1 in the core build. It reads no frame and runs nothing.
 func runSAH(*security.Engine, string) int { return sahDisabled() }
+
+// asofVerifyArgs is a no-op in the core build so the flag loop runs.
+func asofVerifyArgs() (int, bool) { return 0, false }
+
+// runRecover refuses recovery in the core build.
+func runRecover(*security.Engine, string) int { return 2 }

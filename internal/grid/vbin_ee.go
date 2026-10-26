@@ -278,14 +278,15 @@ func flightPlace(ctx context.Context, session *sys.Session, args []string) error
 		})
 	} else {
 		result, err = procGrid.placeFlight(placeOpts{
-			FlightID:   id,
-			AgentID:    agent,
-			WorktreeID: worktree,
-			TTL:        ttl,
-			User:       session.User,
-			Remote:     false,
-			Gate:       gate,
-			Source:     flags["source"],
+			FlightID:       id,
+			AgentID:        agent,
+			WorktreeID:     worktree,
+			TTL:            ttl,
+			User:           session.User,
+			SponsorSession: session.ID,
+			Remote:         false,
+			Gate:           gate,
+			Source:         flags["source"],
 		})
 	}
 	if err != nil {

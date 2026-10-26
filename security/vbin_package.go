@@ -2,6 +2,8 @@ package security
 
 import (
 	"context"
+	"errors"
+
 	"github.com/afterdarksys/adssh/internal/sysmgmt"
 )
 
@@ -16,6 +18,12 @@ func (packageBinary) Description() string {
 func (packageBinary) Usage() string { return "package <install|remove|update|list> [name]" }
 
 func (packageBinary) Run(ctx context.Context, args []string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if mutationBlocked(ctx) {
+		return errors.New("package: refused")
+	}
 	return sysmgmt.RunPackage(ctx, args)
 }
 
