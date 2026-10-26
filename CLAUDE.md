@@ -92,7 +92,13 @@ tamper-evident hash chain (`audit.go`, `audit_chain.go`), the approval gate hook
 (`approval_gate.go`; change management `cm_ee.go` and four-eyes `foureyes_ee.go` are enterprise),
 and session mirroring (`mirror.go`, `mirror_attach.go`; sharing is `mirror_share_ee.go`),
 and the virtual binary registry/dispatch described above. `*_ee.go` files build only with
-`-tags ee` (see `docs/plans/2026-10-16-open-core-split.md`). Rego policies live in
+`-tags ee` (see `docs/plans/2026-10-16-open-core-split.md`). The enterprise admin-plane gate
+rewrites sudo, systemctl, journalctl, and apt onto do, unit, and package before policy. do is
+one-shot and never a root shell. host verifies a signed profile. posture, net, and disk observe.
+Recovery is a fixed menu that refuses to start when the hash chain cannot be written. An agent
+command needs a live human sponsor and a budget. Quarantine fails closed. asof replays the ledger
+offline. A sah exec lease is verified on the host and is necessary, not sufficient. The
+provision → enroll → execute handoff stays not_wired. Rego policies live in
 `policy/` (`default.rego` plus `policy/examples/`) and are evaluated against a `PolicyContext`
 (user, groups, command, args, session) built by `security.BuildPolicyContext`.
 
@@ -122,7 +128,11 @@ defaults), including `ADSSH_RESTRICTED`, `ADSSH_SERVE`, `ADSSH_POLICY`, `ADSSH_E
 (root SSH login, default off), `ADSSH_GUARD*` (SSH listener jail), `ADSSH_ADMIN_KEYS` (named keys
 for `admin serve`), `ADSSH_CONTROLPLANE_URL` (device-login origin), `ADSSH_OIDC_*` (pinned issuer,
 JWKS URL and audience per provider), `ADSSH_CALLBACK_ALLOW_PRIVATE`, `ADSSH_GIT_PROMPT`, `ADSSH_HIGHLIGHT`,
-`ADSSH_PROFILE`, and `ADSSH_RC`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
+`ADSSH_PROFILE`, and `ADSSH_RC`, plus `ADSSH_REFUSE_ALLOW_ALL`, `ADSSH_SAH_REQUIRE_LEASE`,
+`ADSSH_SAH_LEASE_KEYS`, `ADSSH_SAH_ISSUER`, `ADSSH_SAH_HOST_ID`, `ADSSH_SAH_LEASE_STATE`,
+`ADSSH_HOST_PROFILE`, `ADSSH_HOST_PROFILE_PREV`, `ADSSH_HOST_PROFILE_KEYS`,
+`ADSSH_HOST_PROFILE_NARROW`, `ADSSH_HOST_ID`, `ADSSH_QUARANTINE`, `ADSSH_QUARANTINE_FILE`, and
+`ADSSH_AGENT_UNIT`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
 `.adsshrc` files.
 
 ## SAH suite

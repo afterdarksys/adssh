@@ -285,6 +285,13 @@ lease --from aws-sm:prod/deploy-token?region=us-east-1 --as TOKEN -- deploy --to
   `~/.adssh/guard-state.json`. Manage them with `guard` or with
   `GET /v1/guard` and `POST /v1/guard/unban` on the local admin API.
   See `docs/guard.md`.
+- **Admin plane** (enterprise build) — `do` is a one-shot credentialed command and never a root shell.
+  `unit` and `journal` govern systemd and the journal. `sudo`, `systemctl`, `journalctl`, and `apt`
+  are thin aliases onto those verbs or `package`. `host` verifies a signed profile, and a local
+  overlay can only narrow it. `posture`, `net`, and `disk` observe listeners and disk space.
+  `adssh --recover` is a fixed menu and refuses to start when the hash chain cannot be written.
+  An agent command needs a live human sponsor and a budget. Quarantine fails closed. `asof` replays
+  the ledger offline. A sah exec lease is verified on the host and does not by itself authorize a command.
 
 Example policy (allow everything except `rm -rf`):
 ```rego

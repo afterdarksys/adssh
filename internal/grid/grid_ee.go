@@ -238,14 +238,15 @@ type flightResult struct {
 }
 
 type placeOpts struct {
-	FlightID   string
-	AgentID    string
-	WorktreeID string
-	TTL        time.Duration
-	User       string
-	Remote     bool
-	Gate       Gate
-	Source     string
+	FlightID       string
+	AgentID        string
+	WorktreeID     string
+	TTL            time.Duration
+	User           string
+	SponsorSession string
+	Remote         bool
+	Gate           Gate
+	Source         string
 }
 
 type flightClientOpts struct {
@@ -636,6 +637,7 @@ func (st *gridState) cancelFlightLocked(rec *flightRecord, reason string, now ti
 
 func releaseAgentSessions(ids []string) {
 	for _, id := range ids {
+		security.ClearAgentBudget(id)
 		if session := sys.GetSession(id); session != nil {
 			session.ClearManagedAgent()
 		}
@@ -855,6 +857,19 @@ func (st *gridState) placeFlight(opts placeOpts) (flightResult, error) {
 		ExpiresAt: rec.ExpiresAt,
 	})
 	if err := st.registerFlight(rec, session, now); err != nil {
+		return flightResult{}, err
+	}
+	if err := security.BindAgentBudget(rec.SessionID, security.AgentBudget{
+		Allow:    security.AgentAllowlist(),
+		Cmds:     64,
+		Bytes:    1 << 20,
+		Deadline: rec.ExpiresAt,
+		Sponsor:  opts.SponsorSession,
+	}); err != nil {
+		st.mu.Lock()
+		sid := st.cancelFlightLocked(rec, "budget", now)
+		st.mu.Unlock()
+		releaseAgentSessions([]string{sid})
 		return flightResult{}, err
 	}
 	return flightResult{Status: "placed", SessionID: rec.SessionID, FlightID: opts.FlightID}, nil

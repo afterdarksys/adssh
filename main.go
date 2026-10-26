@@ -73,6 +73,10 @@ func main() {
 	var cmdFlag string // -c "expression"
 	doctorFlag := false
 	sahMode := false
+	recoverMode := false
+	if code, handled := asofVerifyArgs(); handled {
+		os.Exit(code)
+	}
 
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -88,6 +92,8 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case arg == "--recover":
+			recoverMode = true
 		case arg == "-r" || arg == "--restricted":
 			cfg.Restricted = true
 		case arg == "-l" || arg == "--login":
@@ -167,6 +173,12 @@ func main() {
 	// sessions opened below — until repl/ and starlarkext/ accept an
 	// *engine.Engine directly.
 	security.SetDefaultEngine(eng.Security())
+	if envTruthy(os.Getenv("ADSSH_REFUSE_ALLOW_ALL")) {
+		if err := eng.Security().RefuseAllowAll(); err != nil {
+			fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
+			os.Exit(2)
+		}
+	}
 	// sessionID here is the SSH login the listener bound. It is not the local REPL id.
 	sys.SetSSHMonitorServer(sshMonitorServer(eng.Security()))
 	guard.SetRecorder(func(ev guard.Event) {
@@ -238,6 +250,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer sys.UnregisterSession(sessionID)
+	if recoverMode {
+		os.Exit(runRecover(eng.Security(), sessionID))
+	}
 
 	// 5. Open the single-user session for the interactive / -c / script paths.
 	// The engine builds its globals fresh; the login/RC profiles are then layered
@@ -524,6 +539,15 @@ func evalLineScript(sess *engine.Session, src string) error {
 	})
 }
 
+func envTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func printHelp() {
 	fmt.Print(`adssh — programmable DevOps shell
 
@@ -542,6 +566,7 @@ OPTIONS
                               ADSSH_AGENT_TOKEN, runs only allowlisted tasks)
       --policy <path>         Load OPA/Rego policy file
       --entitlements <path>   Load RBAC entitlements YAML
+      --recover               Fixed recovery menu (enterprise build)
 
 REPL MODES
   Starlark   aws.ec2.list_instances(region="us-east-1")
@@ -570,6 +595,14 @@ VIRTUAL BINARIES (type 'vbins' for full list)
   ??          Last denial explainer      ??
   cmdgen      Cloud CLI generator        cmdgen aws ec2 create instance_type=t3.micro
   package     Package manager            package install ripgrep
+  do          One-shot credentialed      do --user NAME --reason TEXT -- argv
+  unit        systemd unit               unit status NAME
+  journal     Structured journal         journal from NAME
+  host        Signed host profile        host drift
+  posture     Listener posture           posture
+  net         Listening sockets          net
+  disk        Disk space                 disk
+  asof        Offline chain replay       asof --chain PATH --key PATH --seq N
   darkscan    Malware scanner            darkscan /tmp/suspect
   grant       Role escalation            grant request admin
 
@@ -607,6 +640,20 @@ ENVIRONMENT VARIABLES
   ADSSH_LOG_FORMAT        Listener log format: text|json (default text)
   ADSSH_SNOOP_NOTIFY      Snoop attach notice default for support (on|off; default on)
   ADSSH_SNOOP_NOTIFY_LOCK Force the snoop notice over policy (on; default off)
+  ADSSH_REFUSE_ALLOW_ALL  Refuse startup when policy allows every command (1/true/yes; default off)
+  ADSSH_SAH_REQUIRE_LEASE Require a signed exec lease for sah execute (1/true/yes; default off)
+  ADSSH_SAH_LEASE_KEYS    Owner-only Ed25519 public keys for sah exec leases
+  ADSSH_SAH_ISSUER        Expected sah exec lease issuer
+  ADSSH_SAH_HOST_ID       Expected sah exec lease host id
+  ADSSH_SAH_LEASE_STATE   Directory of consumed sah exec lease jti values
+  ADSSH_HOST_PROFILE      Installed signed host profile
+  ADSSH_HOST_PROFILE_PREV Previous signed host profile
+  ADSSH_HOST_PROFILE_KEYS Owner-only Ed25519 public keys for the host profile
+  ADSSH_HOST_PROFILE_NARROW Unsigned narrow overlay
+  ADSSH_HOST_ID           Host id a profile must name
+  ADSSH_QUARANTINE        Quarantine switch (1/true/yes; default off)
+  ADSSH_QUARANTINE_FILE   Quarantine marker file
+  ADSSH_AGENT_UNIT        Unit name recovery and quarantine may restart
 
 Run 'adssh --init' to create a starter config in ~/.adssh/
 `)

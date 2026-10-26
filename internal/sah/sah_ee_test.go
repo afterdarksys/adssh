@@ -23,7 +23,7 @@ func TestHandleDisabledDoesNotReadOrExec(t *testing.T) {
 	in := &readFlag{}
 	called := false
 	var out bytes.Buffer
-	code := Handle(false, in, &out, func(command []string) (string, string, int, error) {
+	code := Handle(false, in, &out, func(command []string, leaseID string) (string, string, int, error) {
 		called = true
 		return "ran", "", 0, nil
 	})
@@ -47,7 +47,7 @@ func TestHandleDisabledDoesNotReadOrExec(t *testing.T) {
 func TestHandleHelloOnDoesNotExec(t *testing.T) {
 	called := false
 	var out bytes.Buffer
-	code := Handle(true, strings.NewReader("{\"v\":1,\"id\":\"hello1\",\"type\":\"hello\",\"lease_id\":\"lease-abc\"}\n"), &out, func(command []string) (string, string, int, error) {
+	code := Handle(true, strings.NewReader("{\"v\":1,\"id\":\"hello1\",\"type\":\"hello\",\"lease_id\":\"lease-abc\"}\n"), &out, func(command []string, leaseID string) (string, string, int, error) {
 		called = true
 		return "", "", 0, nil
 	})
@@ -67,9 +67,11 @@ func TestHandleHelloOnDoesNotExec(t *testing.T) {
 
 func TestHandleExecuteOn(t *testing.T) {
 	var got []string
+	var gotLease string
 	var out bytes.Buffer
-	code := Handle(true, strings.NewReader("{\"v\":1,\"id\":\"ex1\",\"type\":\"execute\",\"command\":[\"/bin/echo\",\"hi\"],\"lease_id\":\"lease-nope\"}\n"), &out, func(command []string) (string, string, int, error) {
+	code := Handle(true, strings.NewReader("{\"v\":1,\"id\":\"ex1\",\"type\":\"execute\",\"command\":[\"/bin/echo\",\"hi\"],\"lease_id\":\"lease-nope\"}\n"), &out, func(command []string, leaseID string) (string, string, int, error) {
 		got = append([]string{}, command...)
+		gotLease = leaseID
 		return "hi\n", "", 0, nil
 	})
 	if code != 0 {
@@ -77,6 +79,9 @@ func TestHandleExecuteOn(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "/bin/echo" || got[1] != "hi" {
 		t.Fatalf("exec args %#v", got)
+	}
+	if gotLease != "lease-nope" {
+		t.Fatalf("lease id %q", gotLease)
 	}
 	body := out.String()
 	if !strings.Contains(body, `"handoff":"not_wired"`) || !strings.Contains(body, `"exit_code":0`) {
@@ -108,7 +113,7 @@ func TestHandleRejectsBeforeExec(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
 			var out bytes.Buffer
-			code := Handle(true, strings.NewReader(tc.line+"\n"), &out, func(command []string) (string, string, int, error) {
+			code := Handle(true, strings.NewReader(tc.line+"\n"), &out, func(command []string, leaseID string) (string, string, int, error) {
 				called = true
 				return "", "", 0, nil
 			})
@@ -135,7 +140,7 @@ func TestHandleExecuteUnavailableAndUnsafeError(t *testing.T) {
 		t.Fatalf("nil exec: %d %s", code, out.String())
 	}
 	out.Reset()
-	code = Handle(true, strings.NewReader(`{"v":1,"id":"a","type":"execute","command":["/bin/echo"]}`+"\n"), &out, func(command []string) (string, string, int, error) {
+	code = Handle(true, strings.NewReader(`{"v":1,"id":"a","type":"execute","command":["/bin/echo"]}`+"\n"), &out, func(command []string, leaseID string) (string, string, int, error) {
 		return "secret-token", "boom raw", 7, errors.New("open /etc/shadow: permission denied")
 	})
 	if code != 2 {
@@ -152,7 +157,7 @@ func TestHandleExecuteUnavailableAndUnsafeError(t *testing.T) {
 
 func TestHandleFixedErrorAndOutputCap(t *testing.T) {
 	var out bytes.Buffer
-	code := Handle(true, strings.NewReader(`{"v":1,"id":"a","type":"execute","command":["/bin/echo"]}`+"\n"), &out, func(command []string) (string, string, int, error) {
+	code := Handle(true, strings.NewReader(`{"v":1,"id":"a","type":"execute","command":["/bin/echo"]}`+"\n"), &out, func(command []string, leaseID string) (string, string, int, error) {
 		return "", "", 0, errors.New("policy_required")
 	})
 	if code != 2 || !strings.Contains(out.String(), `"error":"policy_required"`) {
@@ -160,7 +165,7 @@ func TestHandleFixedErrorAndOutputCap(t *testing.T) {
 	}
 	out.Reset()
 	big := strings.Repeat("A", maxOutput+50)
-	code = Handle(true, strings.NewReader(`{"v":1,"id":"a","type":"execute","command":["/bin/echo"]}`+"\n"), &out, func(command []string) (string, string, int, error) {
+	code = Handle(true, strings.NewReader(`{"v":1,"id":"a","type":"execute","command":["/bin/echo"]}`+"\n"), &out, func(command []string, leaseID string) (string, string, int, error) {
 		return big, big, 3, nil
 	})
 	if code != 0 {
@@ -178,7 +183,7 @@ func TestHandleTooLargeDoesNotExec(t *testing.T) {
 	called := false
 	var out bytes.Buffer
 	payload := strings.Repeat("x", maxFrame+10) + "\n"
-	code := Handle(true, strings.NewReader(payload), &out, func(command []string) (string, string, int, error) {
+	code := Handle(true, strings.NewReader(payload), &out, func(command []string, leaseID string) (string, string, int, error) {
 		called = true
 		return "", "", 0, nil
 	})

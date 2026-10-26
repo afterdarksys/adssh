@@ -33,7 +33,7 @@ const (
 // Exec runs an already-validated command without a shell. stdout and stderr
 // are capped again by this package. A returned error is published only when
 // its text is a fixed code matching ^[a-z0-9_]{1,64}$.
-type Exec func(command []string) (stdout, stderr string, exitCode int, err error)
+type Exec func(command []string, leaseID string) (stdout, stderr string, exitCode int, err error)
 
 type request struct {
 	V       int      `json:"v"`
@@ -142,7 +142,7 @@ func handleExecute(out io.Writer, req request, exec Exec) int {
 		writeResponse(out, fail(req.ID, "execute", "execute_unavailable"))
 		return 2
 	}
-	stdout, stderr, exitCode, err := exec(req.Command)
+	stdout, stderr, exitCode, err := exec(req.Command, req.LeaseID)
 	if err != nil {
 		writeResponse(out, fail(req.ID, "execute", safeCode(err)))
 		return 2

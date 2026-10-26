@@ -228,6 +228,7 @@ func (e *Engine) gateCommandContext(ctx context.Context, restricted bool, args [
 		return joinDeny("adssh: access denied: session identity unknown", auditErr)
 	}
 	pctx.Lease = extra.Lease
+	pctx.ExecLease = extra.ExecLease
 	// The session cloud-agent claim wins. extra.Agent fills in only when the
 	// session did not already bind one, so a caller cannot overwrite it.
 	if pctx.Agent == nil {
@@ -281,6 +282,15 @@ func (e *Engine) gateCommandContext(ctx context.Context, restricted bool, args [
 	if err := currentApprovalGate().Check(ctx, e, sessionID, args); err != nil {
 		e.rememberDeniedCommand(sessionID, args)
 		return err
+	}
+
+	// Admin plane: quarantine allowlist, raw alias names, agent budget.
+	// A nil hook allows. The hook does not audit; a denial is recorded here,
+	// and a failed record still denies.
+	if err := currentAdminPlaneGate(e, ctx, sessionID, args); err != nil {
+		e.rememberDeniedCommand(sessionID, args)
+		auditErr := e.LogEvent("ADMIN_PLANE_DENIED: " + err.Error())
+		return joinDeny(err.Error(), auditErr)
 	}
 
 	// 0c. Restricted-mode command-name checks. These must also apply to builtins
@@ -356,15 +366,25 @@ func (e *Engine) callHandler(sess *SessionState) interp.CallHandlerFunc {
 		if len(args) == 0 {
 			return args, nil
 		}
+		rewritten, note, rerr := currentAdminPlaneRewrite(args)
+		if rerr != nil {
+			if logErr := e.LogEvent("ALIAS_REFUSED " + rerr.Error()); logErr != nil {
+				return nil, joinDeny(rerr.Error(), logErr)
+			}
+			return nil, rerr
+		}
+		args = rewritten
 		// In an SSH session process a listener-run vbin is not authorized
 		// here: the exec handler sends it as a Run, which the listener
-		// gates. Nothing runs locally under that name.
+		// gates. Nothing runs locally under that name. The alias note waits
+		// until a gate has allowed the command.
 		if RemoteGateProcess() && sshRunsInListener(args) {
 			return e.shadowBuiltinVBin(args), nil
 		}
 		if err := e.gateCommand(sess.Restricted, args, sess.gateSessionID()); err != nil {
 			return nil, err
 		}
+		printAliasNote(ctx, note)
 		return e.shadowBuiltinVBin(args), nil
 	}
 }

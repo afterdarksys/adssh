@@ -30,6 +30,9 @@ type PolicyContext struct {
 	Elevation    *ElevationClaim `json:"elevation,omitempty"`
 	Gateway      *GatewayClaim   `json:"gateway,omitempty"`
 	Lease        *LeaseClaim     `json:"lease,omitempty"`
+	// ExecLease is a verified exec or recovery lease. It is not Lease.
+	// Policy sees it only as input.exec_lease.
+	ExecLease    *ExecLeaseClaim `json:"exec_lease,omitempty"`
 	Agent        *AgentClaim     `json:"agent,omitempty"`
 	Snoop        *SnoopClaim     `json:"snoop,omitempty"`
 	// IdentityUnknown is set when a non-empty session ID resolves to no bound
@@ -64,6 +67,16 @@ type LeaseClaim struct {
 	Delivery    string   `json:"delivery"`
 }
 
+// ExecLeaseClaim is the verified subject of an exec or recovery lease.
+// Sub, host, jti, and exp are the fields policy may read. The token itself
+// is not stored here.
+type ExecLeaseClaim struct {
+	Sub  string `json:"sub"`
+	Host string `json:"host"`
+	JTI  string `json:"jti"`
+	Exp  int64  `json:"exp"`
+}
+
 type AgentClaim struct {
 	ID        string `json:"id"`
 	Kind      string `json:"kind"`
@@ -81,8 +94,9 @@ type SnoopClaim struct {
 }
 
 type PolicyContextExtra struct {
-	Lease *LeaseClaim
-	Agent *AgentClaim
+	Lease     *LeaseClaim
+	ExecLease *ExecLeaseClaim
+	Agent     *AgentClaim
 }
 
 // LoadPolicy reads a Rego file and prepares the OPA query.
@@ -210,6 +224,14 @@ func (e *Engine) EvaluatePolicyDecision(pctx PolicyContext) (PolicyDecision, err
 			"ttl_seconds": pctx.Lease.TTLSeconds,
 			"command":     pctx.Lease.Command,
 			"delivery":    pctx.Lease.Delivery,
+		}
+	}
+	if pctx.ExecLease != nil {
+		input["exec_lease"] = map[string]interface{}{
+			"sub":  pctx.ExecLease.Sub,
+			"host": pctx.ExecLease.Host,
+			"jti":  pctx.ExecLease.JTI,
+			"exp":  pctx.ExecLease.Exp,
 		}
 	}
 	if pctx.Agent != nil {

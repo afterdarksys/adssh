@@ -441,6 +441,33 @@ func AppendChain(entry ChainEntry) error {
 	return defaultEngine.AppendChain(entry)
 }
 
+// ChainEnabled reports whether this engine has a ledger path and a
+// 32-byte HMAC key. Recovery refuses to start when it is false.
+func (e *Engine) ChainEnabled() bool {
+	if e == nil {
+		return false
+	}
+	e.chainMu.Lock()
+	defer e.chainMu.Unlock()
+	return e.chainPath != "" && len(e.chainKey) == 32
+}
+
+// chainMaterial copies the ledger path and HMAC key. The caller zeros the
+// copy after use. ok is false when the chain is not enabled.
+func (e *Engine) chainMaterial() (path string, key []byte, ok bool) {
+	if e == nil {
+		return "", nil, false
+	}
+	e.chainMu.Lock()
+	defer e.chainMu.Unlock()
+	if e.chainPath == "" || len(e.chainKey) != 32 {
+		return "", nil, false
+	}
+	key = make([]byte, len(e.chainKey))
+	copy(key, e.chainKey)
+	return e.chainPath, key, true
+}
+
 // VerifyChain reads every line of the ledger and recomputes each hash.
 // Returns ok=true if the chain is intact, otherwise ok=false with the
 // sequence number of the first broken link.

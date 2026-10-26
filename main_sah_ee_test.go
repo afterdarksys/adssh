@@ -11,11 +11,12 @@ import (
 )
 
 func TestSAHExecuteRequiresPolicyAndRejectsVirtual(t *testing.T) {
+	t.Setenv("ADSSH_SAH_REQUIRE_LEASE", "")
 	eng, err := engine.New(engine.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err = sahExecute(eng.Security(), "sess", []string{"/bin/echo", "hi"})
+	_, _, _, err = sahExecute(eng.Security(), "sess", []string{"/bin/echo", "hi"}, "")
 	if err == nil || err.Error() != "policy_required" {
 		t.Fatalf("no policy: %v", err)
 	}
@@ -35,15 +36,15 @@ allow { input.command == "/bin/echo" }
 		t.Fatal("policy not loaded")
 	}
 	bindTestSession(t, eng.Security())
-	_, _, _, err = sahExecute(eng.Security(), "sess", []string{"lease", "--from", "env:X"})
+	_, _, _, err = sahExecute(eng.Security(), "sess", []string{"lease", "--from", "env:X"}, "")
 	if err == nil || err.Error() != "command_rejected" {
 		t.Fatalf("vbin: %v", err)
 	}
-	_, _, _, err = sahExecute(eng.Security(), "sess", []string{"/bin/not-allowed"})
+	_, _, _, err = sahExecute(eng.Security(), "sess", []string{"/bin/not-allowed"}, "")
 	if err == nil || err.Error() != "policy_denied" {
 		t.Fatalf("deny: %v", err)
 	}
-	stdout, stderr, code, err := sahExecute(eng.Security(), "sess", []string{"/bin/echo", "hi"})
+	stdout, stderr, code, err := sahExecute(eng.Security(), "sess", []string{"/bin/echo", "hi"}, "")
 	if err != nil || code != 0 || strings.TrimSpace(stdout) != "hi" {
 		t.Fatalf("echo: code %d err %v stdout %q stderr %q", code, err, stdout, stderr)
 	}
@@ -77,11 +78,12 @@ func bindTestSession(t *testing.T, sec *security.Engine) {
 
 // The sah child must not see the listener's secrets or any ADSSH_* setting.
 func TestSAHExecuteChildEnvIsAllowlisted(t *testing.T) {
+	t.Setenv("ADSSH_SAH_REQUIRE_LEASE", "")
 	t.Setenv("ADSSH_AUDIT_TOKEN", "listener-secret")
 	t.Setenv("ADSSH_POLICY", "/nonexistent/policy.rego")
 	t.Setenv("SOME_API_KEY", "k")
 	t.Setenv("LANG", "C.UTF-8")
-	stdout, _, code, err := sahExecute(allowShEngine(t), "sess", []string{"/bin/sh", "-c", "env"})
+	stdout, _, code, err := sahExecute(allowShEngine(t), "sess", []string{"/bin/sh", "-c", "env"}, "")
 	if err != nil || code != 0 {
 		t.Fatalf("env: code %d err %v", code, err)
 	}
@@ -97,8 +99,9 @@ func TestSAHExecuteChildEnvIsAllowlisted(t *testing.T) {
 
 // Output is capped while the child runs, not after it has all been buffered.
 func TestSAHExecuteCapsOutputWhileRunning(t *testing.T) {
+	t.Setenv("ADSSH_SAH_REQUIRE_LEASE", "")
 	stdout, stderr, code, err := sahExecute(allowShEngine(t), "sess",
-		[]string{"/bin/sh", "-c", "head -c 5000000 /dev/zero | tr '\\0' x; head -c 100000 /dev/zero | tr '\\0' y >&2"})
+		[]string{"/bin/sh", "-c", "head -c 5000000 /dev/zero | tr '\\0' x; head -c 100000 /dev/zero | tr '\\0' y >&2"}, "")
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v", code, err)
 	}
