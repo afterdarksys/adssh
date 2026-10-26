@@ -32,9 +32,9 @@ type PolicyContext struct {
 	Lease        *LeaseClaim     `json:"lease,omitempty"`
 	// ExecLease is a verified exec or recovery lease. It is not Lease.
 	// Policy sees it only as input.exec_lease.
-	ExecLease    *ExecLeaseClaim `json:"exec_lease,omitempty"`
-	Agent        *AgentClaim     `json:"agent,omitempty"`
-	Snoop        *SnoopClaim     `json:"snoop,omitempty"`
+	ExecLease *ExecLeaseClaim `json:"exec_lease,omitempty"`
+	Agent     *AgentClaim     `json:"agent,omitempty"`
+	Snoop     *SnoopClaim     `json:"snoop,omitempty"`
 	// IdentityUnknown is set when a non-empty session ID resolves to no bound
 	// or registered principal. User is then empty and the gate denies before
 	// policy runs. It is never sent to Rego.

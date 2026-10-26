@@ -167,7 +167,7 @@ func subcommands(names ...string) map[string]bool {
 // The listener is the only long-lived root process. The parent uid stays. Shells are refused. do is the one-shot credentialed verb.
 var sshListenerRuns = map[string]map[string]bool{
 	"elevate": nil, "why": nil, "??": nil, "agent": nil, "whoami": nil,
-	"do": nil,
+	"do":       nil,
 	"evidence": nil,
 	"cm":       subcommands("set", "check", "clear", "status", "providers", "require"),
 	"grant":    subcommands("drop"),
