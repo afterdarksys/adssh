@@ -43,6 +43,9 @@ func init() {
 }
 
 func main() {
+	if envTruthy(os.Getenv("ADSSH_SASH_EMERGENCY")) {
+		os.Exit(runSashEmergency(os.Args[1:]))
+	}
 	sys.MaybeRunSessionChild()
 	if err := sys.ConfigureHostFromEnv(); err != nil {
 		fmt.Fprintf(os.Stderr, "adssh: %v\n", err)
