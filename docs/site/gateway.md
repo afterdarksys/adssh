@@ -1,5 +1,8 @@
 # Gateway
 
+For administrator-managed per-user destination lists and the interactive
+`proxy host port` command, see [Per-user internal access](../proxy.md).
+
 `gateway` is a policy-audited local TCP forwarder. It is not a fleet bastion product and it does not enroll a machine.
 
 ```text

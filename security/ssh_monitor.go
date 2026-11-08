@@ -149,6 +149,8 @@ func subcommands(names ...string) map[string]bool {
 //	guard: status (--json allowed). Not unban, reload, config, list.
 //	gateway: list (own gateways only), stop (own only; gatewayStop also
 //	  checks the owner). Not start: a listening socket in the listener.
+//	proxy: list, _resolve, _result (the bound user's target authorization and
+//	  child-reported outcome). Interactive I/O stays in the session child.
 //	evidence: own session only. --session must name the bound session;
 //	  without it the listener adds it. Not --out (host path).
 //	identity: status. Device login, OIDC import, and ssh-ca read or write
@@ -174,6 +176,7 @@ var sshListenerRuns = map[string]map[string]bool{
 	"4eyes":    subcommands("approve", "deny", "pending", "list"),
 	"guard":    subcommands("status"),
 	"gateway":  subcommands("list", "stop"),
+	"proxy":    subcommands("list", "_resolve", "_result"),
 	"identity": subcommands("status"),
 	"grid":     subcommands("status"),
 	"flight":   subcommands("rehearse", "cancel", "status"),
@@ -186,6 +189,9 @@ var sshListenerRuns = map[string]map[string]bool{
 func sshRunsInListener(args []string) bool {
 	if len(args) == 0 {
 		return false
+	}
+	if args[0] == "proxy" {
+		return len(args) > 1 && (args[1] == "list" || args[1] == "_resolve" || args[1] == "_result")
 	}
 	if args[0] == "mirror" {
 		return len(args) >= 2 && sshListenerRuns["mirror"][args[1]]

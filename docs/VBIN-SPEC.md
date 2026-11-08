@@ -225,6 +225,7 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `grant` | `security/grants.go` | Temporary role escalation |
 | `elevate` | `security/vbin_elevate.go` | Time-boxed break-glass elevation with reason and audit trail |
 | `gateway` | `security/vbin_gateway.go` | Policy-audited local TCP gateway for SSH and internal services |
+| `proxy` | `security/vbin_proxy_ee.go` | Enterprise per-user SSH/TCP destinations; administrator-owned grants, pinned addresses and SSH host keys. See `docs/proxy.md`. |
 | `4eyes` | `security/vbin_foureyes.go` | Four-eyes approval workflow |
 | `cm` | `security/vbin_cm.go` | Change-management workflow |
 | `pick` | `security/vbin_pick.go` | Charm-powered fuzzy selector for arguments, stdin lines, and JSON choices |

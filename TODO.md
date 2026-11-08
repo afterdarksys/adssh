@@ -5,6 +5,13 @@ control, with a programmable and AI-native operations shell.
 
 ## Recently Completed
 
+- Per-user internal access (`proxy list`, `proxy host port`, and redirected
+  `proxy tcp host port`) in the enterprise build. `ADSSH_PROXY_CONFIG` provides
+  administrator-owned destination grants and also constrains native SSH
+  forwarding. SSH uses pinned Ed25519 host keys and the user's own key.
+  Configuration and confinement boundaries: `docs/proxy.md`. This is local
+  implementation, not a deployment or a 10,000-session capacity validation.
+
 - Open core wave 2 (2026-10-18, branch `ee/wave2`, uncommitted): four-eyes, change management, evidence export, elevate, grants and leases are `*_ee.go` files built only with `-tags ee`. The core keeps the four-eyes rules reader and the CM pattern matcher and refuses any command they cover, because the core build cannot approve it (`security/approval_gate.go`); the enterprise gate installs through `security.SetApprovalGate`. Enterprise command names stay reserved in core and never fall through to `PATH`. An unreadable four-eyes rules file now refuses every command in both builds (it used to read as no rules).
 - Open core wave 3 (2026-10-18, same branch): identity (OIDC import, device login, SSH CA), gateways and SSH `direct-tcpip`, mirror sharing and supervision of other users' sessions, `internal/grid`, `internal/sah` and the policy bundles (`ee/policy/bundles`) are enterprise. Core `mirror view/console` attaches to the caller's own sessions only; core refuses `direct-tcpip` and `adssh sah`. `scripts/package-release.sh` leaves the bundles out of the core artifacts and builds `adssh-enterprise_*` tarballs only with `ENTERPRISE=1` and an `ee/LICENSE`. `docs/EMBEDDING.md` §7 lists what moved and the hook points.
 - `sys.parallel` copies the session globals under the session's globals lock (`SessionState.ReadGlobals`); the shell builtins that write them take the write side. Race test `TestParallelIsolatedCopyRacesNoBackgroundWriter`. (2026-10-18)

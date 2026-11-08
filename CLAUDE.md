@@ -135,6 +135,12 @@ JWKS URL and audience per provider), `ADSSH_CALLBACK_ALLOW_PRIVATE`, `ADSSH_GIT_
 `ADSSH_AGENT_UNIT`. `adssh --init` scaffolds `~/.adssh/` with starter `authorized_keys`, `default.rego`, and
 `.adsshrc` files.
 
+Enterprise `proxy host port` and `proxy tcp host port` use the listener's
+`ADSSH_PROXY_CONFIG` per-user destination list. It also constrains native SSH
+forwarding when configured. `proxy list`, `_resolve`, and `_result` run in the
+listener over the bound monitor; interactive SSH and TCP I/O run in the dropped
+session child. See `docs/proxy.md` for configuration and confinement boundaries.
+
 ## SAH suite
 
 **sah** means Service Automation Hub. The hub encompasses the platform and the suite of utilities. This repository stays `adssh`.

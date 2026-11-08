@@ -74,6 +74,10 @@ func (e *Engine) AuthorizeGateway(req GatewayPolicyRequest) error {
 		auditErr := e.LogPolicyDecision("", cmd, false, "adssh: session identity unknown")
 		return joinDeny("adssh: gateway access denied: session identity unknown", auditErr)
 	}
+	if err := checkProxyGateway(pctx.User, req); err != nil {
+		auditErr := e.LogPolicyDecision(pctx.User, cmd, false, err.Error())
+		return joinDeny(err.Error(), auditErr)
+	}
 	allowed, reason, policyErr := e.EvaluatePolicy(pctx)
 	if policyErr != nil {
 		e.rememberDeniedCommand(req.SessionID, []string{"gateway", req.Action, claim.Target})

@@ -41,6 +41,7 @@ var enterpriseOnlyBinaries = []enterpriseOnlyBinary{
 	{"lease", "Secret leases"},
 	{"identity", "OIDC import, device login and SSH CA"},
 	{"gateway", "Governed TCP gateways"},
+	{"proxy", "Per-user internal destination access"},
 	{"grid", "sah-grid membership"},
 	{"flight", "Grid flights"},
 	{"agent", "Grid agents"},
