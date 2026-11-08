@@ -331,3 +331,25 @@ func TestInterceptor_CustomCommand_Invoked(t *testing.T) {
 		t.Errorf("custom command fell through to exec: %v", rec.calls)
 	}
 }
+
+func TestInterceptor_RefusesTypedProxyInternalSubcommands(t *testing.T) {
+	resetPolicy()
+	t.Cleanup(resetPolicy)
+	if err := LoadPolicy(writePolicy(t, "package adssh.authz\ndefault allow = true\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{
+		"proxy _result app 22 completed",
+		"proxy _resolve app 22",
+		"command proxy _result app 22 failed",
+		"exec proxy _resolve app 22",
+	} {
+		_, _, runErr, rec := runShell(t, false, starlark.StringDict{}, line)
+		if runErr == nil || !strings.Contains(runErr.Error(), "internal subcommand") {
+			t.Errorf("%q: got %v", line, runErr)
+		}
+		if len(rec.calls) != 0 {
+			t.Errorf("%q fell through to exec: %v", line, rec.calls)
+		}
+	}
+}

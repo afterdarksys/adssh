@@ -374,6 +374,9 @@ func (e *Engine) callHandler(sess *SessionState) interp.CallHandlerFunc {
 			return nil, rerr
 		}
 		args = rewritten
+		if err := refuseTypedInternal(args); err != nil {
+			return nil, err
+		}
 		// In an SSH session process a listener-run vbin is not authorized
 		// here: the exec handler sends it as a Run, which the listener
 		// gates. Nothing runs locally under that name. The alias note waits
@@ -632,6 +635,10 @@ func (e *Engine) execHandlerSession(sess *SessionState) func(next interp.ExecHan
 				return next(ctx, args)
 			}
 			args = unshadowBuiltinVBin(args)
+			// `command` and `exec` reach this handler without callHandler.
+			if err := refuseTypedInternal(args); err != nil {
+				return err
+			}
 			// Assignment form of set returns before HandlerCtx. A direct call
 			// has no interpreter context, and a session assignment must not
 			// reach os.Setenv.

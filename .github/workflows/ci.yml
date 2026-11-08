@@ -80,6 +80,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # internal/sashparent builds ../sash/cmd/sash. Pinned so a sash push
+      # cannot change what this commit tests.
+      - name: Check out sash next to adssh
+        run: |
+          git clone --quiet https://github.com/afterdarksys/sash.git ../sash
+          git -C ../sash checkout --quiet b43dc4959d21933b1729dc3f6eb4692439e7daf0
       - name: Run tests with race detector and coverage
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
       - name: Upload coverage artifact

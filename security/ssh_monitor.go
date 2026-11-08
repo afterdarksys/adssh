@@ -184,6 +184,17 @@ var sshListenerRuns = map[string]map[string]bool{
 	"mirror":   subcommands("kill", "share", "unshare"),
 }
 
+// refuseTypedInternal refuses the listener-only proxy subcommands (_resolve,
+// _result) when they come from shell input or a governed child command (par,
+// runbook, lease). The proxy vbin sends them itself; typed, they could record
+// an outcome for a connection that was never made.
+func refuseTypedInternal(args []string) error {
+	if len(args) > 1 && args[0] == "proxy" && strings.HasPrefix(args[1], "_") {
+		return errors.New("proxy: internal subcommand")
+	}
+	return nil
+}
+
 // sshRunsInListener reports whether the session process sends args to the
 // listener as a Run. The listener still checks the subcommand.
 func sshRunsInListener(args []string) bool {

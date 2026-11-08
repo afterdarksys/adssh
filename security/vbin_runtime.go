@@ -38,6 +38,9 @@ func (e *Engine) runGovernedCommand(ctx context.Context, sessionID string, comma
 	if len(command.Args) == 0 || command.Args[0] == "" {
 		return commandResult{}, fmt.Errorf("adssh: child command is empty")
 	}
+	if err := refuseTypedInternal(command.Args); err != nil {
+		return commandResult{}, err
+	}
 	if !command.Preauthorized {
 		if err := e.gateCommandWithExtra(e.restricted, command.Args, sessionID, PolicyContextExtra{
 			Lease: command.Lease,

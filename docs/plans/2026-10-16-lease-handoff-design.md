@@ -26,7 +26,7 @@ this time" that adssh can verify on its own. That statement is the lease.
 ## Lease format (proposal for systemapi to issue)
 
 A compact signed token, Ed25519 (SECURITY-RULES rule 4), issued by systemapi, carried in the
-`execute` frame as `lease`:
+`execute` frame as `lease` (a `v:2` frame; see Decisions; the token's own `"v": 1` is separate):
 
 ```json
 {
@@ -36,8 +36,7 @@ A compact signed token, Ed25519 (SECURITY-RULES rule 4), issued by systemapi, ca
   "sub": "user:alice",                 // principal, as systemapi names it
   "host": "h_01J9...",                 // systemapi host_id of the machine this runs on
   "scope": "exec",
-  "cmd": ["systemctl", "restart", "nginx"],   // exact argv, or
-  "cmd_prefix": ["kubectl", "get"],           // an allowed prefix (one of the two)
+  "cmd": ["systemctl", "restart", "nginx"],   // exact argv; cmd_prefix is rejected (see Decisions)
   "iat": 1760600000, "nbf": 1760600000, "exp": 1760600300,   // ≤ 300 s lifetime
   "jti": "L-7c2e..."                   // single use
 }
@@ -54,7 +53,7 @@ JWT but with the algorithm pinned at verification, not read from the header.
 3. `iss` equals the configured issuer; `host` equals this machine's enrolled `host_id`
    (`ADSSH_SAH_HOST_ID`, written by the enrollment step); `nbf ≤ now < exp`; `exp − iat ≤ 300`.
 4. `jti` not seen before: a small on-disk set under the state dir, pruned at `exp`.
-5. `cmd` equals the frame's `command[]` exactly, or `cmd_prefix` is a prefix of it.
+5. `cmd` equals the frame's `command[]` exactly. A non-empty `cmd_prefix` is rejected.
 6. Then the existing path: policy (`input.lease` carries `sub`, `host`, `jti`, `exp`),
    change management, four-eyes, audit. The lease authorizes nothing by itself; it is a
    necessary condition the policy can also read.
@@ -82,8 +81,21 @@ one (`internal/sah` + root package); systemapi issues a lease only for an enroll
 principal with the scope; computeapi's provisioning job emits the enrollment token and the
 machine appears in systemapi.
 
-## Decisions needed from the operator
+## Decisions
 
-- Lease carrier: a new field on the `sah/1` frame (above) or a `sah/2` frame version.
+Settled by the operator on 2026-10-26:
+
+- Lease carrier: `sah/2`, a separate frame version. `sah/1` rejects an unknown field as
+  `bad_frame`, so a new field on `sah/1` cannot carry the lease. The shape is a version gate:
+  `v:1` stays today's path (hello may still answer); `v:2` is a separate struct whose execute
+  requires `lease`; any other `v` is `version_rejected`. Callers (`sahconnect`, the systemapi
+  agent, tests), the adssh callee and both Wired joins move in one change.
+- Client repair: none. No Postfix-style FIXUP, cleanup or rewrite. Filling a missing lease,
+  copying `lease_id` into `lease`, stripping unknown fields or coercing `v:1` into `v:2` would
+  manufacture authorization.
+- Command shape: exact `cmd`. A non-empty `cmd_prefix` stays rejected; a prefix would authorize
+  a shape the issuer did not name.
+
+Still open:
+
 - Key distribution at enrollment vs. a pinned long-lived systemapi key baked into images.
-- Whether `cmd_prefix` is allowed at all in the first version (exact `cmd` only is safer).

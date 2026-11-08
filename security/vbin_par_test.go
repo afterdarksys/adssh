@@ -64,3 +64,21 @@ func TestParRejectsUnsafeJobCount(t *testing.T) {
 		t.Fatalf("unsafe job count accepted: %v", err)
 	}
 }
+
+func TestParRefusesProxyInternalSubcommands(t *testing.T) {
+	eng, err := NewEngine(EngineConfig{PolicySource: []byte(`
+package adssh
+authz := {"allow": true}
+`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"par", "--jobs", "1", "app", "--", "proxy", "_resolve", "{}", "22"},
+		{"par", "--jobs", "1", "app", "--", "proxy", "_result", "{}", "22", "completed"},
+	} {
+		if _, err := runParVBin(t, eng, args, ""); err == nil || !strings.Contains(err.Error(), "internal subcommand") {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+}

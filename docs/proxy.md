@@ -64,6 +64,8 @@ users retain their keys on their own computers instead.
 Use `policy/examples/proxy-only.rego`, `--restricted`, and configured audit
 logging for gateway-only users. The same destination allowlist also applies to
 `gateway start` and native SSH `direct-tcpip`, so these cannot circumvent it.
+Without `ADSSH_PROXY_CONFIG`, `proxy` is refused and native forwarding is
+gated by Rego policy and entitlements, without a destination allowlist.
 The core build reserves `proxy` and refuses it as enterprise-only.
 
 ## TCP clients and client-held SSH keys
@@ -103,6 +105,11 @@ Renamed interactive identities are refused; reconnect using the authorized
 account. The child performs the actual connection under that Unix account.
 Authorization records identify the destination; `PROXY_RESULT` records the
 child-reported completed/failed outcome without credentials or terminal bytes.
+The listener accepts one result per earlier authorization in the same session
+(at most 64 pending; a session's entries end with it). The shell refuses
+typed `proxy _resolve` and `proxy _result`, including through `command`,
+`exec`, `par`, `runbook` and `lease`; only the proxy vbin sends them. Outcomes are still child-reported, so
+a compromised session process could misreport one.
 These are not an independent network packet or remote-command audit.
 
 This is an application-level access gate, **not an OS network sandbox**. An

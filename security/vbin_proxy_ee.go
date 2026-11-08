@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -59,6 +60,9 @@ func (proxyBinary) Run(ctx context.Context, args []string) error {
 		port, err := strconv.ParseUint(args[3], 10, 16)
 		if err != nil || port == 0 || !proxyToken(args[2]) || (args[4] != "completed" && args[4] != "failed") {
 			return errors.New("proxy: invalid result")
+		}
+		if !proxyPending.consume(sid, net.JoinHostPort(args[2], args[3])) {
+			return errors.New("proxy: result has no authorized connection")
 		}
 		return eng.LogEvent(fmt.Sprintf("PROXY_RESULT user=%s session=%s target=%s outcome=%s", user, sid, net.JoinHostPort(args[2], args[3]), args[4]))
 	}
@@ -109,20 +113,22 @@ func (proxyBinary) Run(ctx context.Context, args []string) error {
 		var out, stderr limitedBuffer
 		out.limit, stderr.limit = 16384, 4096
 		code, err := fn([]string{"proxy", "_resolve", host, strconv.FormatUint(port, 10)}, sys.MonitorStdinNone, nil, &out, &stderr)
-		if err != nil {
-			return fmt.Errorf("proxy: authorization: %w", err)
-		}
-		if code != 0 {
+		if err == nil && code != 0 {
 			return errors.New("proxy: destination authorization refused")
 		}
-		if err := json.Unmarshal(out.Bytes(), &target); err != nil {
-			return errors.New("proxy: invalid listener response")
+		// From here the listener may hold an authorization for this
+		// destination, so every failure is reported as a failed result.
+		if err != nil {
+			err = fmt.Errorf("proxy: authorization: %w", err)
+		} else if json.Unmarshal(out.Bytes(), &target) != nil {
+			err = errors.New("proxy: invalid listener response")
+		} else if target.Host != host || target.Port != uint32(port) {
+			err = errors.New("proxy: listener destination mismatch")
+		} else {
+			err = target.validate()
 		}
-		if target.Host != host || target.Port != uint32(port) {
-			return errors.New("proxy: listener destination mismatch")
-		}
-		if err := target.validate(); err != nil {
-			return err
+		if err != nil {
+			return errors.Join(err, reportProxyResult(ctx, host, port, "failed"))
 		}
 	} else {
 		target, err = resolveProxy(eng, sid, host, uint32(port))
@@ -139,23 +145,25 @@ func (proxyBinary) Run(ctx context.Context, args []string) error {
 	if err != nil {
 		outcome = "failed"
 	}
+	return errors.Join(err, reportProxyResult(ctx, host, port, outcome))
+}
+
+// reportProxyResult records the outcome through the listener (or directly in
+// a local session), consuming the authorization resolveProxy recorded.
+func reportProxyResult(ctx context.Context, host string, port uint64, outcome string) error {
 	resultArgs := []string{"proxy", "_result", host, strconv.FormatUint(port, 10), outcome}
-	var auditErr error
-	if RemoteGateProcess() {
-		fn := currentRemoteRun()
-		if fn == nil {
-			auditErr = errors.New("proxy: result monitor unavailable")
-		} else {
-			code, e := fn(resultArgs, sys.MonitorStdinNone, nil, io.Discard, io.Discard)
-			auditErr = e
-			if e == nil && code != 0 {
-				auditErr = errors.New("proxy: result audit refused")
-			}
-		}
-	} else {
-		auditErr = (proxyBinary{}).Run(ctx, resultArgs)
+	if !RemoteGateProcess() {
+		return (proxyBinary{}).Run(ctx, resultArgs)
 	}
-	return errors.Join(err, auditErr)
+	fn := currentRemoteRun()
+	if fn == nil {
+		return errors.New("proxy: result monitor unavailable")
+	}
+	code, err := fn(resultArgs, sys.MonitorStdinNone, nil, io.Discard, io.Discard)
+	if err == nil && code != 0 {
+		err = errors.New("proxy: result audit refused")
+	}
+	return err
 }
 
 func proxyIdentity(eng *Engine, sid string) (string, error) {
@@ -183,8 +191,74 @@ func resolveProxy(eng *Engine, sid, host string, port uint32) (proxyTarget, erro
 		return proxyTarget{}, err
 	}
 	// The configured literal IP is intentional: aliases need no DNS record.
-	err = eng.AuthorizeGateway(GatewayPolicyRequest{SessionID: sid, Action: "proxy", TargetHost: host, TargetIP: target.IP, TargetPort: port})
-	return target, err
+	// Reserve before authorizing, so the audit never shows an allowed
+	// destination that the pending cap then refused.
+	key := net.JoinHostPort(host, strconv.Itoa(int(port)))
+	if err := proxyPending.add(sid, key); err != nil {
+		return proxyTarget{}, err
+	}
+	if err := eng.AuthorizeGateway(GatewayPolicyRequest{SessionID: sid, Action: "proxy", TargetHost: host, TargetIP: target.IP, TargetPort: port}); err != nil {
+		proxyPending.consume(sid, key)
+		return proxyTarget{}, err
+	}
+	return target, nil
+}
+
+// maxProxyPending bounds authorizations awaiting a result in one session.
+const maxProxyPending = 64
+
+// proxyPending binds each PROXY_RESULT to one earlier authorization in the
+// same session, so a typed `proxy _result` cannot write an outcome for a
+// destination that was never authorized. A session's entries are dropped
+// when it unregisters.
+var proxyPending = &proxyPendingSet{bySession: map[string]map[string]int{}}
+
+func init() { sys.OnSessionUnregister(proxyPending.drop) }
+
+type proxyPendingSet struct {
+	mu        sync.Mutex
+	bySession map[string]map[string]int
+}
+
+func (p *proxyPendingSet) add(sid, target string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m := p.bySession[sid]
+	if m == nil {
+		m = map[string]int{}
+		p.bySession[sid] = m
+	}
+	total := 0
+	for _, n := range m {
+		total += n
+	}
+	if total >= maxProxyPending {
+		return errors.New("proxy: too many connections awaiting a result")
+	}
+	m[target]++
+	return nil
+}
+
+func (p *proxyPendingSet) drop(sid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.bySession, sid)
+}
+
+func (p *proxyPendingSet) consume(sid, target string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m := p.bySession[sid]
+	if m[target] == 0 {
+		return false
+	}
+	if m[target]--; m[target] == 0 {
+		delete(m, target)
+	}
+	if len(m) == 0 {
+		delete(p.bySession, sid)
+	}
+	return true
 }
 
 func proxyDial(ctx context.Context, target proxyTarget) (net.Conn, error) {
@@ -356,7 +430,7 @@ func proxySSH(ctx context.Context, hc interp.HandlerContext, target proxyTarget)
 		if err != nil {
 			return err
 		}
-		defer term.Restore(int(f.Fd()), state)
+		defer func() { _ = term.Restore(int(f.Fd()), state) }()
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return err
@@ -397,7 +471,7 @@ func proxySSH(ctx context.Context, hc interp.HandlerContext, target proxyTarget)
 		}()
 	}
 	done := make(chan struct{})
-	go func() { defer close(done); io.Copy(stdin, proxyInput{inputCtx, hc.Stdin}); stdin.Close() }()
+	go func() { defer close(done); _, _ = io.Copy(stdin, proxyInput{inputCtx, hc.Stdin}); _ = stdin.Close() }()
 	err = session.Wait()
 	cancel()
 	<-done

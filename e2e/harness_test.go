@@ -71,9 +71,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// buildBinary runs `go build -o out pkg` from the module root.
+// buildBinary runs `go build -o out pkg` from the module root. The limit
+// covers a cold module and build cache: macOS runners exceeded 5 minutes
+// once the setup-go cache was evicted.
 func buildBinary(root, out, pkg string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, pkg)
 	cmd.Dir = root

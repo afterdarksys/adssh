@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -189,6 +190,61 @@ func TestProxyMonitorUsesBoundUserAndListsOnlyOwnTargets(t *testing.T) {
 	if err := sshListenerRunRefusal([]string{"proxy", "app", "22"}); err == nil {
 		t.Fatal("listener accepted interactive session")
 	}
+	// One result per authorization: the resolve above allows exactly one.
+	sendRun(t, c, 4, []string{"proxy", "_result", "app", "22", "completed"}, nil)
+	if res = readRun(t, c, 4); res.exit.Code != 0 {
+		t.Fatalf("result: %+v %s", res.exit, res.stderr.String())
+	}
+	for i, args := range [][]string{
+		{"proxy", "_result", "app", "22", "completed"},
+		{"proxy", "_result", "secret", "22", "completed"},
+		{"proxy", "_result", "never", "443", "failed"},
+	} {
+		sendRun(t, c, uint64(5+i), args, nil)
+		if res = readRun(t, c, uint64(5+i)); res.exit.Code == 0 {
+			t.Fatalf("accepted unbound result %v", args)
+		}
+	}
+}
+
+func TestProxyResultRequiresPendingAuthorization(t *testing.T) {
+	writeProxyFixture(t, proxyConfig{Users: map[string][]proxyTarget{"alice": {{Host: "app", IP: "10.0.0.1", Port: 22}}}})
+	eng, chain, _ := chainEngine(t)
+	const sid = "proxy-result-alice"
+	if err := eng.BindSessionIdentity(sid, "alice", nil); err != nil {
+		t.Fatal(err)
+	}
+	result := []string{"proxy", "_result", "app", "22", "completed"}
+	report := func() error {
+		code, err := eng.RunVBinForSession(context.Background(), sid, result, nil, io.Discard, io.Discard)
+		if err == nil && code != 0 {
+			err = errors.New("nonzero exit")
+		}
+		return err
+	}
+	if err := report(); err == nil {
+		t.Fatal("forged result without authorization")
+	}
+	for i := 0; i < maxProxyPending; i++ {
+		if _, err := resolveProxy(eng, sid, "app", 22); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resolveProxy(eng, sid, "app", 22); err == nil {
+		t.Fatal("pending authorizations unbounded")
+	}
+	for i := 0; i < maxProxyPending; i++ {
+		if err := report(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := report(); err == nil {
+		t.Fatal("result replayed")
+	}
+	data, err := os.ReadFile(chain)
+	if err != nil || strings.Count(string(data), "PROXY_RESULT") != maxProxyPending {
+		t.Fatalf("result audit count: %d %v", strings.Count(string(data), "PROXY_RESULT"), err)
+	}
 }
 
 func TestProxyTCPRoundTripAndCancellation(t *testing.T) {
@@ -215,7 +271,10 @@ func TestProxyTCPRoundTripAndCancellation(t *testing.T) {
 	go func() { done <- proxyTCP(cctx, interp.HandlerContext{Stdin: r, Stdout: io.Discard}, target) }()
 	ccancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled relay reported success")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("cancel stuck")
 	}
@@ -271,7 +330,7 @@ func TestProxySSHAuthenticatesAndRejectsWrongHostKey(t *testing.T) {
 			}
 			func() {
 				defer conn.Close()
-				conn.SetDeadline(time.Now().Add(3 * time.Second))
+				_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 				s, chans, reqs, e := ssh.NewServerConn(conn, config)
 				if e != nil {
 					return
@@ -285,13 +344,13 @@ func TestProxySSHAuthenticatesAndRejectsWrongHostKey(t *testing.T) {
 					}
 					for req := range requests {
 						if req.Type == "shell" {
-							req.Reply(true, nil)
-							stream.Write([]byte("internal-shell\n"))
-							stream.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+							_ = req.Reply(true, nil)
+							_, _ = stream.Write([]byte("internal-shell\n"))
+							_, _ = stream.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 							stream.Close()
 							return
 						}
-						req.Reply(false, nil)
+						_ = req.Reply(false, nil)
 					}
 				}
 			}()
@@ -315,5 +374,40 @@ func TestProxySSHAuthenticatesAndRejectsWrongHostKey(t *testing.T) {
 	case <-done:
 	case <-ctx.Done():
 		t.Fatal("server stuck")
+	}
+}
+
+func TestProxyPendingDroppedWithSessionAndCapNotAuditedAsAllow(t *testing.T) {
+	writeProxyFixture(t, proxyConfig{Users: map[string][]proxyTarget{"alice": {{Host: "app", IP: "10.0.0.1", Port: 22}}}})
+	eng, chain, _ := chainEngine(t)
+	const sid = "proxy-pending-drop"
+	if err := sys.RegisterSession(&sys.Session{ID: sid, User: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.BindSessionIdentity(sid, "alice", nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxProxyPending; i++ {
+		if _, err := resolveProxy(eng, sid, "app", 22); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveProxy(eng, sid, "app", 22); err == nil {
+		t.Fatal("cap not enforced")
+	}
+	after, err := os.ReadFile(chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("refused-at-cap authorization reached the audit chain: %s", after[len(before):])
+	}
+	sys.UnregisterSession(sid)
+	if proxyPending.consume(sid, "app:22") {
+		t.Fatal("pending authorization survived session end")
 	}
 }
