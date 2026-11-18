@@ -444,3 +444,10 @@ go build -buildmode=plugin -o myplugin.so ./example_plugin
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Optional local userland
+
+`make build-userland` builds a per-user gRPC daemon and bundled u-root worker for
+`cat`, `find`, `grep`, `head`, and `ls`. Invoke commands through `userland exec`
+with shell and daemon policy enforcement. See [setup and limits](docs/userland.md)
+and [upstream credits](third_party/README.md).

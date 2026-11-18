@@ -120,6 +120,12 @@ a human at the terminal.
 XDG-aware path defaults (`xdg.go`), and `profile.go` loads the Starlark login profile
 (`~/.adsshprofile`) and RC script (`~/.adsshrc`) into the shared globals dict at startup.
 
+**Optional userland (`cmd/adssh-userland/`, `internal/userland/`).** `userland exec`
+uses a local gRPC Unix socket and an isolated u-root worker. Both endpoints verify
+the peer UID. The daemon requires policy and audit, and refuses root. It does not
+replace host commands or implement the suite handoff. Build with
+`make build-userland`; run `make test-userland`. See `docs/userland.md`.
+
 ## Configuration
 
 Behavior is driven by `ADSSH_*` environment variables (see `internal/config/env.go` for the full list and

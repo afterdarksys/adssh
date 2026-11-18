@@ -1,0 +1,34 @@
+syntax = "proto3";
+package adssh.userland.v1;
+option go_package = "github.com/afterdarksys/adssh/internal/userland/pb";
+
+// Local, per-user execution. Identity is derived from the Unix peer, never RPC data.
+service Userland {
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  rpc Execute(stream ExecuteRequest) returns (stream ExecuteResponse);
+}
+message DescribeRequest {}
+message DescribeResponse {
+  string protocol = 1;
+  string implementation = 2;
+  repeated string commands = 3;
+}
+message Start {
+  repeated string argv = 1;
+  string directory = 2;
+}
+message ExecuteRequest {
+  oneof event {
+    Start start = 1;
+    bytes stdin = 2;
+    bool eof = 3;
+  }
+}
+message Exit { int32 code = 1; }
+message ExecuteResponse {
+  oneof event {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    Exit exit = 3;
+  }
+}

@@ -51,4 +51,15 @@ lint:
 	fi
 
 clean:
-	rm -f $(BINARY) $(MCP_BINARY)
+	rm -f $(BINARY) $(MCP_BINARY) adssh-userland adssh-userland-worker
+
+# Local per-user userland daemon and pinned u-root multicall worker.
+.PHONY: build-userland test-userland
+build-userland:
+	go build $(LDFLAGS) -o adssh-userland ./cmd/adssh-userland
+	scripts/build-userland-worker.sh
+
+test-userland: build-userland
+	go test ./internal/userland/... ./cmd/adssh-userland
+	cd tools/userland && go test ./...
+	go test -tags userland_integration ./internal/userland -run TestBundledWorker -count=1

@@ -441,3 +441,11 @@ Prefer tests around `Run(ctx, args)` with a handler context over end-to-end shel
 | Starlark-defined VBINs | `sys.register_command` already covers this use case for simple cases |
 | VBIN argument completion | Extend the `VirtualBinary` interface with an optional `Complete(args []string) []string` method |
 | Extended metadata | Add optional categories, portability tier, examples, and output format metadata |
+
+## Optional userland backend
+
+`userland list` discovers the local daemon catalog; `userland exec <command>`
+streams a bundled command over gRPC. This VBIN is an explicit optional backend,
+not a zero-dependency replacement for existing VBINs. The daemon and bundled
+worker must be installed together. Both wrapper and child command are governed;
+the daemon independently authenticates and authorizes. See [userland.md](userland.md).

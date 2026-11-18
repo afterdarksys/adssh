@@ -23,3 +23,6 @@ test_env
 .omc/
 .tool-versions
 dist-linux/
+
+/adssh-userland
+/adssh-userland-worker
