@@ -121,15 +121,15 @@ type Engine struct {
 	identityMu sync.RWMutex
 	identities map[string]sessionIdentity
 
-	// ext holds per-engine state that *_ee.go files create on first use
-	// (see extension). The core build leaves it empty.
+	// ext holds per-engine feature state created on first use (see extension),
+	// including file watches and enterprise-only features.
 	extMu sync.Mutex
 	ext   map[string]any
 }
 
 // extension returns the per-engine value stored under key, creating it with
-// create on first use. Enterprise files keep their engine state here so the
-// core Engine type does not name enterprise types.
+// create on first use. Optional features keep their engine state here so the
+// core Engine type does not need to name their implementation types.
 func (e *Engine) extension(key string, create func() any) any {
 	e.extMu.Lock()
 	defer e.extMu.Unlock()

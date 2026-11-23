@@ -238,6 +238,8 @@ The default expectation is Portable. Use a lower tier only when the command's pu
 | `evidence` | `security/vbin_evidence.go` | Full-chain-verified, filtered audit evidence bundles |
 | `lease` | `security/vbin_lease.go` | TTL-bounded command environment secrets with output redaction |
 | `stty` | `security/vbin_stty.go` | Terminal mode controls |
+| `filter` | `security/vbin_filter.go` | Bounded regular-file line matching with `-r` regex or `-s` literal string |
+| `watch` | `security/vbin_watch.go` | Session-local SHA-256 baselines and timestamped observations; not Unix periodic `watch` |
 | `proc` | `security/vbin_proc.go` | Linux `/proc` filesystem accessor — `proc get|set <path> [value]` |
 | `package` | `security/vbin_package.go` | Cross-distro package manager wrapper — `package install|remove|update|list <pkg>` |
 | `grid`, `flight`, `agent`, `worktree`, `repo` | `internal/grid/vbin.go`, `internal/grid/grid.go` | sah-grid membership on a loopback TLS listener, supervised agent flights, and scratch worktrees; the policy gate is injected (`grid.SetGate`) |

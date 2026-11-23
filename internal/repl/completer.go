@@ -96,6 +96,8 @@ var cmdgenProviders = []string{"docker", "kubectl", "aws"}
 
 // vbinSubcommands maps a vbin name to its recognized first-argument completions.
 var vbinSubcommands = map[string][]string{
+	"filter":   {"-r", "-s"},
+	"watch":    {"set", "get", "list", "remove"},
 	"stty":     {"sane", "size", "echo", "-echo", "raw", "-raw", "rows", "cols"},
 	"history":  {"-c", "-d"},
 	"fc":       {"-l", "-e"},
